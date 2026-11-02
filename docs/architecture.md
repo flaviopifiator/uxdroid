@@ -59,7 +59,7 @@ Not translated yet: static initializers with non-zero bionic values, such as `PT
 
 ### ART is built for the host, not borrowed from a device
 
-ART's host build links against a glibc 2.17 sysroot and needs no bionic, so `dalvikvm` is an ordinary Linux program. A device APEX was rejected: it writes bionic's TLS slots, which overlap glibc's thread control block. `master-art` builds in Docker with `runtime/art/build.sh`, and the result runs in a plain Ubuntu with no Android tree.
+ART's host build links against a glibc 2.17 sysroot and needs no bionic, so `dalvikvm` is an ordinary Linux program. A device APEX was rejected: it writes bionic's TLS slots, which overlap glibc's thread control block. The pinned `master-art` tree downloads with `runtime/art/sync.sh` and builds in Docker with `runtime/art/build.sh`, and the result runs in a plain Ubuntu with no Android tree.
 
 ## Roadmap
 

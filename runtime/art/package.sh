@@ -22,17 +22,31 @@ done
 find "$RUNTIME/lib64" -name '*.so' -exec /aosp/prebuilts/clang/host/linux-x86/clang-r547379/bin/llvm-strip --strip-debug {} +
 
 cd /aosp
-for project in art libcore libnativehelper external/icu external/okhttp external/bouncycastle \
-    external/conscrypt external/apache-xml external/zlib external/lz4 external/libcxx external/libcxxabi \
-    external/libunwind_llvm external/fmtlib external/tinyxml2 system/libbase system/logging \
-    system/unwinding bionic; do
-    for name in NOTICE LICENSE; do
-        if [ -f "$project/$name" ]; then
-            target="$RUNTIME/notices/${project//\//_}.$name"
-            cp "$project/$name" "$target"
-        fi
-    done
-done
+# Every shipped component with its notice. A missing file fails the package, never skipping quietly.
+while read -r name source; do
+    cp "$source" "$RUNTIME/notices/$name"
+done <<'NOTICES'
+art art/NOTICE
+libcore libcore/NOTICE
+libcore-license libcore/LICENSE
+libnativehelper libnativehelper/NOTICE
+okhttp external/okhttp/LICENSE
+bouncycastle external/bouncycastle/NOTICE
+apache-xml external/apache-xml/NOTICE
+zlib external/zlib/LICENSE
+lz4 external/lz4/LICENSE
+fmtlib external/fmtlib/NOTICE
+libcxx external/libcxx/LICENSE.TXT
+libcxxabi external/libcxxabi/NOTICE
+libbase system/libbase/NOTICE
+oj-libjdwp-GPL-with-Classpath-exception external/oj-libjdwp/LICENSE
+icu prebuilts/runtime/mainline/i18n/sdk/licenses/external/icu/NOTICE
+conscrypt prebuilts/module_sdk/conscrypt/current/licenses/external/conscrypt/NOTICE
+vixl external/vixl/LICENCE
+expat external/expat/COPYING
+sqlite external/sqlite/LICENSE
+lzma external/lzma/NOTICE
+NOTICES
 
 JDK=$(ls -d prebuilts/jdk/jdk*/linux-x86 | sort -V | tail -1)
 WORK=$(mktemp -d)

@@ -14,6 +14,9 @@ COMPETITOR_ENV=(env -u ANDROID_ROOT -u ANDROID_ART_ROOT -u ANDROID_I18N_ROOT -u 
     "PATH=$P/bin:$PATH" "LD_LIBRARY_PATH=$P/lib:$P/lib64" "ANDROID_DATA=/tmp/competitor-data" "XDG_DATA_DIRS=$P/share")
 mkdir -p /tmp/competitor-data
 
+# The options that make uxdroid faster or smaller apply to the competitor too.
+SHARED_FLAGS=(-Xnorelocate -XX:HeapMinFree=256k -XX:HeapMaxFree=1m)
+
 # The competitor compiles its boot image and each app on first use, which is not counted here.
 "${COMPETITOR_ENV[@]}" "$P/bin/dalvikvm" -cp "$SAMPLES/Hello.jar" Hello >/dev/null 2>&1
 "${COMPETITOR_ENV[@]}" "$P/bin/dalvikvm" -cp "$SAMPLES/Compute.jar" Compute >/dev/null 2>&1
@@ -25,8 +28,8 @@ for program in Hello Compute; do
     printf '  %-20s ' uxdroid-art-nojit
     "${UXDROID_ENV[@]}" "$MEASURE" "$RUNS" "${UXDROID[@]}" -Xusejit:false -cp "$SAMPLES/$program.jar" "$program"
     printf '  %-20s ' art_standalone
-    "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" -cp "$SAMPLES/$program.jar" "$program"
+    "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" "${SHARED_FLAGS[@]}" -cp "$SAMPLES/$program.jar" "$program"
     printf '  %-20s ' art_standalone-nojit
-    "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" -Xusejit:false -cp "$SAMPLES/$program.jar" "$program"
+    "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" "${SHARED_FLAGS[@]}" -Xusejit:false -cp "$SAMPLES/$program.jar" "$program"
 done
 echo "installed: uxdroid $(du -sh "$RUNTIME" | cut -f1), art_standalone $(du -sh "$P" | cut -f1) plus generated boot image $(du -sh "$HOME/.cache/art" 2>/dev/null | cut -f1)"

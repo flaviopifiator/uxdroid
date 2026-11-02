@@ -197,6 +197,4 @@
   <project name="platform/tools/tradefederation/contrib" path="tools/tradefederation/contrib" revision="edc83060c851773cc8c8ed4d568664d97067d8d9" upstream="main" dest-branch="main" groups="pdk,tradefed"/>
   <project name="toolchain/pgo-profiles" revision="e9f2453456ef50dc9c670d5e582883de494760d5" upstream="main" dest-branch="main" groups="pdk"/>
   <project name="tools/platform-compat" revision="88aaf9df5107403b278dfa4dcff9b5ec2455bf06" upstream="main" dest-branch="main" groups="pdk,pdk-cw-fs,pdk-fs"/>
-  
-  <superproject name="platform/superproject" revision="master-art"/>
 </manifest>
