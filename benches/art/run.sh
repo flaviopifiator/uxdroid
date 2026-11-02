@@ -5,11 +5,13 @@ RUNS="${RUNS:-30}"
 MEASURE=/opt/first_output
 source /work/runtime/art/run.sh
 SAMPLES="$RUNTIME/samples"
-UXDROID=("$RUNTIME/bin/dalvikvm64" -Xbootclasspath:"$BOOT" -Xbootclasspath-locations:"$BOOT" -Ximage:"$RUNTIME/framework/boot.art")
+UXDROID=("$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}")
 UXDROID_ENV=(env "LD_LIBRARY_PATH=$RUNTIME/lib64")
 
 P=/competitor/install
-COMPETITOR_ENV=(env "PATH=$P/bin:$PATH" "LD_LIBRARY_PATH=$P/lib:$P/lib64" "ANDROID_DATA=/tmp/competitor-data" "XDG_DATA_DIRS=$P/share")
+# uxdroid's variables must not reach the competitor: ANDROID_ROOT disables its boot image.
+COMPETITOR_ENV=(env -u ANDROID_ROOT -u ANDROID_ART_ROOT -u ANDROID_I18N_ROOT -u ANDROID_TZDATA_ROOT
+    "PATH=$P/bin:$PATH" "LD_LIBRARY_PATH=$P/lib:$P/lib64" "ANDROID_DATA=/tmp/competitor-data" "XDG_DATA_DIRS=$P/share")
 mkdir -p /tmp/competitor-data
 
 # The competitor compiles its boot image and each app on first use, which is not counted here.
@@ -18,9 +20,13 @@ mkdir -p /tmp/competitor-data
 
 for program in Hello Compute; do
     echo "$program"
-    printf '  %-16s ' uxdroid-art
+    printf '  %-20s ' uxdroid-art
     "${UXDROID_ENV[@]}" "$MEASURE" "$RUNS" "${UXDROID[@]}" -cp "$SAMPLES/$program.jar" "$program"
-    printf '  %-16s ' art_standalone
+    printf '  %-20s ' uxdroid-art-nojit
+    "${UXDROID_ENV[@]}" "$MEASURE" "$RUNS" "${UXDROID[@]}" -Xusejit:false -cp "$SAMPLES/$program.jar" "$program"
+    printf '  %-20s ' art_standalone
     "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" -cp "$SAMPLES/$program.jar" "$program"
+    printf '  %-20s ' art_standalone-nojit
+    "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" -Xusejit:false -cp "$SAMPLES/$program.jar" "$program"
 done
-du -sh "$RUNTIME" "$P" | tr '\n' ' '; echo
+echo "installed: uxdroid $(du -sh "$RUNTIME" | cut -f1), art_standalone $(du -sh "$P" | cut -f1) plus generated boot image $(du -sh "$HOME/.cache/art" 2>/dev/null | cut -f1)"

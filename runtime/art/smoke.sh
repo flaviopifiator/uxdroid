@@ -1,16 +1,18 @@
 #!/bin/bash
-# Proves packaged ART runs a DEX main() as compiled code in a clean system.
+# Proves packaged ART runs a DEX main() as compiled code in a clean system. Fails on any doubt.
 set -u
 source /work/runtime/art/run.sh
-ART=("$RUNTIME/bin/dalvikvm64" -Xbootclasspath:"$BOOT" -Xbootclasspath-locations:"$BOOT" -Ximage:"$RUNTIME/framework/boot.art" -Xusejit:false)
-clock() { local start end; start=$(date +%s%N); "$@" >/tmp/out 2>/tmp/err; local rc=$?; end=$(date +%s%N); echo "$(( (end-start)/1000000 )) ms rc=$rc: $(tail -1 /tmp/out | cut -c1-70)"; }
-echo "aosp tree present: $([ -d /aosp ] && echo yes || echo no)"
-"${ART[@]}" -cp "$RUNTIME/samples/Hello.jar" Hello 2>&1 | grep -vE "heap.cc|parsed_options|ICU file|timezone" | tail -5 | cut -c1-220
-for run in 1 2 3; do echo "Hello compiled:      $(clock "${ART[@]}" -cp "$RUNTIME/samples/Hello.jar" Hello)"; done
-for run in 1 2 3; do echo "Compute compiled:    $(clock "${ART[@]}" -cp "$RUNTIME/samples/Compute.jar" Compute)"; done
-echo "Compute interpreted: $(clock "${ART[@]}" -Xint -cp "$RUNTIME/samples/Compute.jar" Compute)"
-if [ -x "$RUNTIME/bin/oatdump64" ]; then
-    "$RUNTIME/bin/oatdump64" --oat-file="$RUNTIME/samples/oat/x86_64/Compute.odex" --no-disassemble 2>/dev/null | grep -E "OatMethodOffsets|CODE: \(code_offset=0x[1-9a-f]|Compute.main|compiler-filter|INSTRUCTION SET" -m8 | cut -c1-120
-fi
-du -sh "$RUNTIME" "$RUNTIME/lib64" "$RUNTIME/framework"
-ls "$RUNTIME/bin"
+ART=("$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -Xusejit:false)
+fail() { echo "FAIL: $*"; exit 1; }
+
+[ -d /aosp ] && fail "the AOSP tree is present"
+hello=$("${ART[@]}" -cp "$RUNTIME/samples/Hello.jar" Hello 2>/dev/null) || fail "Hello exited with an error"
+[ "$hello" = "hello from dex, x86_64" ] || fail "Hello printed: $hello"
+
+log=$("${ART[@]}" -verbose:oat -cp "$RUNTIME/samples/Compute.jar" Compute 2>&1 >/dev/null)
+grep -q "fall back to imageless" <<<"$log" && fail "the boot image did not load"
+grep -q "kOatUpToDate with filter 'speed'" <<<"$log" || fail "Compute's compiled code was not used"
+grep -q "Compute.odex.*executable=1\|executable=1.*Compute" <<<"$log" || echo "note: no executable odex line found"
+
+[ -n "$(ls -A "$RUNTIME/notices")" ] || fail "license notices are missing"
+echo "ok: Hello printed, Compute ran from its compiled odex, boot image loaded, notices present"

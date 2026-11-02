@@ -4,8 +4,8 @@ FROM ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git python3 repo \
        build-essential unzip zip rsync bison flex \
-    && mkdir -p /aosp \
-    && chown 1000:1000 /aosp
+    && mkdir -p /aosp /runtime \
+    && chown 1000:1000 /aosp /runtime
 
 USER 1000:1000
 WORKDIR /aosp

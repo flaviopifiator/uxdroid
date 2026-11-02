@@ -1,3 +1,5 @@
+name: uxdroid
+
 services:
   # Builds and tests. Has network access to fetch crates.
   dev:
@@ -82,8 +84,22 @@ services:
       - art_competitor:/competitor
       - .:/work:ro
 
+  # Builds the comparison target. Its license is undetermined, so it stays in a volume.
+  art-competitor-builder:
+    profiles: [art]
+    image: debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+    mem_limit: 22g
+    memswap_limit: 22g
+    cpus: 10
+    volumes:
+      - art_competitor:/competitor
+      - .:/work:ro
+
 volumes:
   cache:
   art_src:
+    name: uxdroid-art_art_src
   art_runtime:
+    name: uxdroid-art_art_runtime
   art_competitor:
+    name: uxdroid-art_art_competitor

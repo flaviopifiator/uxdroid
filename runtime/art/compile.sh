@@ -1,6 +1,6 @@
 #!/bin/bash
 # Compiles the boot image and sample apps to x86_64 machine code with dex2oat.
-set -eu
+set -eu -o pipefail
 source /work/runtime/art/run.sh
 IMAGE_DIR="$RUNTIME/framework/x86_64"
 mkdir -p "$IMAGE_DIR" "$RUNTIME/samples/oat/x86_64"
@@ -11,7 +11,7 @@ done
 time "$RUNTIME/bin/dex2oat64" --runtime-arg -Xms64m --runtime-arg -Xmx1g \
     --compiler-filter=speed --instruction-set=x86_64 --android-root="$RUNTIME" --host \
     --base=0x70000000 "${DEX_ARGS[@]}" \
-    --image="$IMAGE_DIR/boot.art" --oat-file="$IMAGE_DIR/boot.oat" --no-inline-from=core-oj.jar 2>&1 | tail -3 | cut -c1-200
+    --image="$IMAGE_DIR/boot.art" --oat-file="$IMAGE_DIR/boot.oat" 2>&1 | tail -3 | cut -c1-200
 du -sh "$IMAGE_DIR"
 for program in Hello Compute; do
     "$RUNTIME/bin/dex2oat64" --compiler-filter=speed --instruction-set=x86_64 --host \

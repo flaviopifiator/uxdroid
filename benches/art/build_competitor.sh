@@ -12,7 +12,7 @@ apt-get update -qq
 apt-get install -y -qq --no-install-recommends ca-certificates git gcc g++ make autoconf automake libtool \
     default-jdk python-is-python3 meson ninja-build libegl-dev pkg-config libbsd-dev libunwind-dev \
     libelf-dev valgrind libicu-dev libssl-dev libexpat1-dev zip unzip liblz4-dev liblzma-dev libcap-dev \
-    zlib1g-dev libpng-dev >/dev/null
+    zlib1g-dev libpng-dev file >/dev/null
 
 mkdir -p /competitor/src
 cd /competitor/src
@@ -56,5 +56,9 @@ if ! make -k -j6 ____PREFIX="$PREFIX" ____LIBDIR=lib > /competitor/build.log 2>&
     exit 1
 fi
 make ____PREFIX="$PREFIX" ____LIBDIR=lib install 2>&1 | tail -3 | cut -c1-220
+# uxdroid's runtime has no debug info either, so sizes compare the same thing.
+find "$PREFIX" \( -name '*.so' -o -name '*.so.*' -o -path "$PREFIX/bin/*" \) -type f \
+    -exec sh -c 'file -b "$1" | grep -q ELF && strip --strip-debug "$1"' _ {} \;
+chown -R 1000:1000 "$PREFIX"
 du -sh "$PREFIX"
 ls "$PREFIX/bin" | head -20
