@@ -1,0 +1,16 @@
+[package]
+name = "uxdroid-cli"
+description = "Command line interface for uxdroid"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "uxdroid"
+path = "src/main.rs"
+
+[dependencies]
+uxdroid-apk = { path = "../apk" }
+
+[dev-dependencies]
+uxdroid-testkit = { path = "../testkit" }

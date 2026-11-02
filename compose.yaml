@@ -1,0 +1,24 @@
+services:
+  # Builds and tests. Has network access to fetch crates.
+  dev:
+    build: .
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - .:/work
+      - cache:/cache
+
+  # Handles untrusted APKs: no network, source and samples read-only.
+  sandbox:
+    extends: dev
+    network_mode: none
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - .:/work:ro
+      - cache:/cache:ro
+      - ${UXDROID_SAMPLES:-./samples}:/samples:ro
+
+volumes:
+  cache:
