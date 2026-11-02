@@ -9,10 +9,12 @@ docker compose --profile art run --rm -T art-builder bash /work/runtime/art/sync
 docker compose --profile art run --rm -T art-builder bash /work/runtime/art/build.sh
 docker compose --profile art run --rm -T art-builder bash /work/runtime/art/package.sh
 docker compose --profile art run --rm -T art-builder bash /work/runtime/art/compile.sh
+docker compose --profile art run --rm -T art-builder bash /work/runtime/art/build_platform.sh
 docker compose --profile art run --rm -T art-runtime bash /work/runtime/art/smoke.sh
 
 docker compose --profile art run --rm -T art-competitor-builder bash /work/benches/art/build_competitor.sh
 docker compose --profile art run --rm -T art-bench bash /work/benches/art/run.sh
+docker compose run --rm -T dev bash /work/benches/art/first_frame.sh
 ```
 
 ## Last result
@@ -25,20 +27,18 @@ docker compose --profile art run --rm -T art-bench bash /work/benches/art/run.sh
 | `Compute` | 71.4 ms (47.3 MiB) | **71.2 ms** (46.9 MiB) | 75.2 ms (40.5 MiB) | 72.2 ms (**38.1 MiB**) |
 | Installed | 172 MiB | | 115 MiB, including its 68 MiB generated boot image | |
 
-**`art_standalone` still wins this comparison**: 27% faster on `Hello` startup, 15 to 19% less peak memory, and a smaller installation. uxdroid is about level on `Compute` time.
+**`art_standalone` still wins this comparison.** Against its best setting, no JIT, uxdroid takes 27% more time to start `Hello` and uses 17 to 23% more peak memory. With the JIT on, which is how `uxdroid run` works, those gaps are 5% on time and 10 to 17% on memory. uxdroid is about level on `Compute` time, and its installation is larger.
 
 ### Where the difference is
 
-From `/proc/self/smaps` on a small probe, without JIT:
+From `/proc/self/smaps` on a small probe, without JIT, reproduced independently:
 
 | Mapping | uxdroid | `art_standalone` |
 |---------|---------|------------------|
 | `libart.so` resident | 12.2 MiB | 6.1 MiB |
 | `boot.art` dirty | 1.3 MiB | 0.1 MiB |
-| Heap | 5.6 MiB | 4.7 MiB |
-| All private dirty | 9.9 MiB | 6.6 MiB |
 
-The next memory work is a smaller `libart.so`, and grouping the boot image's written objects with `--dirty-image-objects`.
+Heap and total private dirty memory also favor the competitor, by amounts that vary between probes. The next memory work is a smaller `libart.so`, and grouping the boot image's written objects with `--dirty-image-objects`.
 
 ### What already helped
 
@@ -46,7 +46,7 @@ The next memory work is a smaller `libart.so`, and grouping the boot image's wri
 |--------|----------------------------------------|
 | `-Xnorelocate` | `Hello` 26.8 to 20.2 ms; private dirty 19.9 to 11.7 MiB |
 | Heap limits | `Compute` peak 72 to about 50 MB |
-| Boot image from a profile | Image 33 to 9.7 MiB; peak 13% less on `Hello` and 12% on `Compute`, at equal time |
+| Boot image from a profile | Image 33 to 9.7 MiB; peak about 12% less on `Hello` and 7 to 12% on `Compute`, at equal time |
 
 The profile comes from one small program. A real app uses other library code, which then runs through the JIT, and that cost has not been measured.
 
@@ -58,6 +58,6 @@ The profile comes from one small program. A real app uses other library code, wh
 - Its compiler settings stayed at their defaults, so a tuned build could be faster. Its first run also compiles its boot image, which took about 3 s and is not counted. uxdroid's boot image is compiled ahead of time by `compile.sh`.
 - Not re-verified from scratch: `sync.sh` from an empty volume, which downloads 15.7 GB.
 - Peak memory depends on storage: the same image read about 3 MB lower from `tmpfs` than from disk. An earlier claim of beating the competitor on memory came from comparing across them, and was wrong.
-- These are two small programs. They say nothing about real apps, which need milestone 3.
+- These are two small programs. They say nothing about real apps, which do not run yet.
 - Waydroid and the Android emulator are not measured: they need kernel modules or a VM.
 - The competitor stays in a Docker volume, because its license is undetermined.

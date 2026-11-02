@@ -24,6 +24,7 @@ public class MainActivity extends Activity {
         view.setBackgroundColor(fillColor());
         setContentView(view);
         System.out.println("activity created in " + getPackageName());
+        System.out.println("label: " + label());
     }
 
     private static final class ColorView extends View {

@@ -18,6 +18,7 @@ const MANIFEST_ENTRY: &str = "AndroidManifest.xml";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 /// The largest real library seen in samples is 54 MiB. The limit stops decompression bombs.
 const MAX_NATIVE_LIB_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_NATIVE_LIBS_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DEX_HEADER_BYTES: usize = 112;
 const DEX_METHOD_COUNT_OFFSET: usize = 88;
 const DEX_CLASS_COUNT_OFFSET: usize = 96;
@@ -136,6 +137,35 @@ pub fn inspect(path: &Path) -> Result<Apk, Error> {
     })
 }
 
+/// Identifies an APK's contents from its archive directory, without decompressing anything.
+///
+/// Every entry's name, size and CRC go in, so two APKs with different code get different values
+/// even with the same size and timestamp.
+pub fn fingerprint(path: &Path) -> Result<u64, Error> {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let file = File::open(path).map_err(|source| Error::Unreadable(path.to_path_buf(), source))?;
+    let mut archive = ZipArchive::new(BufReader::new(file))
+        .map_err(|source| Error::InvalidArchive(source.to_string()))?;
+    let mut hash = FNV_OFFSET;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index_raw(index)
+            .map_err(|source| Error::InvalidArchive(source.to_string()))?;
+        let crc = entry.crc32().to_le_bytes();
+        let size = entry.size().to_le_bytes();
+        let name = entry
+            .name()
+            .map_err(|source| Error::InvalidArchive(source.to_string()))?;
+        let fields: [&[u8]; 3] = [name.as_bytes(), &crc, &size];
+        for byte in fields.into_iter().flatten() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+        }
+    }
+    Ok(hash)
+}
+
 /// Extracts the APK's native libraries for one ABI into `directory`, returning how many.
 ///
 /// Entry names are untrusted: `native_lib_abi` accepts only `lib/<abi>/<file>.so`, and a file name
@@ -152,6 +182,7 @@ pub fn extract_native_libs(path: &Path, abi: &str, directory: &Path) -> Result<u
         .collect::<Result<_, _>>()
         .map_err(|source| Error::InvalidArchive(source.to_string()))?;
     let mut count = 0;
+    let mut total = 0;
     for name in names
         .iter()
         .filter(|name| native_lib_abi(name) == Some(abi))
@@ -167,7 +198,8 @@ pub fn extract_native_libs(path: &Path, abi: &str, directory: &Path) -> Result<u
         let mut output = File::create(&partial).map_err(|error| cannot(error.to_string()))?;
         let written =
             io::copy(&mut limited, &mut output).map_err(|error| cannot(error.to_string()))?;
-        if written > MAX_NATIVE_LIB_BYTES {
+        total += written;
+        if written > MAX_NATIVE_LIB_BYTES || total > MAX_NATIVE_LIBS_TOTAL_BYTES {
             let _ = std::fs::remove_file(&partial);
             return Err(cannot(format!("{} is too large", name.escape_debug())));
         }

@@ -63,18 +63,45 @@ Exit codes: `0` success, `1` the library or a dependency cannot be loaded, or th
 
 ## Run an APK
 
-Needs the runtime built under `runtime/art`, and a Wayland compositor. Only an x86_64 glibc host is supported.
+`uxdroid run` needs ART built for the host, which takes about 16 GB of download and an hour of build. Only an x86_64 glibc host is supported.
 
 ```bash
-uxdroid run app.apk --runtime /path/to/runtime/art
+# Build the runtime in Docker, once. Volumes keep the result.
+docker compose --profile art run --rm -T art-builder bash /work/runtime/art/sync.sh
+docker compose --profile art run --rm -T art-builder bash /work/runtime/art/build.sh
+docker compose --profile art run --rm -T art-builder bash /work/runtime/art/package.sh
+docker compose --profile art run --rm -T art-builder bash /work/runtime/art/compile.sh
+docker compose --profile art run --rm -T art-builder bash /work/runtime/art/build_platform.sh
+
+# Build uxdroid, then run an APK with a Wayland compositor available.
+docker compose run --rm dev cargo build --release -p uxdroid-cli -p uxdroid-nativebridge -p uxdroid-platform
+uxdroid run app.apk --runtime /runtime/art
 ```
+
+`libuxdroid_nativebridge.so` and `libuxdroid_platform.so` must sit next to the `uxdroid` program. Those Rust libraries need the glibc they were built against, so today this runs in the `dev` image.
 
 | Option | Meaning |
 |--------|---------|
-| `--runtime <dir>` | Where the runtime is. Otherwise `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime` |
+| `--runtime <dir>` | The packaged runtime. Otherwise `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime` |
 | `--exit-after-first-frame` | Exit once a frame is shown, for tests |
 
-On first run the APK's DEX compiles to machine code and its native libraries extract under `$XDG_CACHE_HOME/uxdroid/<package>`. APKs with native code only for another CPU are refused, because translation does not exist yet. Exit codes: `1` it cannot start, `2` wrong usage. Once the app starts, the process is the app.
+The first run of an APK compiles its DEX and extracts its native libraries into `$XDG_CACHE_HOME/uxdroid/<package>/<id>`. The id comes from the APK's contents and the runtime, so a changed APK always installs fresh and an older one never runs a newer one's code. The app's current directory is `$XDG_CACHE_HOME/uxdroid/<package>/data`. APKs with native code only for another CPU are refused, because translation does not exist yet.
+
+Exit codes: `1` it cannot start, `2` wrong usage. Once started, the process is the app and exits with the app's status.
+
+## Tests
+
+`cargo test` covers parsers, the loader and command errors. It needs the NDK but not ART, so it never runs an app. These scripts do, with the runtime built:
+
+| Script, in `runtime/art` | Proves |
+|--------------------------|--------|
+| `app_smoke.sh` | An APK paints a Wayland window, read back as pixels |
+| `jni_smoke.sh` | DEX reaches a bionic library over JNI |
+| `cache_smoke.sh` | Each APK runs its own code, and failed installs stay failed |
+| `window_events_smoke.sh` | Close and resize work, including during a frame |
+| `smoke.sh` | ART runs compiled code in a clean system |
+
+Run the first four with `docker compose run --rm -T dev bash /work/runtime/art/<script>`, and `smoke.sh` in the `art-runtime` service. There is no CI yet.
 
 ## Performance
 

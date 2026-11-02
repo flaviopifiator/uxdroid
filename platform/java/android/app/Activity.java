@@ -8,6 +8,7 @@ import android.view.View;
 public class Activity extends Context {
     private View contentView;
     private boolean finishing;
+    private boolean finishedDuringCreate;
 
     protected void onCreate(Bundle savedInstanceState) {}
 
@@ -47,12 +48,18 @@ public class Activity extends Context {
         switch (stage) {
             case 0:
                 onCreate(null);
-                onStart();
-                onResume();
+                // As on Android, finish() in onCreate skips straight to onDestroy.
+                finishedDuringCreate = finishing;
+                if (!finishing) {
+                    onStart();
+                    onResume();
+                }
                 break;
             default:
-                onPause();
-                onStop();
+                if (!finishedDuringCreate) {
+                    onPause();
+                    onStop();
+                }
                 onDestroy();
                 break;
         }

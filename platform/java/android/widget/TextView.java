@@ -16,7 +16,7 @@ public class TextView extends View {
     }
 
     public void setText(CharSequence text) {
-        this.text = text;
+        this.text = text == null ? "" : text;
     }
 
     public CharSequence getText() {

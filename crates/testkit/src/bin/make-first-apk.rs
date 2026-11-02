@@ -1,5 +1,5 @@
 //! Writes the APK that the first Activity smoke test runs.
-//! usage: make-first-apk <classes.dex> <libfirstnative.so> <output.apk>
+//! usage: make-first-apk <classes.dex> <libfirstnative.so | -> <output.apk> [extra entry name]
 
 use std::path::Path;
 
@@ -51,16 +51,27 @@ fn manifest() -> Axml {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [dex, library, output] = args.as_slice() else {
-        eprintln!("usage: make-first-apk <classes.dex> <libfirstnative.so> <output.apk>");
-        std::process::exit(2);
+    let (dex, library, output, extra) = match args.as_slice() {
+        [dex, library, output] => (dex, library, output, None),
+        [dex, library, output, extra] => (dex, library, output, Some(extra)),
+        _ => {
+            eprintln!(
+                "usage: make-first-apk <classes.dex> <libfirstnative.so | -> <output.apk> [extra entry name]"
+            );
+            std::process::exit(2);
+        }
     };
-    Apk::new()
+    let mut apk = Apk::new()
         .manifest(&manifest())
-        .file("classes.dex", &std::fs::read(dex).unwrap())
-        .file(
+        .file("classes.dex", &std::fs::read(dex).unwrap());
+    if library != "-" {
+        apk = apk.file(
             "lib/x86_64/libfirstnative.so",
             &std::fs::read(library).unwrap(),
-        )
-        .write(Path::new(output));
+        );
+    }
+    if let Some(extra) = extra {
+        apk = apk.file(extra, b"not a library");
+    }
+    apk.write(Path::new(output));
 }

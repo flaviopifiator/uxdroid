@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use uxdroid_apk::extract_native_libs;
+use uxdroid_apk::{extract_native_libs, fingerprint};
 use uxdroid_testkit::{Apk, sample_manifest};
 
 fn scratch(name: &str) -> PathBuf {
@@ -48,4 +48,23 @@ fn entries_cannot_escape_the_directory() {
 
     assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
     assert!(!dir.join("escaped.so").exists());
+}
+
+#[test]
+fn the_fingerprint_follows_contents_and_not_file_metadata() {
+    let dir = scratch("fingerprint");
+    let write = |name: &str, dex: &[u8]| {
+        let apk = dir.join(name);
+        Apk::new()
+            .manifest(&sample_manifest())
+            .file("classes.dex", dex)
+            .write(&apk);
+        apk
+    };
+    let first = write("first.apk", b"code one");
+    let same = write("same.apk", b"code one");
+    let other = write("other.apk", b"code two");
+
+    assert_eq!(fingerprint(&first).unwrap(), fingerprint(&same).unwrap());
+    assert_ne!(fingerprint(&first).unwrap(), fingerprint(&other).unwrap());
 }

@@ -55,6 +55,8 @@ bionic and glibc share most symbol names but not their ABI. Probes compiled agai
 
 Printing a `long double` also stops by name, because the `printf` family checks its format. To support a new symbol, compare its signature, structs and constants against the NDK headers, then add it to the list. The audit covers signatures, measured layouts and constants, and individual behavior differences can remain, such as `sysconf` returning `EINVAL` for names not yet mapped.
 
+One way around this rule remains: ART calls glibc's `dlopen` first, so a library with no `DT_NEEDED` entries loads through glibc and binds without the audit. Checking the bridge first needs a small patch to `libnativeloader`.
+
 Not translated yet: static initializers with non-zero bionic values, such as `PTHREAD_RECURSIVE_MUTEX_INITIALIZER`. Libraries using ELF TLS, which means a minimum SDK of 29 or higher with `thread_local`, are rejected.
 
 ### ART is built for the host, not borrowed from a device

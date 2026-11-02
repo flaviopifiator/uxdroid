@@ -7,7 +7,7 @@ TEAL = (0, 128, 128)
 WHITE = (255, 255, 255)
 MIN_TEAL_PIXELS = 300_000
 MIN_TEXT_PIXELS = 500
-TOLERANCE = 3
+TOLERANCE = 1
 
 
 def read_png(path):
@@ -63,7 +63,7 @@ for row in rows:
 
 
 def near(pixel, target):
-    # Weston's screenshot path shifts channels slightly: 128 arrives as 126.
+    # Allows rounding in the compositor. Screenshots wait out Weston's fade-in first.
     return all(abs(a - b) <= TOLERANCE for a, b in zip(pixel, target))
 
 

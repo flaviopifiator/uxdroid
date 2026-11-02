@@ -183,7 +183,10 @@ impl Window {
     }
 
     pub fn wait_for_events(&mut self) -> Result<i32, Box<dyn Error>> {
-        self.queue.blocking_dispatch(&mut self.state)?;
+        // `present` also dispatches events, so what it received must not wait for another event.
+        if !self.state.closed && self.state.requested_size.is_none() {
+            self.queue.blocking_dispatch(&mut self.state)?;
+        }
         if self.state.closed {
             return Ok(CLOSED);
         }
@@ -254,7 +257,8 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
     ) {
         match event {
             xdg_toplevel::Event::Configure { width, height, .. } if width > 0 && height > 0 => {
-                state.requested_size = Some((width, height));
+                // A compositor can ask for anything, and the window takes what it can hold.
+                state.requested_size = Some((width.min(MAX_DIMENSION), height.min(MAX_DIMENSION)));
             }
             xdg_toplevel::Event::Close => state.closed = true,
             _ => {}

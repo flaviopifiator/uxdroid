@@ -1,11 +1,12 @@
 //! `uxdroid run`: starts an APK's launcher Activity as this process.
 
 use std::ffi::OsString;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use uxdroid_apk::{ExecutionPath, extract_native_libs, host_abi, inspect};
+use uxdroid_apk::{ExecutionPath, extract_native_libs, fingerprint, host_abi, inspect};
 
 use crate::{EXIT_FAILURE, EXIT_USAGE, RUN_USAGE, fail};
 
@@ -53,7 +54,8 @@ fn parse(args: &[OsString]) -> Option<RunArgs<'_>> {
 }
 
 fn home_dir(variable: &str, fallback: &str) -> Result<PathBuf, String> {
-    if let Some(value) = std::env::var_os(variable) {
+    // The XDG specification treats an empty value as unset.
+    if let Some(value) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value));
     }
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
@@ -93,20 +95,14 @@ fn runtime_environment(command: &mut Command, runtime: &Path, data: &Path, libra
         .env("LD_LIBRARY_PATH", library_path);
 }
 
-/// Compiles the APK to machine code once, until the APK changes.
+/// Compiles the APK at `work` to machine code, as the file it will become at `location`.
 fn compile_app(
     runtime: &Path,
-    app: &Path,
-    odex: &Path,
+    work: &Path,
+    location: &Path,
     data: &Path,
     library_path: &str,
 ) -> Result<(), String> {
-    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified());
-    if let (Ok(compiled), Ok(source)) = (modified(odex), modified(app))
-        && compiled >= source
-    {
-        return Ok(());
-    }
     let boot = boot_class_path(runtime);
     let mut command = Command::new(runtime.join("bin/dex2oat64"));
     command
@@ -127,18 +123,102 @@ fn compile_app(
             "--class-loader-context=PCL[{}]",
             runtime.join("platform/platform.jar").display()
         ))
-        .arg(format!("--dex-file={}", app.display()))
-        .arg(format!("--oat-file={}", odex.display()));
+        .arg(format!("--dex-file={}", work.join("app.apk").display()))
+        .arg(format!(
+            "--dex-location={}",
+            location.join("app.apk").display()
+        ))
+        .arg(format!(
+            "--oat-file={}",
+            work.join("oat/x86_64/app.odex").display()
+        ));
     runtime_environment(&mut command, runtime, data, library_path);
     let output = command
         .output()
         .map_err(|error| format!("cannot start dex2oat: {error}"))?;
     if !output.status.success() {
+        // Its last line is usually a timing summary, so errors are searched for first.
         let log = String::from_utf8_lossy(&output.stderr);
-        let last = log.lines().last().unwrap_or("").escape_debug().to_string();
-        return Err(format!("dex2oat failed: {last}"));
+        let line = log
+            .lines()
+            .rfind(|line| line.contains(" E ") || line.contains(" F "))
+            .or(log.lines().last())
+            .unwrap_or("");
+        return Err(format!("dex2oat failed: {}", line.escape_debug()));
     }
     Ok(())
+}
+
+/// The identity of an installed app: its contents and the runtime it was compiled against, whose
+/// rebuild would make ART quietly discard the compiled code.
+fn install_id(apk: &Path, runtime: &Path) -> Result<String, String> {
+    let contents = fingerprint(apk).map_err(|error| error.to_string())?;
+    let image = std::fs::metadata(runtime.join("framework/x86_64/boot.oat"))
+        .map_err(|error| format!("cannot read the runtime: {error}"))?;
+    let built = image.mtime() as u64 ^ image.len().rotate_left(32);
+    Ok(format!("{:016x}", contents ^ built.rotate_left(17)))
+}
+
+/// Unpacks and compiles the APK into a private directory, then renames it into place, so a failed
+/// or concurrent install never leaves anything another run could pick up.
+fn install(
+    args: &RunArgs,
+    runtime: &Path,
+    package_dir: &Path,
+    id: &str,
+    data: &Path,
+    library_path: &str,
+) -> Result<PathBuf, String> {
+    let installed = package_dir.join(id);
+    if installed.is_dir() {
+        return Ok(installed);
+    }
+    let work = package_dir.join(format!(".installing-{}", std::process::id()));
+    let result = (|| {
+        let cannot =
+            |error: std::io::Error| format!("cannot install in {}: {error}", work.display());
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(work.join("oat/x86_64")).map_err(cannot)?;
+        std::fs::create_dir_all(work.join("lib")).map_err(cannot)?;
+        // A read-only APK must not make its copy impossible to replace, so contents are copied
+        // and not its mode.
+        let mut source = std::fs::File::open(args.apk).map_err(cannot)?;
+        let mut copy = std::fs::File::create(work.join("app.apk")).map_err(cannot)?;
+        std::io::copy(&mut source, &mut copy).map_err(cannot)?;
+        extract_native_libs(args.apk, host_abi(), &work.join("lib"))
+            .map_err(|error| error.to_string())?;
+        compile_app(runtime, &work, &installed, data, library_path)?;
+        match std::fs::rename(&work, &installed) {
+            Ok(()) => Ok(()),
+            // Another run finished first with the same contents, so its copy serves just as well.
+            Err(_) if installed.is_dir() => {
+                let _ = std::fs::remove_dir_all(&work);
+                Ok(())
+            }
+            Err(error) => Err(cannot(error)),
+        }
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&work);
+    }
+    result?;
+    remove_older_installs(package_dir, id);
+    Ok(installed)
+}
+
+/// Best effort: a leftover only costs disk, and a running app keeps its files open.
+fn remove_older_installs(package_dir: &Path, current: &str) {
+    let Ok(entries) = std::fs::read_dir(package_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_install =
+            name.len() == 16 && name.as_encoded_bytes().iter().all(u8::is_ascii_hexdigit);
+        if is_install && name != current {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> {
@@ -164,7 +244,7 @@ fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> 
 
     let runtime = match &args.runtime {
         Some(runtime) => runtime.clone(),
-        None => match std::env::var_os("UXDROID_RUNTIME") {
+        None => match std::env::var_os("UXDROID_RUNTIME").filter(|value| !value.is_empty()) {
             Some(runtime) => PathBuf::from(runtime),
             None => home_dir("XDG_DATA_HOME", ".local/share")?.join("uxdroid/runtime"),
         },
@@ -172,29 +252,21 @@ fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> 
     let runtime = std::fs::canonicalize(&runtime)
         .map_err(|error| format!("cannot find the runtime at {}: {error}", runtime.display()))?;
 
-    let app_dir = home_dir("XDG_CACHE_HOME", ".cache")?
+    let package_dir = home_dir("XDG_CACHE_HOME", ".cache")?
         .join("uxdroid")
         .join(&apk.manifest.package);
-    let oat_dir = app_dir.join("oat/x86_64");
-    let lib_dir = app_dir.join("lib");
-    let data = app_dir.join("data");
-    let cache_error =
-        |error: std::io::Error| format!("cannot prepare {}: {error}", app_dir.display());
-    std::fs::create_dir_all(&oat_dir).map_err(cache_error)?;
-    std::fs::create_dir_all(data.join("dalvik-cache/x86_64")).map_err(cache_error)?;
-    std::fs::create_dir_all(&lib_dir).map_err(cache_error)?;
-
-    let app = app_dir.join("app.apk");
-    let source_modified = std::fs::metadata(args.apk).and_then(|meta| meta.modified());
-    let copied_modified = std::fs::metadata(&app).and_then(|meta| meta.modified());
-    let stale = match (source_modified, copied_modified) {
-        (Ok(source), Ok(copied)) => source > copied,
-        _ => true,
-    };
-    if stale {
-        std::fs::copy(args.apk, &app).map_err(cache_error)?;
-        extract_native_libs(args.apk, abi, &lib_dir).map_err(|error| error.to_string())?;
+    let data = package_dir.join("data");
+    std::fs::create_dir_all(data.join("dalvik-cache/x86_64"))
+        .map_err(|error| format!("cannot prepare {}: {error}", package_dir.display()))?;
+    // Class paths separate entries with a colon, and have no way to escape one.
+    let package_dir = std::fs::canonicalize(&package_dir).map_err(|error| error.to_string())?;
+    if package_dir.as_os_str().as_encoded_bytes().contains(&b':') {
+        return Err(format!(
+            "the cache path {} contains a colon",
+            package_dir.display()
+        ));
     }
+    let data = package_dir.join("data");
 
     // The uxdroid native libraries are installed next to this program.
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -204,18 +276,17 @@ fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> 
         runtime.join("lib64").display(),
         native_dir.display()
     );
-    compile_app(
-        &runtime,
-        &app,
-        &oat_dir.join("app.odex"),
-        &data,
-        &library_path,
-    )?;
+    let id = install_id(args.apk, &runtime)?;
+    let installed = install(args, &runtime, &package_dir, &id, &data, &library_path)?;
+    let app = installed.join("app.apk");
+    let lib_dir = installed.join("lib");
 
     let platform = runtime.join("platform/platform.jar");
     let boot = boot_class_path(&runtime);
     let mut command = Command::new(runtime.join("bin/dalvikvm64"));
     command
+        // Native bridge testing mode creates ./code_cache, so the current directory is the app's.
+        .current_dir(&data)
         .arg(format!("-Xbootclasspath:{boot}"))
         .arg(format!("-Xbootclasspath-locations:{boot}"))
         .arg(format!(
