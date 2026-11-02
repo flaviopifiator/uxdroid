@@ -57,6 +57,7 @@ The profile comes from one small program. A real app uses other library code, wh
 - It needed changes to build here: wolfSSL options renamed, `libpng-dev` added, and two small C fixes in `fake_log_device.c`. It also needs a passwd entry and `dex2oat` on `PATH`.
 - Its compiler settings stayed at their defaults, so a tuned build could be faster. Its first run also compiles its boot image, which took about 3 s and is not counted. uxdroid's boot image is compiled ahead of time by `compile.sh`.
 - Not re-verified from scratch: `sync.sh` from an empty volume, which downloads 15.7 GB.
+- Docker does not explain the results. With identical files on the same storage, `Hello` took 25.0 ms in the container and 32.6 ms directly on the host, with peak memory within 1%. An empty process cost the same on both, and the host's environment variables, timezone and locale made no difference. The cause of the extra host time was not found; its glibc differs from the container's. Absolute times on another system will differ.
 - Peak memory depends on storage: the same image read about 3 MB lower from `tmpfs` than from disk. An earlier claim of beating the competitor on memory came from comparing across them, and was wrong.
 - These are two small programs. They say nothing about real apps, which do not run yet.
 - Waydroid and the Android emulator are not measured: they need kernel modules or a VM.
