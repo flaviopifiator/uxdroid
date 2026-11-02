@@ -38,6 +38,8 @@ const CHECKS: &[&str] = &[
     "test_setbuf",
     "test_fortified_fread",
     "test_printf_family",
+    "test_integer_with_l_modifier_is_not_long_double",
+    "test_multibyte_text_works_by_default",
     "test_atfork",
     "test_getprogname",
     "test_ifunc",
@@ -289,6 +291,11 @@ fn unaudited_glibc_symbols_stop_the_program_by_name_when_called() {
     for (function, message) in [
         ("trap_unaudited", "uxdroid: regcomp is not audited"),
         ("trap_long_double_math", "uxdroid: sincosl is not audited"),
+        ("trap_ilogb", "uxdroid: ilogb is not audited"),
+        (
+            "trap_log_long_double",
+            "__android_log_print with a long double format",
+        ),
         (
             "trap_printf_long_double",
             "with a long double format has an incompatible ABI",

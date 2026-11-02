@@ -18,7 +18,7 @@ fsync ftruncate ftruncate64 getauxval getchar getcwd getegid getentropy getenv g
 gethostname getmntent_r getpagesize getpeername getpgid getpgrp getpid getppid getpwnam getpwnam_r
 getpwuid getpwuid_r getrandom getrlimit getrusage getservbyname getservbyport getsid getsockname
 getsockopt gettid gettimeofday getuid gmtime gmtime_r grantpt hypot hypotf if_indextoname
-if_nametoindex ilogb ilogbf imaxabs inet_addr inet_aton inet_ntoa inet_ntop inet_pton initstate
+if_nametoindex  imaxabs inet_addr inet_aton inet_ntoa inet_ntop inet_pton initstate
 inotify_add_watch inotify_init inotify_init1 inotify_rm_watch ioctl isalnum isalpha isascii isatty
 isblank iscntrl isdigit isdigit_l isgraph islower islower_l isprint ispunct isspace isupper
 isupper_l iswalnum iswalpha iswalpha_l iswblank iswblank_l iswcntrl iswcntrl_l iswdigit iswdigit_l
@@ -72,3 +72,5 @@ waitpid wcrtomb wcscasecmp wcscat wcschr wcscmp wcscoll wcscoll_l wcscpy wcscspn
 wcsncat wcsncmp wcsncpy wcsnlen wcsnrtombs wcspbrk wcsrchr wcsrtombs wcsspn wcsstr wcstod wcstof
 wcstok wcstol wcstoll wcstombs wcstoul wcstoull wcsxfrm wcsxfrm_l wctob wctomb wctype wcwidth
 wmemchr wmemcmp wmemcpy wmemmove wmemset write writev
+# Data with the same type in both libcs.
+__progname daylight in6addr_any in6addr_loopback optarg opterr optind optopt signgam timezone tzname

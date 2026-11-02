@@ -342,6 +342,7 @@ fn snapshot() -> Vec<&'static Library> {
 /// A library's own directory and `search_dirs` are searched for its dependencies. Initializers
 /// are the library's own code: a crafted library can do anything from there.
 pub fn load(path: &Path, search_dirs: &[PathBuf]) -> Result<&'static Library, Error> {
+    shims::use_bionic_default_locale();
     let (root, new_libraries) = {
         let mut guard = lock();
         let registry = guard.get();

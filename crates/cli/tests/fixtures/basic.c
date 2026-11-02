@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <wchar.h>
 
 #define CANARY 0x5AFEC0DE5AFEC0DEL
 
@@ -362,6 +363,29 @@ int trap_long_double_math(void) {
     long double sine, cosine;
     sincosl(1.0L, &sine, &cosine);
     return sine > 0.0L ? 0 : 1;
+}
+
+int trap_log_long_double(void) {
+    __android_log_print(ANDROID_LOG_INFO, "fixture", "%Lf", 1.5L);
+    return 0;
+}
+
+int test_integer_with_l_modifier_is_not_long_double(void) {
+    char buffer[32];
+    return snprintf(buffer, sizeof buffer, "%Ld", 7LL) == 1 && buffer[0] == '7' ? 0 : 1;
+}
+
+int test_multibyte_text_works_by_default(void) {
+    wchar_t wide = 0;
+    mbstate_t state;
+    memset(&state, 0, sizeof state);
+    return mbrtowc(&wide, "\xc3\xa9", 2, &state) == 2 && wide == 0xe9 ? 0 : 1;
+}
+
+int trap_ilogb(void) {
+    // Volatile, or the compiler folds the call away.
+    volatile double value = 1.0;
+    return ilogb(value);
 }
 
 static int child_handler_ran;

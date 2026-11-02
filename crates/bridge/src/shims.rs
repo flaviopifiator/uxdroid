@@ -111,6 +111,18 @@ extern "C" fn report_unaudited(slot: usize) -> ! {
     ))
 }
 
+/// bionic starts in UTF-8 and a glibc process in the C locale, where valid multibyte text fails.
+pub fn use_bionic_default_locale() {
+    static LOCALE: OnceLock<()> = OnceLock::new();
+    LOCALE.get_or_init(|| {
+        // SAFETY: the name is a valid C string. This runs before any library code, and glibc
+        // always has this locale built in.
+        unsafe {
+            libc::setlocale(libc::LC_CTYPE, c"C.UTF-8".as_ptr());
+        }
+    });
+}
+
 fn host_symbol(name: &CStr) -> Option<usize> {
     static LIBM: OnceLock<()> = OnceLock::new();
     LIBM.get_or_init(|| {
@@ -461,6 +473,7 @@ variadic_entry!("uxdroid_snprintf_chk", vsnprintf_chk, "40", "r9");
 /// format that reads one would print garbage. Scanning costs little next to the formatting.
 fn reject_long_double(format: impl Iterator<Item = u32>, function: &str) {
     const FLAGS_AND_WIDTH: &[u8] = b"-+ #0123456789.*'$";
+    const FLOAT_CONVERSIONS: &[u8] = b"aAeEfFgG";
     let mut format = format.peekable();
     while let Some(unit) = format.next() {
         if unit != u32::from(b'%') {
@@ -470,7 +483,11 @@ fn reject_long_double(format: impl Iterator<Item = u32>, function: &str) {
             .next_if(|next| u8::try_from(*next).is_ok_and(|byte| FLAGS_AND_WIDTH.contains(&byte)))
             .is_some()
         {}
-        if format.peek() == Some(&u32::from(b'L')) {
+        if format.next_if_eq(&u32::from(b'L')).is_some()
+            && format.peek().is_some_and(|conversion| {
+                u8::try_from(*conversion).is_ok_and(|byte| FLOAT_CONVERSIONS.contains(&byte))
+            })
+        {
             die(format_args!(
                 "uxdroid: {function} with a long double format has an incompatible ABI and no shim yet\n"
             ));
@@ -1143,6 +1160,8 @@ unsafe extern "C" fn android_log_vprint(
     format: *const c_char,
     args: *mut c_void,
 ) -> c_int {
+    // SAFETY: the NDK contract makes `format` a C string.
+    unsafe { check_format(format, "__android_log_print") };
     let mut line = [0 as c_char; LOG_LINE_MAX];
     // SAFETY: the buffer size is passed along, and `args` is the caller's valid va_list.
     unsafe {
