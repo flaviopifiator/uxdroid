@@ -57,6 +57,10 @@ Printing a `long double` also stops by name, because the `printf` family checks 
 
 Not translated yet: static initializers with non-zero bionic values, such as `PTHREAD_RECURSIVE_MUTEX_INITIALIZER`. Libraries using ELF TLS, which means a minimum SDK of 29 or higher with `thread_local`, are rejected.
 
+### ART is built for the host, not borrowed from a device
+
+ART's host build links against a glibc 2.17 sysroot and needs no bionic, so `dalvikvm` is an ordinary Linux program. A device APEX was rejected: it writes bionic's TLS slots, which overlap glibc's thread control block. `master-art` builds in Docker with `runtime/art/build.sh`, and the result runs in a plain Ubuntu with no Android tree.
+
 ## Roadmap
 
 Each milestone removes the largest remaining risk first.

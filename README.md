@@ -2,7 +2,7 @@
 
 Run Android APKs as native Linux processes, with no emulator, no container and no Android system image.
 
-**Status: milestone 1.** uxdroid reads an APK, plans how to run it, and runs native libraries built for Android under glibc. It cannot open an app yet, because it has no managed runtime or platform. See [the architecture](docs/architecture.md) for the design and roadmap.
+**Status: milestone 2.** uxdroid reads an APK, plans how to run it, and runs native libraries built for Android under glibc. Separately, it runs DEX as compiled code with ART in a plain Linux system. It cannot open an app yet: those pieces are not joined, and the Android platform is missing. See [the architecture](docs/architecture.md) for the design and roadmap.
 
 ## Quick path
 
@@ -63,4 +63,4 @@ Exit codes: `0` success, `1` the library or a dependency cannot be loaded, or th
 
 ## Performance
 
-The performance rule in [AGENTS.md](AGENTS.md) applies to every milestone. [benches/loader](benches/loader/README.md) compares load times with other loaders.
+The performance rule in [AGENTS.md](AGENTS.md) applies to every milestone. [benches/loader](benches/loader/README.md) compares load times with other loaders, and [benches/art](benches/art/README.md) compares runtime startup.
