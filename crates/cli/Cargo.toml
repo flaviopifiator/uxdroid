@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 uxdroid-apk = { path = "../apk" }
+uxdroid-bridge = { path = "../bridge" }
 
 [dev-dependencies]
 uxdroid-testkit = { path = "../testkit" }

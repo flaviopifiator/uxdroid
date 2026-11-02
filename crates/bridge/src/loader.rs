@@ -1,0 +1,893 @@
+//! Finds, maps, links and initializes shared objects and their dependencies.
+
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::fmt;
+use std::fs::File;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+use crate::elf::{
+    Dynamic, EHDR_SIZE, ElfError, PHDR_SIZE, PT_DYNAMIC, PT_LOAD, PT_TLS, ProgramHeader,
+    R_X86_64_64, R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_GLOB_DAT, R_X86_64_IRELATIVE,
+    R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, RELA_SIZE, Rela, STB_WEAK, STT_GNU_IFUNC, STT_TLS,
+    SYM_SIZE, Symbol, decode_packed, for_each_relr, gnu_hash, parse_dynamic, parse_header,
+    parse_program_headers, sysv_hash,
+};
+use crate::image::Image;
+use crate::shims;
+
+/// libraries that uxdroid provides from glibc and the shims instead of loading a file.
+const SYSTEM_LIBRARIES: &[&str] = &["libc.so", "libdl.so", "liblog.so", "libm.so"];
+/// Stops a crafted dependency graph from exhausting memory or the stack.
+const MAX_LIBRARIES_PER_LOAD: usize = 1024;
+
+#[derive(Debug)]
+pub enum Error {
+    Unreadable(PathBuf, std::io::Error),
+    Invalid(String, ElfError),
+    MissingLibrary {
+        needed: String,
+        by: String,
+    },
+    TooManyLibraries,
+    UnresolvedSymbols {
+        library: String,
+        symbols: Vec<String>,
+    },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Unreadable(path, source) => {
+                write!(f, "cannot read {}: {source}", path.display())
+            }
+            Error::Invalid(library, source) => {
+                write!(f, "{}: {source}", library.escape_debug())
+            }
+            Error::MissingLibrary { needed, by } => write!(
+                f,
+                "{} needs {}, which was not found",
+                by.escape_debug(),
+                needed.escape_debug()
+            ),
+            Error::TooManyLibraries => write!(f, "too many dependencies"),
+            Error::UnresolvedSymbols { library, symbols } => {
+                let names: Vec<String> = symbols
+                    .iter()
+                    .map(|symbol| symbol.escape_debug().to_string())
+                    .collect();
+                write!(
+                    f,
+                    "{}: unresolved symbols: {}",
+                    library.escape_debug(),
+                    names.join(", ")
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// A shared object in memory. Libraries stay loaded until the process exits.
+#[derive(Debug)]
+pub struct Library {
+    name: String,
+    path: CString,
+    image: Image,
+    headers: Vec<ProgramHeader>,
+    /// A copy of the program headers for `dl_iterate_phdr`; words keep them aligned.
+    raw_headers: Box<[u64]>,
+    dynamic: Dynamic,
+    dependencies: OnceLock<Vec<&'static Library>>,
+}
+
+impl Library {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The names of the libraries this one directly depends on, loaded or provided.
+    pub fn needed(&self) -> Vec<String> {
+        self.needed_names().unwrap_or_default()
+    }
+
+    fn needed_names(&self) -> Result<Vec<String>, ElfError> {
+        self.dynamic
+            .needed
+            .iter()
+            .map(|&offset| {
+                let name = self
+                    .image
+                    .string(self.dynamic.strtab, self.dynamic.strsz, offset)?;
+                Ok(String::from_utf8_lossy(name).into_owned())
+            })
+            .collect()
+    }
+
+    /// The address of an exported symbol.
+    pub fn symbol(&self, name: &str) -> Option<*const c_void> {
+        let symbol = self.find(name.as_bytes())?;
+        Some(self.image.bias().wrapping_add(symbol.value as usize) as *const c_void)
+    }
+
+    /// Calls an exported `int name(void)`.
+    ///
+    /// # Safety
+    /// The symbol must be a function with that signature.
+    pub unsafe fn call_i32(&self, name: &str) -> Option<i32> {
+        let address = self.symbol(name)?;
+        // SAFETY: the caller promises the signature.
+        let function: unsafe extern "C" fn() -> c_int = unsafe { std::mem::transmute(address) };
+        // SAFETY: as above.
+        Some(unsafe { function() })
+    }
+
+    fn find(&self, name: &[u8]) -> Option<Symbol> {
+        if self.dynamic.gnu_hash != 0 {
+            self.find_gnu(name).ok().flatten()
+        } else if self.dynamic.hash != 0 {
+            self.find_sysv(name).ok().flatten()
+        } else {
+            None
+        }
+    }
+
+    fn u32_at(&self, vaddr: u64) -> Result<u32, ElfError> {
+        let mut word = [0; 4];
+        word.copy_from_slice(self.image.bytes(vaddr, 4)?);
+        Ok(u32::from_le_bytes(word))
+    }
+
+    fn symbol_at(&self, index: u32) -> Result<Symbol, ElfError> {
+        let vaddr = u64::from(index)
+            .checked_mul(SYM_SIZE as u64)
+            .and_then(|offset| offset.checked_add(self.dynamic.symtab))
+            .ok_or(ElfError::Malformed("symbol index overflows"))?;
+        Symbol::parse(self.image.bytes(vaddr, SYM_SIZE as u64)?)
+    }
+
+    fn symbol_name(&self, symbol: &Symbol) -> Result<&[u8], ElfError> {
+        self.image.string(
+            self.dynamic.strtab,
+            self.dynamic.strsz,
+            u64::from(symbol.name),
+        )
+    }
+
+    fn matches(&self, index: u32, name: &[u8]) -> Result<Option<Symbol>, ElfError> {
+        let symbol = self.symbol_at(index)?;
+        Ok((symbol.is_defined() && self.symbol_name(&symbol)? == name).then_some(symbol))
+    }
+
+    fn find_gnu(&self, name: &[u8]) -> Result<Option<Symbol>, ElfError> {
+        const BLOOM_WORD_BITS: u32 = 64;
+
+        let table = self.dynamic.gnu_hash;
+        let field = |index: u64| self.u32_at(table.wrapping_add(index * 4));
+        let bucket_count = field(0)?;
+        let symbol_offset = field(1)?;
+        let bloom_size = field(2)?;
+        let bloom_shift = field(3)?;
+        if bucket_count == 0 || bloom_size == 0 {
+            return Ok(None);
+        }
+
+        let hash = gnu_hash(name);
+        let bloom_start = table.wrapping_add(16);
+        let bloom_index = (hash / BLOOM_WORD_BITS) % bloom_size;
+        let bloom = self
+            .image
+            .read_u64(bloom_start.wrapping_add(u64::from(bloom_index) * 8))?;
+        let first_bit = hash % BLOOM_WORD_BITS;
+        let second_bit = hash.checked_shr(bloom_shift).unwrap_or(0) % BLOOM_WORD_BITS;
+        if bloom & (1 << first_bit) == 0 || bloom & (1 << second_bit) == 0 {
+            return Ok(None);
+        }
+
+        let buckets = bloom_start.wrapping_add(u64::from(bloom_size) * 8);
+        let chains = buckets.wrapping_add(u64::from(bucket_count) * 4);
+        let mut index = self.u32_at(buckets.wrapping_add(u64::from(hash % bucket_count) * 4))?;
+        if index < symbol_offset {
+            return Ok(None);
+        }
+        loop {
+            let chain = self.u32_at(chains.wrapping_add(u64::from(index - symbol_offset) * 4))?;
+            if chain | 1 == hash | 1
+                && let Some(symbol) = self.matches(index, name)?
+            {
+                return Ok(Some(symbol));
+            }
+            if chain & 1 != 0 {
+                return Ok(None);
+            }
+            index = index
+                .checked_add(1)
+                .ok_or(ElfError::Malformed("unterminated hash chain"))?;
+        }
+    }
+
+    fn find_sysv(&self, name: &[u8]) -> Result<Option<Symbol>, ElfError> {
+        let table = self.dynamic.hash;
+        let bucket_count = self.u32_at(table)?;
+        let chain_count = self.u32_at(table.wrapping_add(4))?;
+        if bucket_count == 0 {
+            return Ok(None);
+        }
+        let buckets = table.wrapping_add(8);
+        let chains = buckets.wrapping_add(u64::from(bucket_count) * 4);
+        let bucket = u64::from(sysv_hash(name) % bucket_count);
+        let mut index = self.u32_at(buckets.wrapping_add(bucket * 4))?;
+        // A chain visits each symbol at most once; more steps mean a crafted cycle.
+        for _ in 0..=chain_count {
+            if index == 0 {
+                return Ok(None);
+            }
+            if let Some(symbol) = self.matches(index, name)? {
+                return Ok(Some(symbol));
+            }
+            index = self.u32_at(chains.wrapping_add(u64::from(index) * 4))?;
+        }
+        Err(ElfError::Malformed("cycle in hash chain"))
+    }
+
+    fn deps(&self) -> &[&'static Library] {
+        self.dependencies.get().map_or(&[], Vec::as_slice)
+    }
+
+    fn invalid(&self, error: ElfError) -> Error {
+        Error::Invalid(self.name.clone(), error)
+    }
+
+    fn init_functions(&self) -> Result<Vec<u64>, ElfError> {
+        const SKIPPED_ENTRY: u64 = u64::MAX;
+
+        let mut functions = Vec::new();
+        if self.dynamic.init != 0 {
+            functions.push(self.image.bias().wrapping_add(self.dynamic.init as usize) as u64);
+        }
+        if self.dynamic.init_array != 0 {
+            let table = self
+                .image
+                .bytes(self.dynamic.init_array, self.dynamic.init_arraysz)?;
+            for raw in table.as_chunks::<8>().0 {
+                let mut word = [0; 8];
+                word.copy_from_slice(raw);
+                let address = u64::from_le_bytes(word);
+                if address != 0 && address != SKIPPED_ENTRY {
+                    functions.push(address);
+                }
+            }
+        }
+        for &address in &functions {
+            let vaddr = (address as usize).wrapping_sub(self.image.bias()) as u64;
+            if !self.image.is_executable(vaddr) {
+                return Err(ElfError::Malformed(
+                    "initializer outside executable segments",
+                ));
+            }
+        }
+        Ok(functions)
+    }
+}
+
+#[derive(Default)]
+struct Registry {
+    libraries: Vec<&'static Library>,
+    search_dirs: Vec<PathBuf>,
+}
+
+static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
+
+struct Locked(MutexGuard<'static, Option<Registry>>);
+
+impl Locked {
+    fn get(&mut self) -> &mut Registry {
+        self.0.get_or_insert_with(Registry::default)
+    }
+}
+
+fn lock() -> Locked {
+    // Poisoning would only mean a panic elsewhere; the list itself stays consistent.
+    Locked(
+        REGISTRY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
+fn snapshot() -> Vec<&'static Library> {
+    lock().get().libraries.clone()
+}
+
+/// Loads a library and its dependencies, then runs their initializers.
+///
+/// A library's own directory and `search_dirs` are searched for its dependencies. Initializers
+/// are the library's own code: a crafted library can do anything from there.
+pub fn load(path: &Path, search_dirs: &[PathBuf]) -> Result<&'static Library, Error> {
+    let (root, new_libraries) = {
+        let mut guard = lock();
+        let registry = guard.get();
+        for dir in search_dirs {
+            if !registry.search_dirs.contains(dir) {
+                registry.search_dirs.push(dir.clone());
+            }
+        }
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            && !registry.search_dirs.iter().any(|dir| dir == parent)
+        {
+            registry.search_dirs.push(parent.to_path_buf());
+        }
+        link_tree(path, registry)?
+    };
+
+    run_initializers(&new_libraries)?;
+    Ok(root)
+}
+
+/// Maps the whole tree and links it, leaving the registry untouched on failure.
+fn link_tree(
+    path: &Path,
+    registry: &mut Registry,
+) -> Result<(&'static Library, Vec<&'static Library>), Error> {
+    let root_name = file_name(path);
+    if let Some(existing) = registry
+        .libraries
+        .iter()
+        .find(|library| library.name == root_name)
+    {
+        return Ok((existing, Vec::new()));
+    }
+
+    let mut pending: Vec<&'static Library> = Vec::new();
+    match map_and_link(path, registry, &mut pending) {
+        Ok(ordered) => {
+            registry.libraries.extend(pending.iter().copied());
+            Ok((pending[0], ordered))
+        }
+        Err(error) => {
+            for library in &pending {
+                library.image.unmap();
+            }
+            Err(error)
+        }
+    }
+}
+
+fn map_and_link(
+    path: &Path,
+    registry: &Registry,
+    pending: &mut Vec<&'static Library>,
+) -> Result<Vec<&'static Library>, Error> {
+    pending.push(map_library(path)?);
+
+    // Breadth-first, matching the order in which the Android linker searches symbols.
+    let mut next = 0;
+    while next < pending.len() {
+        let library = pending[next];
+        next += 1;
+        let needed = library
+            .needed_names()
+            .map_err(|error| library.invalid(error))?;
+        let mut dependencies = Vec::new();
+        for name in needed {
+            if SYSTEM_LIBRARIES.contains(&name.as_str()) {
+                continue;
+            }
+            let known = registry
+                .libraries
+                .iter()
+                .chain(pending.iter())
+                .find(|candidate| candidate.name == name)
+                .copied();
+            let dependency = match known {
+                Some(dependency) => dependency,
+                None => {
+                    if pending.len() >= MAX_LIBRARIES_PER_LOAD {
+                        return Err(Error::TooManyLibraries);
+                    }
+                    let path =
+                        find_dependency(&name, registry).ok_or_else(|| Error::MissingLibrary {
+                            needed: name.clone(),
+                            by: library.name.clone(),
+                        })?;
+                    let dependency = map_library(&path)?;
+                    pending.push(dependency);
+                    dependency
+                }
+            };
+            dependencies.push(dependency);
+        }
+        let _ = library.dependencies.set(dependencies);
+    }
+
+    let root = pending[0];
+    let scope = breadth_first(root);
+    let ordered = dependencies_first(root, pending);
+    let mut unresolved = None;
+    for library in &ordered {
+        let mut missing = BTreeSet::new();
+        relocate(library, &scope, &mut missing).map_err(|error| library.invalid(error))?;
+        if !missing.is_empty() && unresolved.is_none() {
+            unresolved = Some(Error::UnresolvedSymbols {
+                library: library.name.clone(),
+                symbols: missing.into_iter().collect(),
+            });
+        }
+    }
+    if let Some(error) = unresolved {
+        return Err(error);
+    }
+    for library in &ordered {
+        library
+            .image
+            .protect_relro(&library.headers)
+            .map_err(|error| library.invalid(error))?;
+    }
+    Ok(ordered)
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy())
+        .into_owned()
+}
+
+fn find_dependency(name: &str, registry: &Registry) -> Option<PathBuf> {
+    // A name with a directory could escape the search path.
+    if name.contains('/') {
+        return None;
+    }
+    registry
+        .search_dirs
+        .iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn map_library(path: &Path) -> Result<&'static Library, Error> {
+    let unreadable = |source| Error::Unreadable(path.to_path_buf(), source);
+    let name = file_name(path);
+    let invalid = |error| Error::Invalid(name.clone(), error);
+
+    // Checked first because opening a FIFO would block forever.
+    let metadata = std::fs::metadata(path).map_err(unreadable)?;
+    if !metadata.is_file() {
+        return Err(invalid(ElfError::Malformed("not a regular file")));
+    }
+    let file = File::open(path).map_err(unreadable)?;
+    let file_len = metadata.len();
+
+    let mut header = [0; EHDR_SIZE];
+    if file_len < EHDR_SIZE as u64 {
+        return Err(invalid(ElfError::Malformed("truncated header")));
+    }
+    file.read_exact_at(&mut header, 0).map_err(unreadable)?;
+    let table = parse_header(&header).map_err(invalid)?;
+
+    let table_len = (table.count * PHDR_SIZE) as u64;
+    if table.offset.saturating_add(table_len) > file_len {
+        return Err(invalid(ElfError::Malformed(
+            "program headers extend past end of file",
+        )));
+    }
+    let mut raw_table = vec![0; table_len as usize];
+    file.read_exact_at(&mut raw_table, table.offset)
+        .map_err(unreadable)?;
+    let headers = parse_program_headers(&raw_table).map_err(invalid)?;
+
+    if headers.iter().any(|header| header.kind == PT_TLS) {
+        return Err(invalid(ElfError::Unsupported("ELF TLS")));
+    }
+    let dynamic_header = headers
+        .iter()
+        .find(|header| header.kind == PT_DYNAMIC)
+        .ok_or_else(|| invalid(ElfError::Malformed("no dynamic section")))?;
+
+    let image = Image::map(&file, file_len, &headers).map_err(invalid)?;
+    let dynamic = image
+        .bytes(dynamic_header.vaddr, dynamic_header.filesz)
+        .and_then(parse_dynamic);
+    let dynamic = match dynamic {
+        Ok(dynamic) => dynamic,
+        Err(error) => {
+            image.unmap();
+            return Err(invalid(error));
+        }
+    };
+
+    let raw_headers: Box<[u64]> = raw_table
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|&word| u64::from_le_bytes(word))
+        .collect();
+    let path = CString::new(path.as_os_str().as_bytes()).unwrap_or_default();
+    Ok(Box::leak(Box::new(Library {
+        name,
+        path,
+        image,
+        headers,
+        raw_headers,
+        dynamic,
+        dependencies: OnceLock::new(),
+    })))
+}
+
+fn breadth_first(root: &'static Library) -> Vec<&'static Library> {
+    let mut order = vec![root];
+    let mut next = 0;
+    while next < order.len() {
+        for &dependency in order[next].deps() {
+            if !order.iter().any(|seen| std::ptr::eq(*seen, dependency)) {
+                order.push(dependency);
+            }
+        }
+        next += 1;
+    }
+    order
+}
+
+/// The new libraries with each one after its dependencies, cycles broken arbitrarily.
+fn dependencies_first(
+    root: &'static Library,
+    new_libraries: &[&'static Library],
+) -> Vec<&'static Library> {
+    fn visit(
+        library: &'static Library,
+        new_libraries: &[&'static Library],
+        seen: &mut Vec<*const Library>,
+        order: &mut Vec<&'static Library>,
+    ) {
+        if seen.contains(&std::ptr::from_ref(library))
+            || !new_libraries.iter().any(|new| std::ptr::eq(*new, library))
+        {
+            return;
+        }
+        seen.push(library);
+        for &dependency in library.deps() {
+            visit(dependency, new_libraries, seen, order);
+        }
+        order.push(library);
+    }
+
+    let mut seen = Vec::new();
+    let mut order = Vec::new();
+    visit(root, new_libraries, &mut seen, &mut order);
+    order
+}
+
+/// A symbol's address, searching `scope` in order, then the shims and glibc.
+fn resolve(scope: &[&'static Library], name: &[u8]) -> Result<Option<u64>, ElfError> {
+    for library in scope {
+        if let Some(symbol) = library.find(name) {
+            let address = library.image.bias().wrapping_add(symbol.value as usize) as u64;
+            return match symbol.kind {
+                STT_TLS => Err(ElfError::Unsupported("ELF TLS")),
+                // SAFETY: the library declares this symbol to be an ifunc resolver, which
+                // takes nothing and returns the function's address.
+                STT_GNU_IFUNC => Ok(Some(unsafe { call_resolver(address) })),
+                _ => Ok(Some(address)),
+            };
+        }
+    }
+    let mut owned = Vec::with_capacity(name.len() + 1);
+    owned.extend_from_slice(name);
+    owned.push(0);
+    let Ok(name) = CStr::from_bytes_with_nul(&owned) else {
+        return Ok(None);
+    };
+    Ok(shims::resolve(name).map(|address| address as u64))
+}
+
+/// # Safety
+/// `address` must be an ifunc resolver in a mapped, executable segment.
+unsafe fn call_resolver(address: u64) -> u64 {
+    // SAFETY: the caller promises the address and its signature.
+    unsafe {
+        let resolver: unsafe extern "C" fn() -> u64 = std::mem::transmute(address as usize);
+        resolver()
+    }
+}
+
+fn relocate(
+    library: &'static Library,
+    scope: &[&'static Library],
+    missing: &mut BTreeSet<String>,
+) -> Result<(), ElfError> {
+    let image = &library.image;
+    let dynamic = &library.dynamic;
+    let bias = image.bias() as u64;
+
+    if dynamic.relrsz != 0 {
+        let table = image.bytes(dynamic.relr, dynamic.relrsz)?;
+        for_each_relr(table, |vaddr| {
+            image.write_u64(vaddr, image.read_u64(vaddr)?.wrapping_add(bias))
+        })?;
+    }
+
+    let mut cache = HashMap::new();
+    let mut ifuncs = Vec::new();
+    let mut apply =
+        |rela: Rela| apply_relocation(library, scope, rela, &mut cache, &mut ifuncs, missing);
+
+    if dynamic.android_relasz != 0 {
+        let span = library
+            .headers
+            .iter()
+            .filter(|header| header.kind == PT_LOAD)
+            .map(|header| header.end())
+            .max()
+            .unwrap_or(0);
+        let data = image.bytes(dynamic.android_rela, dynamic.android_relasz)?;
+        for rela in decode_packed(data, span / 8)? {
+            apply(rela)?;
+        }
+    }
+    for (table, size) in [
+        (dynamic.rela, dynamic.relasz),
+        (dynamic.jmprel, dynamic.pltrelsz),
+    ] {
+        if size != 0 {
+            for raw in image.bytes(table, size)?.as_chunks::<RELA_SIZE>().0 {
+                apply(Rela::parse(raw))?;
+            }
+        }
+    }
+
+    // After everything else, as resolvers may read relocated data.
+    for (vaddr, resolver) in ifuncs {
+        if !image.is_executable(resolver) {
+            return Err(ElfError::Malformed(
+                "ifunc resolver outside executable segments",
+            ));
+        }
+        // SAFETY: the check above proves the resolver is in this library's code.
+        let target = unsafe { call_resolver(bias.wrapping_add(resolver)) };
+        image.write_u64(vaddr, target)?;
+    }
+    Ok(())
+}
+
+fn apply_relocation(
+    library: &'static Library,
+    scope: &[&'static Library],
+    rela: Rela,
+    cache: &mut HashMap<u32, u64>,
+    ifuncs: &mut Vec<(u64, u64)>,
+    missing: &mut BTreeSet<String>,
+) -> Result<(), ElfError> {
+    let image = &library.image;
+    let bias = image.bias() as u64;
+    match rela.kind {
+        R_X86_64_RELATIVE => image.write_u64(rela.offset, bias.wrapping_add_signed(rela.addend)),
+        R_X86_64_IRELATIVE => {
+            ifuncs.push((rela.offset, rela.addend as u64));
+            Ok(())
+        }
+        R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
+            let address = match cache.get(&rela.symbol) {
+                Some(&address) => address,
+                None => {
+                    let address = symbol_address(library, scope, rela.symbol, missing)?;
+                    cache.insert(rela.symbol, address);
+                    address
+                }
+            };
+            let value = if rela.kind == R_X86_64_64 {
+                address.wrapping_add_signed(rela.addend)
+            } else {
+                address
+            };
+            image.write_u64(rela.offset, value)
+        }
+        R_X86_64_DTPMOD64 | R_X86_64_DTPOFF64 => Err(ElfError::Unsupported("ELF TLS")),
+        _ => Err(ElfError::Unsupported("relocation type")),
+    }
+}
+
+fn symbol_address(
+    library: &'static Library,
+    scope: &[&'static Library],
+    index: u32,
+    missing: &mut BTreeSet<String>,
+) -> Result<u64, ElfError> {
+    if index == 0 {
+        return Ok(0);
+    }
+    let symbol = library.symbol_at(index)?;
+    let name = library.symbol_name(&symbol)?;
+    if let Some(address) = resolve(scope, name)? {
+        return Ok(address);
+    }
+    if symbol.bind != STB_WEAK {
+        missing.insert(String::from_utf8_lossy(name).into_owned());
+    }
+    Ok(0)
+}
+
+fn run_initializers(libraries: &[&'static Library]) -> Result<(), Error> {
+    unsafe extern "C" {
+        static environ: *const *const c_char;
+    }
+    let no_arguments: [*const c_char; 1] = [std::ptr::null()];
+    for library in libraries {
+        let functions = library
+            .init_functions()
+            .map_err(|error| library.invalid(error))?;
+        for address in functions {
+            // SAFETY: `init_functions` proved the address is in this library's code, and the
+            // ELF format defines this signature. `environ` is glibc's own pointer.
+            unsafe {
+                let function: unsafe extern "C" fn(
+                    c_int,
+                    *const *const c_char,
+                    *const *const c_char,
+                ) = std::mem::transmute(address as usize);
+                function(0, no_arguments.as_ptr(), environ);
+            }
+        }
+    }
+    Ok(())
+}
+
+// --- The libdl functions that libraries call ---
+
+/// Handle of the libraries that have no file of their own.
+const SYSTEM_HANDLE: *mut c_void = std::ptr::dangling_mut::<u8>().cast();
+
+thread_local! {
+    static DL_ERROR: RefCell<(Option<CString>, Option<CString>)> =
+        const { RefCell::new((None, None)) };
+}
+
+fn set_dl_error(message: String) {
+    let text = CString::new(message.replace('\0', " ")).unwrap_or_default();
+    DL_ERROR.with(|state| state.borrow_mut().0 = Some(text));
+}
+
+pub unsafe extern "C" fn dlopen(name: *const c_char, _flags: c_int) -> *mut c_void {
+    if name.is_null() {
+        return SYSTEM_HANDLE;
+    }
+    // SAFETY: the libdl contract makes `name` a C string.
+    let name = unsafe { CStr::from_ptr(name) };
+    let path = Path::new(std::ffi::OsStr::from_bytes(name.to_bytes()));
+    let plain_name = !name.to_bytes().contains(&b'/');
+
+    if plain_name && SYSTEM_LIBRARIES.contains(&path.to_string_lossy().as_ref()) {
+        return SYSTEM_HANDLE;
+    }
+    let target = if plain_name {
+        let mut guard = lock();
+        let registry = guard.get();
+        let text = path.to_string_lossy().into_owned();
+        if let Some(library) = registry
+            .libraries
+            .iter()
+            .find(|library| library.name == text)
+        {
+            return std::ptr::from_ref(*library).cast_mut().cast();
+        }
+        find_dependency(&text, registry)
+    } else {
+        Some(path.to_path_buf())
+    };
+    let Some(target) = target else {
+        set_dl_error(format!("library {} not found", name.to_string_lossy()));
+        return std::ptr::null_mut();
+    };
+    match load(&target, &[]) {
+        Ok(library) => std::ptr::from_ref(library).cast_mut().cast(),
+        Err(error) => {
+            set_dl_error(error.to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+pub unsafe extern "C" fn android_dlopen_ext(
+    name: *const c_char,
+    flags: c_int,
+    _info: *const c_void,
+) -> *mut c_void {
+    // SAFETY: forwards the caller's arguments under the same contract.
+    unsafe { dlopen(name, flags) }
+}
+
+pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void {
+    const RTLD_DEFAULT: *mut c_void = std::ptr::null_mut();
+
+    // SAFETY: the libdl contract makes `name` a C string.
+    let symbol = unsafe { CStr::from_ptr(name) };
+    let libraries = snapshot();
+    let scope = if handle == RTLD_DEFAULT {
+        libraries
+    } else if let Some(library) = libraries
+        .iter()
+        .find(|library| std::ptr::from_ref(**library).cast::<c_void>() == handle.cast_const())
+    {
+        breadth_first(library)
+    } else {
+        // SYSTEM_HANDLE or RTLD_NEXT: only the host remains to search.
+        Vec::new()
+    };
+    match resolve(&scope, symbol.to_bytes()) {
+        Ok(Some(address)) => address as *mut c_void,
+        _ => {
+            set_dl_error(format!("undefined symbol: {}", symbol.to_string_lossy()));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+pub extern "C" fn dlclose(_handle: *mut c_void) -> c_int {
+    // Libraries stay loaded, which Android also allows and which keeps atexit handlers valid.
+    0
+}
+
+pub extern "C" fn dlerror() -> *const c_char {
+    DL_ERROR.with(|state| {
+        let mut state = state.borrow_mut();
+        // The returned text must stay valid until the next call, so it moves to the second slot.
+        state.1 = state.0.take();
+        state
+            .1
+            .as_ref()
+            .map_or(std::ptr::null(), |text| text.as_ptr())
+    })
+}
+
+pub unsafe extern "C" fn dladdr(address: *const c_void, info: *mut libc::Dl_info) -> c_int {
+    let owner = snapshot()
+        .into_iter()
+        .find(|library| library.image.contains_address(address as usize));
+    match owner {
+        Some(library) => {
+            // SAFETY: the libdl contract makes `info` writable.
+            unsafe {
+                *info = libc::Dl_info {
+                    dli_fname: library.path.as_ptr(),
+                    dli_fbase: library.image.bias() as *mut c_void,
+                    dli_sname: std::ptr::null(),
+                    dli_saddr: std::ptr::null_mut(),
+                };
+            }
+            1
+        }
+        // SAFETY: forwards the caller's arguments under the same contract.
+        None => unsafe { libc::dladdr(address, info) },
+    }
+}
+
+/// Reports loaded libraries before the host's. C++ unwinders find exception tables through this.
+pub unsafe extern "C" fn dl_iterate_phdr(
+    callback: Option<unsafe extern "C" fn(*mut libc::dl_phdr_info, usize, *mut c_void) -> c_int>,
+    data: *mut c_void,
+) -> c_int {
+    let Some(function) = callback else {
+        return 0;
+    };
+    for library in snapshot() {
+        // SAFETY: zero is valid for this plain C struct.
+        let mut info: libc::dl_phdr_info = unsafe { std::mem::zeroed() };
+        info.dlpi_addr = library.image.bias() as u64;
+        info.dlpi_name = library.path.as_ptr();
+        info.dlpi_phdr = library.raw_headers.as_ptr().cast();
+        info.dlpi_phnum = (library.raw_headers.len() * 8 / PHDR_SIZE) as u16;
+        // SAFETY: `info` is fully initialized and outlives the call; the headers are immutable.
+        let status = unsafe { function(&mut info, size_of::<libc::dl_phdr_info>(), data) };
+        if status != 0 {
+            return status;
+        }
+    }
+    // SAFETY: forwards the caller's callback under the same contract.
+    unsafe { libc::dl_iterate_phdr(callback, data) }
+}

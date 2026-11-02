@@ -5,25 +5,39 @@ use std::process::ExitCode;
 
 use uxdroid_apk::{Apk, host_abi, inspect};
 
-const USAGE: &str = "usage: uxdroid inspect <apk>";
+const INSPECT_USAGE: &str = "usage: uxdroid inspect <apk>";
+const LOAD_USAGE: &str = "usage: uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]";
+const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
+                     uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]";
 const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 
 fn main() -> ExitCode {
     // `args_os`: paths on Linux are bytes and `args` panics on non-UTF-8 ones.
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let [command, apk] = args.as_slice() else {
-        return fail(USAGE, EXIT_USAGE);
-    };
-    if command != "inspect" {
-        return fail(USAGE, EXIT_USAGE);
+    match args.split_first() {
+        Some((command, rest)) if command == "inspect" => run_inspect(rest),
+        Some((command, rest)) if command == "load" => native::run_load(rest),
+        _ => fail(USAGE, EXIT_USAGE),
     }
+}
 
-    let report = match inspect(Path::new(apk)) {
-        Ok(apk) => render(&apk, host_abi()),
-        Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),
+fn run_inspect(args: &[OsString]) -> ExitCode {
+    let [apk] = args else {
+        return fail(INSPECT_USAGE, EXIT_USAGE);
     };
-    match std::io::stdout().write_all(report.as_bytes()) {
+    match inspect(Path::new(apk)) {
+        Ok(apk) => print(&render(&apk, host_abi())),
+        Err(error) => fail(&format!("error: {error}"), EXIT_FAILURE),
+    }
+}
+
+fn print(report: &str) -> ExitCode {
+    let mut stdout = std::io::stdout();
+    match stdout
+        .write_all(report.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
         // A closed pipe, as in `uxdroid inspect app.apk | head -1`, is not a failure.
         Err(error) if error.kind() != ErrorKind::BrokenPipe => fail(
             &format!("error: cannot write output: {error}"),
@@ -37,6 +51,99 @@ fn main() -> ExitCode {
 fn fail(message: &str, code: u8) -> ExitCode {
     let _ = writeln!(std::io::stderr(), "{message}");
     ExitCode::from(code)
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+mod native {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::process::ExitCode;
+
+    use uxdroid_bridge::{Library, load};
+
+    use crate::{EXIT_FAILURE, EXIT_USAGE, LOAD_USAGE, fail, print};
+
+    struct LoadArgs<'a> {
+        library: &'a Path,
+        search_dirs: Vec<PathBuf>,
+        call: Option<&'a str>,
+    }
+
+    fn parse(args: &[OsString]) -> Option<LoadArgs<'_>> {
+        let (library, mut rest) = args.split_first()?;
+        if library.as_encoded_bytes().starts_with(b"--") {
+            return None;
+        }
+        let mut parsed = LoadArgs {
+            library: Path::new(library),
+            search_dirs: Vec::new(),
+            call: None,
+        };
+        while let Some((flag, values)) = rest.split_first() {
+            let (value, remaining) = values.split_first()?;
+            if flag == "--search-dir" {
+                parsed.search_dirs.push(PathBuf::from(value));
+            } else if flag == "--call" {
+                parsed.call = Some(value.to_str()?);
+            } else {
+                return None;
+            }
+            rest = remaining;
+        }
+        Some(parsed)
+    }
+
+    fn describe(library: &Library) -> String {
+        let name = library.name().escape_debug();
+        let needed: Vec<String> = library
+            .needed()
+            .iter()
+            .map(|name| name.escape_debug().to_string())
+            .collect();
+        format!("loaded: {name}\nneeds: {}\n", needed.join(", "))
+    }
+
+    pub fn run_load(args: &[OsString]) -> ExitCode {
+        let Some(args) = parse(args) else {
+            return fail(LOAD_USAGE, EXIT_USAGE);
+        };
+        let library = match load(args.library, &args.search_dirs) {
+            Ok(library) => library,
+            Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),
+        };
+        // Printed before the call: the library's own output, or its crash, comes after this.
+        let code = print(&describe(library));
+        let Some(symbol) = args.call else {
+            return code;
+        };
+        // SAFETY: `--call` documents that the symbol must be `int symbol(void)`.
+        match unsafe { library.call_i32(symbol) } {
+            Some(result) => print(&format!("call {}: {result}\n", symbol.escape_debug())),
+            None => fail(
+                &format!(
+                    "error: {} has no symbol {}",
+                    library.name().escape_debug(),
+                    symbol.escape_debug()
+                ),
+                EXIT_FAILURE,
+            ),
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")))]
+mod native {
+    use std::ffi::OsString;
+    use std::process::ExitCode;
+
+    use crate::{EXIT_FAILURE, fail};
+
+    pub fn run_load(_args: &[OsString]) -> ExitCode {
+        fail(
+            "error: uxdroid load needs an x86_64 glibc host",
+            EXIT_FAILURE,
+        )
+    }
 }
 
 fn render(apk: &Apk, host_abi: &str) -> String {

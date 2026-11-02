@@ -264,12 +264,7 @@ fn invalid_dex_is_an_error() {
 
 #[test]
 fn wrong_usage_exits_2() {
-    for args in [
-        &[][..],
-        &["inspect"],
-        &["run", "app.apk"],
-        &["inspect", "a.apk", "b.apk"],
-    ] {
+    for args in [&["inspect"][..], &["inspect", "a.apk", "b.apk"]] {
         let output = uxdroid(args);
 
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -278,6 +273,19 @@ fn wrong_usage_exits_2() {
             "usage: uxdroid inspect <apk>\n",
             "{args:?}"
         );
+    }
+}
+
+const ALL_COMMANDS_USAGE: &str = "usage: uxdroid inspect <apk>\n       \
+     uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n";
+
+#[test]
+fn no_command_or_an_unknown_one_lists_all_commands() {
+    for args in [&[][..], &["run", "app.apk"]] {
+        let output = uxdroid(args);
+
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert_eq!(stderr(&output), ALL_COMMANDS_USAGE, "{args:?}");
     }
 }
 
@@ -305,7 +313,7 @@ fn non_utf8_command_is_wrong_usage() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), "usage: uxdroid inspect <apk>\n");
+    assert_eq!(stderr(&output), ALL_COMMANDS_USAGE);
 }
 
 #[test]

@@ -187,10 +187,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "uxdroid-bridge"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "uxdroid-cli"
 version = "0.1.0"
 dependencies = [
  "uxdroid-apk",
+ "uxdroid-bridge",
  "uxdroid-testkit",
 ]
 
