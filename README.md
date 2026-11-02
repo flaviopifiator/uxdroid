@@ -2,7 +2,7 @@
 
 Run Android APKs as native Linux processes, with no emulator, no container and no Android system image.
 
-**Status: milestone 2.** uxdroid reads an APK, plans how to run it, and runs native libraries built for Android under glibc. Separately, it runs DEX as compiled code with ART in a plain Linux system. It cannot open an app yet: those pieces are not joined, and the Android platform is missing. See [the architecture](docs/architecture.md) for the design and roadmap.
+**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Real apps do not run yet: they need far more of the `android.*` API than the few classes that exist. See [the architecture](docs/architecture.md) for the design and roadmap.
 
 ## Quick path
 
@@ -60,6 +60,21 @@ call answer: 42
 | `--call <symbol>` | Call the exported function `int symbol(void)` and print its result. At most once. |
 
 Exit codes: `0` success, `1` the library or a dependency cannot be loaded, or the symbol does not exist, `2` wrong usage. A load that fails names every missing library or symbol it knows of. A function from glibc that has not been audited for bionic compatibility, such as `regcomp`, stops the program with its name if called. See [the architecture](docs/architecture.md).
+
+## Run an APK
+
+Needs the runtime built under `runtime/art`, and a Wayland compositor. Only an x86_64 glibc host is supported.
+
+```bash
+uxdroid run app.apk --runtime /path/to/runtime/art
+```
+
+| Option | Meaning |
+|--------|---------|
+| `--runtime <dir>` | Where the runtime is. Otherwise `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime` |
+| `--exit-after-first-frame` | Exit once a frame is shown, for tests |
+
+On first run the APK's DEX compiles to machine code and its native libraries extract under `$XDG_CACHE_HOME/uxdroid/<package>`. APKs with native code only for another CPU are refused, because translation does not exist yet. Exit codes: `1` it cannot start, `2` wrong usage. Once the app starts, the process is the app.
 
 ## Performance
 

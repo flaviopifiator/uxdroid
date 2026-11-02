@@ -48,12 +48,14 @@ int main(int argc, char **argv) {
             printf("no output\n");
             return 1;
         }
+        // The newline can arrive in a later write, so the report adds its own.
+        while (got > 0 && line[got - 1] == '\n') got--;
         line[got] = 0;
         samples[i] = (end.tv_sec - start.tv_sec) * 1e3 + (end.tv_nsec - start.tv_nsec) / 1e6;
         if (usage.ru_maxrss > peak_kib) peak_kib = usage.ru_maxrss;
     }
     qsort(samples, runs, sizeof(double), compare);
-    printf("median %.2f ms  min %.2f ms  p90 %.2f ms  peak %ld KiB  output: %s", samples[runs / 2],
+    printf("median %.2f ms  min %.2f ms  p90 %.2f ms  peak %ld KiB  output: %s\n", samples[runs / 2],
            samples[0], samples[runs * 9 / 10], peak_kib, line);
     return 0;
 }

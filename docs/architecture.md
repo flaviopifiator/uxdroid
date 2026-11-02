@@ -61,6 +61,12 @@ Not translated yet: static initializers with non-zero bionic values, such as `PT
 
 ART's host build links against a glibc 2.17 sysroot and needs no bionic, so `dalvikvm` is an ordinary Linux program. A device APEX was rejected: it writes bionic's TLS slots, which overlap glibc's thread control block. The pinned `master-art` tree downloads with `runtime/art/sync.sh` and builds in Docker with `runtime/art/build.sh`, and the result runs in a plain Ubuntu with no Android tree.
 
+### One process, joined through NativeBridge
+
+`uxdroid run` replaces itself with `dalvikvm`. ART tries glibc's `dlopen` on an app's native library, which fails for anything linked to bionic's `libc.so`, then falls back to `crates/nativebridge`, a Rust library that loads it with the bridge. CPU and calling convention match, so a JNI call goes straight to the function's address with no translation. This same hook is where `arm64-v8a` translation will attach. `crates/platform` holds the native half of the `android.*` classes in `platform/java`. The classes are on the class path for now, and will move to the boot class path when there are enough to be worth compiling into the image.
+
+The window, audio and GPU stay behind this layer, so a later macOS port does not reach into the rest.
+
 ## Roadmap
 
 Each milestone removes the largest remaining risk first.
