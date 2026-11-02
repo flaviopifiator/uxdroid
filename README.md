@@ -2,7 +2,7 @@
 
 Run Android APKs as native Linux processes, with no emulator, no container and no Android system image.
 
-**Status: milestone 0.** uxdroid reads an APK and plans how to run it. It does not execute apps yet. See [the architecture](docs/architecture.md) for the design and roadmap.
+**Status: milestone 1.** uxdroid reads an APK, plans how to run it, and runs native libraries built for Android under glibc. It cannot open an app yet, because it has no managed runtime or platform. See [the architecture](docs/architecture.md) for the design and roadmap.
 
 ## Quick path
 
@@ -38,3 +38,29 @@ execution: direct
 | `needs-abi-bridge (...)` | Native libraries exist only for the listed ABIs and need translation |
 
 Exit codes: `0` success, `1` unreadable or malformed APK, `2` wrong usage.
+
+## Load a native library
+
+`uxdroid load` loads an x86_64 `.so` built for Android, with its dependencies, and runs its initializers. Only an x86_64 glibc host is supported. Loading runs the library's code, so use the sandbox for anything you did not build:
+
+```bash
+UXDROID_SAMPLES=/path/to/libs docker compose run --rm sandbox \
+  /cache/target/debug/uxdroid load /samples/libfoo.so --search-dir /samples --call answer
+```
+
+```text
+loaded: libfoo.so
+needs: libc.so, libm.so
+call answer: 42
+```
+
+| Option | Meaning |
+|--------|---------|
+| `--search-dir <dir>` | Also look for dependencies here, besides the library's own directory. Can repeat. |
+| `--call <symbol>` | Call the exported function `int symbol(void)` and print its result |
+
+Exit codes: `0` success, `1` the library or a dependency cannot be loaded, or the symbol does not exist, `2` wrong usage. A load that fails names every missing library or symbol it knows of. A function with no compatible ABI yet, such as `strtold`, stops the program with its name if called.
+
+## Performance
+
+The performance rule in [AGENTS.md](AGENTS.md) applies to every milestone. [benches/loader](benches/loader/README.md) compares load times with other loaders.

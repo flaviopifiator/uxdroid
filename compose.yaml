@@ -20,5 +20,21 @@ services:
       - cache:/cache:ro
       - ${UXDROID_SAMPLES:-./samples}:/samples:ro
 
+  # Compares loader performance against competitors. Offline, with real libraries read-only.
+  bench:
+    profiles: [bench]
+    build:
+      context: .
+      dockerfile: benches/loader/Dockerfile
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    tmpfs: ["/tmp:exec"]
+    volumes:
+      - .:/work:ro
+      - cache:/cache:ro
+      - ${UXDROID_SAMPLES:-./samples}:/samples:ro
+
 volumes:
   cache:

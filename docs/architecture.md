@@ -41,6 +41,19 @@ Inside one app, a platform service call becomes a direct in-process call instead
 
 Android Translation Layer (ATL) is GPL-3.0-or-later. We study its approach but copy no code from it, so uxdroid's license stays an open choice. AOSP code is Apache-2.0 and can be reused with attribution.
 
+### The loader never lets an incompatible symbol bind silently
+
+bionic and glibc share most symbol names but not their ABI. A probe compiled against both measured `sigset_t` at 8 and 128 bytes, `jmp_buf` at 88 and 200, and different `sysconf` and `EAI_*` constants, while `addrinfo` swaps two fields. Passing those calls straight to glibc would corrupt memory with no error, so each symbol takes one of four paths:
+
+| Symbol | Result |
+|--------|--------|
+| Same ABI in glibc | Binds directly, with no added cost |
+| Different ABI, translatable | Binds to a shim in `crates/bridge/src/shims.rs` |
+| Different ABI, no shim yet, such as `long double` functions | Loads, and stops the program naming the symbol if it is called |
+| Found nowhere | The load fails, listing every missing name |
+
+The list of incompatible symbols comes from the measured differences and is not proven complete, so a symbol nobody has audited still binds to glibc. Static initializers with non-zero bionic values, such as `PTHREAD_RECURSIVE_MUTEX_INITIALIZER`, are not translated. Libraries using ELF TLS, which means a minimum SDK of 29 or higher with `thread_local`, are rejected for now.
+
 ## Roadmap
 
 Each milestone removes the largest remaining risk first.
