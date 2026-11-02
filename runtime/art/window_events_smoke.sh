@@ -17,7 +17,7 @@ scenario() {
     python3 /work/runtime/art/fake_compositor.py "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$1" >"$WORK/compositor" 2>&1 &
     local server=$!
     pause 0.3
-    timeout 20 "$BIN/uxdroid" run "$WORK/first.apk" >"$WORK/out" 2>&1
+    timeout "${2:-20}" "$BIN/uxdroid" run "$WORK/first.apk" >"$WORK/out" 2>&1
     local status=$?
     kill "$server" 2>/dev/null
     wait "$server" 2>/dev/null
@@ -32,6 +32,8 @@ echo "ok: a resize during a frame redraws at the new size"
 scenario resize || fail "resize sequence: exit $?"
 grep -q "frame 4: buffer 1x1" "$WORK/compositor" || fail "resize sequence did not reach 1x1"
 echo "ok: a resize sequence works down to 1x1"
-scenario huge
+# This scenario never closes the window, so timeout ends it.
+scenario huge 6
+grep -q "frame 2: buffer 16384x16384" "$WORK/compositor" || fail "an oversized request was not clamped"
 grep -q "cannot" "$WORK/out" && fail "an oversized request killed the app"
 echo "ok: an oversized request is clamped"

@@ -27,6 +27,7 @@ const LAUNCHER_CLASS: &str = "dev.uxdroid.runtime.Launcher";
 /// Running apps hold a shared lock on this file, inside their install directory.
 const IN_USE_MARKER: &str = "in-use";
 const MAX_INSTALL_ATTEMPTS: u32 = 5;
+const INSTALL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 struct RunArgs<'a> {
     apk: &'a Path,
@@ -202,8 +203,11 @@ fn hold_install(installed: &Path) -> Result<bool, String> {
             std::io::Error::last_os_error()
         ));
     }
-    // A remover may have finished just before the lock was taken.
-    let still_there = marker.exists();
+    // A remover may have finished just before the lock was taken, and a new install could already
+    // stand at the same path, so the file itself must still be the one at that path.
+    let opened = file.metadata().map_err(|error| error.to_string())?;
+    let still_there = std::fs::metadata(&marker)
+        .is_ok_and(|current| current.ino() == opened.ino() && current.dev() == opened.dev());
     if still_there {
         // The descriptor must stay open until the process ends.
         std::mem::forget(file);
@@ -267,6 +271,11 @@ fn remove_unused_installs(package_dir: &Path, current: &str) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let text = name.to_string_lossy();
+        // A rename first, so an interrupted removal never leaves a damaged install at its id.
+        if text.starts_with(".removing-") {
+            let _ = std::fs::remove_dir_all(entry.path());
+            continue;
+        }
         if let Some(pid) = text.strip_prefix(".installing-") {
             let alive = Path::new("/proc").join(pid).exists();
             if !alive {
@@ -284,7 +293,10 @@ fn remove_unused_installs(package_dir: &Path, current: &str) {
         // SAFETY: the descriptor is open, and a failed lock means the install is in use.
         let unused = unsafe { libc::flock(marker.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
         if unused {
-            let _ = std::fs::remove_dir_all(entry.path());
+            let doomed = package_dir.join(format!(".removing-{text}-{}", std::process::id()));
+            if std::fs::rename(entry.path(), &doomed).is_ok() {
+                let _ = std::fs::remove_dir_all(&doomed);
+            }
         }
     }
 }
@@ -353,6 +365,7 @@ fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> 
         if attempts == MAX_INSTALL_ATTEMPTS {
             return Err("the install keeps being removed by other runs".to_string());
         }
+        std::thread::sleep(INSTALL_RETRY_DELAY);
         installed = install(args, &runtime, &package_dir, &id, &data, &library_path)?;
     }
     remove_unused_installs(&package_dir, &id);
