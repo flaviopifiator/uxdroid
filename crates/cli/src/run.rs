@@ -1,6 +1,9 @@
 //! `uxdroid run`: starts an APK's launcher Activity as this process.
 
 use std::ffi::OsString;
+use std::fs::File;
+use std::io::ErrorKind;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -21,6 +24,9 @@ const BOOT_JARS: [&str; 7] = [
     "conscrypt",
 ];
 const LAUNCHER_CLASS: &str = "dev.uxdroid.runtime.Launcher";
+/// Running apps hold a shared lock on this file, inside their install directory.
+const IN_USE_MARKER: &str = "in-use";
+const MAX_INSTALL_ATTEMPTS: u32 = 5;
 
 struct RunArgs<'a> {
     apk: &'a Path,
@@ -149,14 +155,60 @@ fn compile_app(
     Ok(())
 }
 
-/// The identity of an installed app: its contents and the runtime it was compiled against, whose
-/// rebuild would make ART quietly discard the compiled code.
+/// The identity of an installed app: its contents and everything its compiled code depends on.
+/// ART quietly discards compiled code when the boot image or platform changes or moves.
+///
+/// Contents come from the archive directory, which is fast but trusts declared CRCs: a crafted
+/// APK can match another one's. That reuses code the user already ran, and goes no further.
 fn install_id(apk: &Path, runtime: &Path) -> Result<String, String> {
-    let contents = fingerprint(apk).map_err(|error| error.to_string())?;
-    let image = std::fs::metadata(runtime.join("framework/x86_64/boot.oat"))
-        .map_err(|error| format!("cannot read the runtime: {error}"))?;
-    let built = image.mtime() as u64 ^ image.len().rotate_left(32);
-    Ok(format!("{:016x}", contents ^ built.rotate_left(17)))
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = fingerprint(apk).map_err(|error| error.to_string())?;
+    let mut mix = |bytes: &[u8]| {
+        for byte in bytes {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+        }
+    };
+    mix(runtime.as_os_str().as_encoded_bytes());
+    for dependency in ["framework/x86_64/boot.oat", "platform/platform.jar"] {
+        let meta = std::fs::metadata(runtime.join(dependency))
+            .map_err(|error| format!("cannot read the runtime: {error}"))?;
+        mix(&meta.mtime().to_le_bytes());
+        mix(&meta.mtime_nsec().to_le_bytes());
+        mix(&meta.len().to_le_bytes());
+    }
+    Ok(format!("{hash:016x}"))
+}
+
+/// Marks an install as in use for as long as this process and what it `exec`s live.
+///
+/// Returns false if the install was removed before the mark was placed.
+fn hold_install(installed: &Path) -> Result<bool, String> {
+    let marker = installed.join(IN_USE_MARKER);
+    let file = match File::open(&marker) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot read {}: {error}", marker.display())),
+    };
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` is open. Clearing close-on-exec lets the lock outlive the exec into the runtime,
+    // and blocking only waits for a remover that holds it briefly.
+    let locked =
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0) == 0 && libc::flock(fd, libc::LOCK_SH) == 0 };
+    if !locked {
+        return Err(format!(
+            "cannot lock {}: {}",
+            marker.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    // A remover may have finished just before the lock was taken.
+    let still_there = marker.exists();
+    if still_there {
+        // The descriptor must stay open until the process ends.
+        std::mem::forget(file);
+    }
+    Ok(still_there)
 }
 
 /// Unpacks and compiles the APK into a private directory, then renames it into place, so a failed
@@ -180,10 +232,11 @@ fn install(
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(work.join("oat/x86_64")).map_err(cannot)?;
         std::fs::create_dir_all(work.join("lib")).map_err(cannot)?;
+        File::create(work.join(IN_USE_MARKER)).map_err(cannot)?;
         // A read-only APK must not make its copy impossible to replace, so contents are copied
         // and not its mode.
-        let mut source = std::fs::File::open(args.apk).map_err(cannot)?;
-        let mut copy = std::fs::File::create(work.join("app.apk")).map_err(cannot)?;
+        let mut source = File::open(args.apk).map_err(cannot)?;
+        let mut copy = File::create(work.join("app.apk")).map_err(cannot)?;
         std::io::copy(&mut source, &mut copy).map_err(cannot)?;
         extract_native_libs(args.apk, host_abi(), &work.join("lib"))
             .map_err(|error| error.to_string())?;
@@ -202,20 +255,35 @@ fn install(
         let _ = std::fs::remove_dir_all(&work);
     }
     result?;
-    remove_older_installs(package_dir, id);
     Ok(installed)
 }
 
-/// Best effort: a leftover only costs disk, and a running app keeps its files open.
-fn remove_older_installs(package_dir: &Path, current: &str) {
+/// Removes what nothing needs: other versions not in use, and installs whose process died.
+/// Best effort, because a leftover only costs disk.
+fn remove_unused_installs(package_dir: &Path, current: &str) {
     let Ok(entries) = std::fs::read_dir(package_dir) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let is_install =
-            name.len() == 16 && name.as_encoded_bytes().iter().all(u8::is_ascii_hexdigit);
-        if is_install && name != current {
+        let text = name.to_string_lossy();
+        if let Some(pid) = text.strip_prefix(".installing-") {
+            let alive = Path::new("/proc").join(pid).exists();
+            if !alive {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+            continue;
+        }
+        let is_install = text.len() == 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !is_install || text == current {
+            continue;
+        }
+        let Ok(marker) = File::open(entry.path().join(IN_USE_MARKER)) else {
+            continue;
+        };
+        // SAFETY: the descriptor is open, and a failed lock means the install is in use.
+        let unused = unsafe { libc::flock(marker.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
+        if unused {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -277,7 +345,17 @@ fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> 
         native_dir.display()
     );
     let id = install_id(args.apk, &runtime)?;
-    let installed = install(args, &runtime, &package_dir, &id, &data, &library_path)?;
+    let mut installed = install(args, &runtime, &package_dir, &id, &data, &library_path)?;
+    // A concurrent run of another version may remove an install nobody has marked yet.
+    let mut attempts = 0;
+    while !hold_install(&installed)? {
+        attempts += 1;
+        if attempts == MAX_INSTALL_ATTEMPTS {
+            return Err("the install keeps being removed by other runs".to_string());
+        }
+        installed = install(args, &runtime, &package_dir, &id, &data, &library_path)?;
+    }
+    remove_unused_installs(&package_dir, &id);
     let app = installed.join("app.apk");
     let lib_dir = installed.join("lib");
 

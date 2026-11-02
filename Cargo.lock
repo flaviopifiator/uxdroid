@@ -311,6 +311,7 @@ dependencies = [
 name = "uxdroid-cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "uxdroid-apk",
  "uxdroid-bridge",
  "uxdroid-testkit",

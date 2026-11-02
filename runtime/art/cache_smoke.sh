@@ -63,6 +63,41 @@ done
 for pid in "${pids[@]}"; do wait "$pid" || fail "a parallel first run failed"; done
 echo "ok: parallel first runs all work"
 
+rm -rf "$HOME/.cache/uxdroid"
+expect_label one one
+timeout 60 "$BIN/uxdroid" run "$WORK/one.apk" >"$WORK/held" 2>&1 &
+held=$!
+for _ in $(seq 200); do grep -q "frame presented" "$WORK/held" && break; pause 0.05; done
+expect_label two two
+[ "$(find "$HOME/.cache/uxdroid/com.example.first" -maxdepth 1 -type d -name '????????????????' | wc -l)" = 2 ] \
+    || fail "installing another version removed one in use"
+kill "$held"; wait "$held" 2>/dev/null
+expect_label two two
+[ "$(find "$HOME/.cache/uxdroid/com.example.first" -maxdepth 1 -type d -name '????????????????' | wc -l)" = 2 ] \
+    && { touch "$WORK/two.apk"; expect_label one one; }
+[ "$(find "$HOME/.cache/uxdroid/com.example.first" -maxdepth 1 -type d -name '????????????????' | wc -l)" = 1 ] \
+    || fail "an unused version was not removed"
+echo "ok: a version in use keeps its files, and unused ones go away"
+
+failures=0
+for round in 1 2 3 4 5 6 7 8; do
+    rm -rf "$HOME/.cache/uxdroid"
+    timeout 60 "$BIN/uxdroid" run "$WORK/one.apk" --exit-after-first-frame >"$WORK/a" 2>&1 & first=$!
+    timeout 60 "$BIN/uxdroid" run "$WORK/two.apk" --exit-after-first-frame >"$WORK/b" 2>&1 & second=$!
+    wait "$first" || failures=$((failures + 1))
+    wait "$second" || failures=$((failures + 1))
+    grep -q "label: hello from one" "$WORK/a" || failures=$((failures + 1))
+    grep -q "label: hello from two" "$WORK/b" || failures=$((failures + 1))
+done
+[ "$failures" = 0 ] || fail "two versions started together failed $failures times"
+echo "ok: two versions started together both run their own code"
+
+leftover="$HOME/.cache/uxdroid/com.example.first/.installing-4000000"
+mkdir -p "$leftover"
+expect_label one one
+[ ! -e "$leftover" ] || fail "an install from a dead process was left behind"
+echo "ok: installs from dead processes are cleaned"
+
 mkdir "$WORK/clean"
 cd "$WORK/clean"
 run "$WORK/one.apk" || fail "run from a clean directory"
