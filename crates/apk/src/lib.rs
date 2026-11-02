@@ -9,6 +9,7 @@ use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use zip::ZipArchive;
+use zip::result::ZipError;
 
 pub use manifest::{Manifest, parse_manifest};
 
@@ -134,7 +135,10 @@ pub fn inspect(path: &Path) -> Result<Apk, Error> {
 fn read_manifest(archive: &mut ZipArchive<BufReader<File>>) -> Result<Vec<u8>, Error> {
     let entry = archive
         .by_name(MANIFEST_ENTRY)
-        .map_err(|_| Error::MissingManifest)?;
+        .map_err(|source| match source {
+            ZipError::FileNotFound => Error::MissingManifest,
+            other => Error::InvalidArchive(other.to_string()),
+        })?;
     let mut bytes = Vec::new();
     entry
         .take(MAX_MANIFEST_BYTES + 1)
@@ -173,17 +177,24 @@ fn read_dex_counts(
     ))
 }
 
-/// Android loads `classes.dex`, `classes2.dex`, ... from the archive root only.
+/// Android loads `classes.dex`, `classes2.dex`, `classes3.dex`, ... from the archive root only.
 fn is_dex_entry(name: &str) -> bool {
     name.strip_prefix("classes")
         .and_then(|rest| rest.strip_suffix(".dex"))
-        .is_some_and(|number| number.bytes().all(|byte| byte.is_ascii_digit()))
+        .is_some_and(|number| {
+            number.is_empty()
+                || (number != "1"
+                    && !number.starts_with('0')
+                    && number.bytes().all(|byte| byte.is_ascii_digit()))
+        })
 }
 
 fn native_lib_abi(name: &str) -> Option<&str> {
     let mut parts = name.split('/');
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some("lib"), Some(abi), Some(file), None) if file.ends_with(".so") => Some(abi),
+        (Some("lib"), Some(abi), Some(file), None) if !abi.is_empty() && file.ends_with(".so") => {
+            Some(abi)
+        }
         _ => None,
     }
 }

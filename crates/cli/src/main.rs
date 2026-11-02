@@ -1,4 +1,5 @@
-use std::io::Write;
+use std::ffi::OsString;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -9,39 +10,47 @@ const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`: paths on Linux are bytes and `args` panics on non-UTF-8 ones.
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let [command, apk] = args.as_slice() else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(EXIT_USAGE);
+        return fail(USAGE, EXIT_USAGE);
     };
     if command != "inspect" {
-        eprintln!("{USAGE}");
-        return ExitCode::from(EXIT_USAGE);
+        return fail(USAGE, EXIT_USAGE);
     }
 
-    match inspect(Path::new(apk)) {
-        Ok(apk) => {
-            // A closed pipe, as in `uxdroid inspect app.apk | head -1`, is not a failure.
-            let _ = std::io::stdout().write_all(render(&apk, host_abi()).as_bytes());
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("error: {error}");
-            ExitCode::from(EXIT_FAILURE)
-        }
+    let report = match inspect(Path::new(apk)) {
+        Ok(apk) => render(&apk, host_abi()),
+        Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),
+    };
+    match std::io::stdout().write_all(report.as_bytes()) {
+        // A closed pipe, as in `uxdroid inspect app.apk | head -1`, is not a failure.
+        Err(error) if error.kind() != ErrorKind::BrokenPipe => fail(
+            &format!("error: cannot write output: {error}"),
+            EXIT_FAILURE,
+        ),
+        _ => ExitCode::SUCCESS,
     }
+}
+
+/// Reports on stderr, keeping the exit code even if stderr is closed; `eprintln!` would panic.
+fn fail(message: &str, code: u8) -> ExitCode {
+    let _ = writeln!(std::io::stderr(), "{message}");
+    ExitCode::from(code)
 }
 
 fn render(apk: &Apk, host_abi: &str) -> String {
     let manifest = &apk.manifest;
-    let known = |value: &Option<String>| value.clone().unwrap_or_else(|| "unknown".to_string());
+    // APK strings are untrusted; escaping stops them from forging lines of the report.
+    let safe = |text: &str| text.escape_debug().to_string();
+    let known = |value: &Option<String>| value.as_deref().map_or("unknown".to_string(), safe);
     let abis = if apk.abis.is_empty() {
         "none".to_string()
     } else {
         let counts: Vec<String> = apk
             .abis
             .iter()
-            .map(|(abi, count)| format!("{abi} ({count})"))
+            .map(|(abi, count)| format!("{} ({count})", safe(abi)))
             .collect();
         counts.join(", ")
     };
@@ -54,15 +63,18 @@ fn render(apk: &Apk, host_abi: &str) -> String {
          dex: {} files, {} classes, {} methods\n\
          abis: {abis}\n\
          execution: {}\n",
-        manifest.package,
+        safe(&manifest.package),
         known(&manifest.version_name),
         known(&manifest.version_code),
         known(&manifest.min_sdk),
         known(&manifest.target_sdk),
-        manifest.launcher.as_deref().unwrap_or("none"),
+        manifest
+            .launcher
+            .as_deref()
+            .map_or("none".to_string(), safe),
         apk.dex.files,
         apk.dex.classes,
         apk.dex.methods,
-        apk.execution_path(host_abi),
+        safe(&apk.execution_path(host_abi).to_string()),
     )
 }

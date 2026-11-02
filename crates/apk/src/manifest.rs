@@ -1,6 +1,7 @@
 //! Parser for the binary XML format of `AndroidManifest.xml`.
 //!
-//! Every offset comes from untrusted input, so all reads are bounds-checked.
+//! Every offset comes from untrusted input, so all reads are bounds-checked. Strings stay
+//! undecoded until the end: a hostile file can reuse one huge string from every element.
 
 use crate::Error;
 
@@ -54,7 +55,7 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
     let mut walker = Walker::default();
 
     let mut position = header_size;
-    while position + CHUNK_HEADER_SIZE <= document.len() {
+    while document.len().saturating_sub(position) >= CHUNK_HEADER_SIZE {
         let kind = u16_at(document, position)?;
         let chunk_header = usize::from(u16_at(document, position + 2)?);
         let size = u32_at(document, position + 4)? as usize;
@@ -62,9 +63,7 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
         if size < CHUNK_HEADER_SIZE {
             return Err(malformed("chunk size too small"));
         }
-        let chunk = document
-            .get(position..position + size)
-            .ok_or(malformed("truncated chunk"))?;
+        let chunk = slice(document, position, size)?;
 
         match kind {
             CHUNK_STRING_POOL => pool = Some(StringPool::new(chunk, chunk_header)?),
@@ -92,18 +91,43 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
         position += size;
     }
 
-    walker.finish()
+    walker.finish(pool.as_ref())
+}
+
+/// An attribute value that has not been decoded yet.
+#[derive(Clone, Copy)]
+enum AttrValue {
+    Text(u32),
+    Reference(u32),
+    Number(u32),
+}
+
+impl AttrValue {
+    fn decode(self, pool: &StringPool) -> Result<String, Error> {
+        match self {
+            AttrValue::Text(index) => pool.get(index),
+            AttrValue::Reference(id) => Ok(format!("@{id:#010x}")),
+            AttrValue::Number(number) => Ok(number.to_string()),
+        }
+    }
+
+    fn is_text(self, pool: &StringPool, text: &str) -> Result<bool, Error> {
+        match self {
+            AttrValue::Text(index) => pool.is(index, text),
+            _ => Ok(false),
+        }
+    }
 }
 
 #[derive(Default)]
 struct Walker {
-    package: Option<String>,
-    version_code: Option<String>,
-    version_name: Option<String>,
-    min_sdk: Option<String>,
-    target_sdk: Option<String>,
-    launcher: Option<String>,
-    component: Option<String>,
+    package: Option<AttrValue>,
+    version_code: Option<AttrValue>,
+    version_name: Option<AttrValue>,
+    min_sdk: Option<AttrValue>,
+    target_sdk: Option<AttrValue>,
+    launcher: Option<AttrValue>,
+    component: Option<AttrValue>,
     has_main_action: bool,
     has_launcher_category: bool,
 }
@@ -111,63 +135,66 @@ struct Walker {
 impl Walker {
     fn start_element(&mut self, element: &[u8], names: &Names) -> Result<(), Error> {
         let attrs = Attributes::new(element, names)?;
-        match names.pool.get(u32_at(element, 4)?)?.as_str() {
-            "manifest" => {
-                self.package = attrs.plain("package")?;
-                self.version_code = attrs.android(ATTR_VERSION_CODE, "versionCode")?;
-                self.version_name = attrs.android(ATTR_VERSION_NAME, "versionName")?;
-            }
-            "uses-sdk" => {
-                self.min_sdk = attrs.android(ATTR_MIN_SDK, "minSdkVersion")?;
-                self.target_sdk = attrs.android(ATTR_TARGET_SDK, "targetSdkVersion")?;
-            }
-            "activity" => self.component = attrs.android(ATTR_NAME, "name")?,
+        let pool = names.pool;
+        let name = u32_at(element, 4)?;
+
+        if pool.is(name, "manifest")? {
+            self.package = attrs.plain("package")?;
+            self.version_code = attrs.android(ATTR_VERSION_CODE, "versionCode")?;
+            self.version_name = attrs.android(ATTR_VERSION_NAME, "versionName")?;
+        } else if pool.is(name, "uses-sdk")? {
+            self.min_sdk = attrs.android(ATTR_MIN_SDK, "minSdkVersion")?;
+            self.target_sdk = attrs.android(ATTR_TARGET_SDK, "targetSdkVersion")?;
+        } else if pool.is(name, "activity")? {
+            self.component = attrs.android(ATTR_NAME, "name")?;
+        } else if pool.is(name, "activity-alias")? {
             // Launching an alias starts its target, so the target is what must run.
-            "activity-alias" => {
-                self.component = match attrs.android(ATTR_TARGET_ACTIVITY, "targetActivity")? {
-                    Some(target) => Some(target),
-                    None => attrs.android(ATTR_NAME, "name")?,
-                };
+            self.component = match attrs.android(ATTR_TARGET_ACTIVITY, "targetActivity")? {
+                Some(target) => Some(target),
+                None => attrs.android(ATTR_NAME, "name")?,
+            };
+        } else if pool.is(name, "intent-filter")? {
+            self.has_main_action = false;
+            self.has_launcher_category = false;
+        } else if pool.is(name, "action")? {
+            if let Some(value) = attrs.android(ATTR_NAME, "name")? {
+                self.has_main_action |= value.is_text(pool, ACTION_MAIN)?;
             }
-            "intent-filter" => {
-                self.has_main_action = false;
-                self.has_launcher_category = false;
-            }
-            "action" => {
-                self.has_main_action |=
-                    attrs.android(ATTR_NAME, "name")?.as_deref() == Some(ACTION_MAIN);
-            }
-            "category" => {
-                self.has_launcher_category |=
-                    attrs.android(ATTR_NAME, "name")?.as_deref() == Some(CATEGORY_LAUNCHER);
-            }
-            _ => {}
+        } else if pool.is(name, "category")?
+            && let Some(value) = attrs.android(ATTR_NAME, "name")?
+        {
+            self.has_launcher_category |= value.is_text(pool, CATEGORY_LAUNCHER)?;
         }
         Ok(())
     }
 
     fn end_element(&mut self, element: &[u8], names: &Names) -> Result<(), Error> {
-        match names.pool.get(u32_at(element, 4)?)?.as_str() {
-            "intent-filter" => {
-                if self.has_main_action && self.has_launcher_category && self.launcher.is_none() {
-                    self.launcher = self.component.clone();
-                }
+        let pool = names.pool;
+        let name = u32_at(element, 4)?;
+        if pool.is(name, "intent-filter")? {
+            if self.has_main_action && self.has_launcher_category && self.launcher.is_none() {
+                self.launcher = self.component;
             }
-            "activity" | "activity-alias" => self.component = None,
-            _ => {}
+        } else if pool.is(name, "activity")? || pool.is(name, "activity-alias")? {
+            self.component = None;
         }
         Ok(())
     }
 
-    fn finish(self) -> Result<Manifest, Error> {
-        let package = self.package.ok_or(malformed("no package name"))?;
-        let launcher = self.launcher.map(|name| qualify_class(&package, &name));
+    fn finish(self, pool: Option<&StringPool>) -> Result<Manifest, Error> {
+        let (Some(package), Some(pool)) = (self.package, pool) else {
+            return Err(malformed("no package name"));
+        };
+        let decode = |value: Option<AttrValue>| value.map(|value| value.decode(pool)).transpose();
+
+        let package = package.decode(pool)?;
+        let launcher = decode(self.launcher)?.map(|name| qualify_class(&package, &name));
         Ok(Manifest {
             package,
-            version_code: self.version_code,
-            version_name: self.version_name,
-            min_sdk: self.min_sdk,
-            target_sdk: self.target_sdk,
+            version_code: decode(self.version_code)?,
+            version_name: decode(self.version_name)?,
+            min_sdk: decode(self.min_sdk)?,
+            target_sdk: decode(self.target_sdk)?,
             launcher,
         })
     }
@@ -220,47 +247,52 @@ impl<'a> Attributes<'a> {
         })
     }
 
-    fn android(&self, id: u32, name: &str) -> Result<Option<String>, Error> {
-        self.find(|attr_id, attr_name| match attr_id {
-            Some(attr_id) => Ok(attr_id == id),
-            None => Ok(attr_name()? == name),
-        })
-    }
-
-    fn plain(&self, name: &str) -> Result<Option<String>, Error> {
-        self.find(|attr_id, attr_name| Ok(attr_id.is_none() && attr_name()? == name))
-    }
-
-    fn find(
-        &self,
-        matches: impl Fn(Option<u32>, &dyn Fn() -> Result<String, Error>) -> Result<bool, Error>,
-    ) -> Result<Option<String>, Error> {
-        for index in 0..self.count {
-            let attr = self.start + index * self.size;
+    fn android(&self, id: u32, name: &str) -> Result<Option<AttrValue>, Error> {
+        for attr in self.offsets() {
             let name_index = u32_at(self.element, attr + 4)?;
-            let name = || self.names.pool.get(name_index);
-            if matches(self.names.resource_id(name_index), &name)? {
+            let matches = match self.names.resource_id(name_index) {
+                Some(attr_id) => attr_id == id,
+                None => self.names.pool.is(name_index, name)?,
+            };
+            if matches {
                 return self.value(attr).map(Some);
             }
         }
         Ok(None)
     }
 
-    fn value(&self, attr: usize) -> Result<String, Error> {
+    fn plain(&self, name: &str) -> Result<Option<AttrValue>, Error> {
+        for attr in self.offsets() {
+            let name_index = u32_at(self.element, attr + 4)?;
+            if self.names.resource_id(name_index).is_none()
+                && self.names.pool.is(name_index, name)?
+            {
+                return self.value(attr).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    fn offsets(&self) -> impl Iterator<Item = usize> + use<> {
+        let (start, size) = (self.start, self.size);
+        (0..self.count).map(move |index| start + index * size)
+    }
+
+    fn value(&self, attr: usize) -> Result<AttrValue, Error> {
         let raw = u32_at(self.element, attr + 8)?;
         if raw != NO_INDEX {
-            return self.names.pool.get(raw);
+            return Ok(AttrValue::Text(raw));
         }
         let kind = *self
             .element
             .get(attr + 15)
             .ok_or(malformed("truncated attribute"))?;
         let data = u32_at(self.element, attr + 16)?;
-        match kind {
-            VALUE_STRING => self.names.pool.get(data),
-            VALUE_REFERENCE => Ok(format!("@{data:#010x}")),
-            _ => Ok(data.to_string()),
-        }
+        Ok(match kind {
+            VALUE_STRING => AttrValue::Text(data),
+            VALUE_REFERENCE => AttrValue::Reference(data),
+            _ => AttrValue::Number(data),
+        })
     }
 }
 
@@ -284,67 +316,78 @@ impl<'a> StringPool<'a> {
     }
 
     fn get(&self, index: u32) -> Result<String, Error> {
+        let bytes = self.raw(index)?;
+        if self.utf8 {
+            Ok(String::from_utf8_lossy(bytes).into_owned())
+        } else {
+            let (units, _) = bytes.as_chunks::<2>();
+            let units: Vec<u16> = units.iter().map(|unit| u16::from_le_bytes(*unit)).collect();
+            Ok(String::from_utf16_lossy(&units))
+        }
+    }
+
+    /// Compares an entry to ASCII text in time bounded by the text, not by the entry.
+    fn is(&self, index: u32, text: &str) -> Result<bool, Error> {
+        let bytes = self.raw(index)?;
+        if self.utf8 {
+            return Ok(bytes == text.as_bytes());
+        }
+        if bytes.len() != text.len() * 2 {
+            return Ok(false);
+        }
+        let (units, _) = bytes.as_chunks::<2>();
+        Ok(units
+            .iter()
+            .zip(text.bytes())
+            .all(|(unit, byte)| *unit == [byte, 0]))
+    }
+
+    /// The encoded characters of an entry, without its length prefix.
+    fn raw(&self, index: u32) -> Result<&'a [u8], Error> {
         if index >= self.count {
             return Err(malformed("string index out of range"));
         }
-        let entry = self.offsets + index as usize * 4;
-        let start = self.strings + u32_at(self.chunk, entry)? as usize;
+        let entry = (index as usize)
+            .checked_mul(4)
+            .and_then(|offset| offset.checked_add(self.offsets))
+            .ok_or(malformed("string index out of range"))?;
+        let start = self
+            .strings
+            .checked_add(u32_at(self.chunk, entry)? as usize)
+            .ok_or(malformed("string offset out of range"))?;
         if self.utf8 {
-            self.utf8_at(start)
+            // UTF-8 entries store the length in UTF-16 units, then in bytes.
+            let (_, after_units) = self.utf8_length(start)?;
+            let (length, data) = self.utf8_length(after_units)?;
+            slice(self.chunk, data, length)
         } else {
-            self.utf16_at(start)
+            let first = usize::from(u16_at(self.chunk, start)?);
+            let data = start
+                .checked_add(2)
+                .ok_or(malformed("string offset out of range"))?;
+            if first & 0x8000 == 0 {
+                return slice(self.chunk, data, first * 2);
+            }
+            let second = usize::from(u16_at(self.chunk, data)?);
+            let length = (((first & 0x7FFF) as u64) << 16 | second as u64) * 2;
+            let length = usize::try_from(length).map_err(|_| malformed("truncated string"))?;
+            slice(self.chunk, data + 2, length)
         }
-    }
-
-    /// UTF-8 entries store the length in UTF-16 units, then in bytes.
-    fn utf8_at(&self, start: usize) -> Result<String, Error> {
-        let (_, after_units) = self.utf8_length(start)?;
-        let (length, data) = self.utf8_length(after_units)?;
-        let bytes = self
-            .chunk
-            .get(data..data + length)
-            .ok_or(malformed("truncated string"))?;
-        Ok(String::from_utf8_lossy(bytes).into_owned())
     }
 
     fn utf8_length(&self, position: usize) -> Result<(usize, usize), Error> {
-        let first = usize::from(
-            *self
-                .chunk
-                .get(position)
-                .ok_or(malformed("truncated string"))?,
-        );
-        if first & 0x80 == 0 {
-            return Ok((first, position + 1));
-        }
-        let second = usize::from(
-            *self
-                .chunk
-                .get(position + 1)
-                .ok_or(malformed("truncated string"))?,
-        );
-        Ok((((first & 0x7F) << 8) | second, position + 2))
-    }
-
-    fn utf16_at(&self, start: usize) -> Result<String, Error> {
-        let first = usize::from(u16_at(self.chunk, start)?);
-        let (length, data) = if first & 0x8000 == 0 {
-            (first, start + 2)
-        } else {
-            let second = usize::from(u16_at(self.chunk, start + 2)?);
-            (((first & 0x7FFF) << 16) | second, start + 4)
-        };
         let bytes = self
             .chunk
-            .get(data..data + length * 2)
+            .get(position..)
             .ok_or(malformed("truncated string"))?;
-        let units: Vec<u16> = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|unit| u16::from_le_bytes(*unit))
-            .collect();
-        Ok(String::from_utf16_lossy(&units))
+        match bytes {
+            [first, ..] if first & 0x80 == 0 => Ok((usize::from(*first), position + 1)),
+            [first, second, ..] => Ok((
+                (usize::from(first & 0x7F) << 8) | usize::from(*second),
+                position + 2,
+            )),
+            _ => Err(malformed("truncated string")),
+        }
     }
 }
 
@@ -352,16 +395,19 @@ fn malformed(reason: &'static str) -> Error {
     Error::MalformedManifest(reason)
 }
 
+fn slice(bytes: &[u8], start: usize, length: usize) -> Result<&[u8], Error> {
+    start
+        .checked_add(length)
+        .and_then(|end| bytes.get(start..end))
+        .ok_or(malformed("unexpected end of data"))
+}
+
 fn u16_at(bytes: &[u8], offset: usize) -> Result<u16, Error> {
-    let raw = bytes
-        .get(offset..offset + 2)
-        .ok_or(malformed("unexpected end of data"))?;
+    let raw = slice(bytes, offset, 2)?;
     Ok(u16::from_le_bytes([raw[0], raw[1]]))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, Error> {
-    let raw = bytes
-        .get(offset..offset + 4)
-        .ok_or(malformed("unexpected end of data"))?;
+    let raw = slice(bytes, offset, 4)?;
     Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
 }

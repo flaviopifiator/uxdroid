@@ -104,10 +104,13 @@ impl Axml {
 
         let mut interned = HashMap::new();
         let mut intern = |strings: &mut Vec<String>, text: &str| -> u32 {
-            *interned.entry(text.to_string()).or_insert_with(|| {
-                strings.push(text.to_string());
-                strings.len() as u32 - 1
-            })
+            if let Some(index) = interned.get(text) {
+                return *index;
+            }
+            strings.push(text.to_string());
+            let index = strings.len() as u32 - 1;
+            interned.insert(text.to_string(), index);
+            index
         };
 
         let ns_uri = intern(&mut strings, ANDROID_NS);
@@ -314,6 +317,9 @@ fn push_string_pool(out: &mut Vec<u8>, strings: &[String], utf16: bool) {
         offsets.push(data.len() as u32);
         if utf16 {
             let units: Vec<u16> = text.encode_utf16().collect();
+            if units.len() >= 0x8000 {
+                push_u16(&mut data, 0x8000 | (units.len() >> 16) as u16);
+            }
             push_u16(&mut data, units.len() as u16);
             units.iter().for_each(|unit| push_u16(&mut data, *unit));
             push_u16(&mut data, 0);

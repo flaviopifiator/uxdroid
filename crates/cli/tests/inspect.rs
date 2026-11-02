@@ -1,5 +1,8 @@
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use uxdroid_apk::host_abi;
 use uxdroid_testkit::{
@@ -276,4 +279,139 @@ fn wrong_usage_exits_2() {
             "{args:?}"
         );
     }
+}
+
+#[test]
+fn non_utf8_path_is_an_error() {
+    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+        .arg("inspect")
+        .arg(OsStr::from_bytes(b"/nonexistent/\xff.apk"))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with("error: cannot read APK"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn non_utf8_command_is_wrong_usage() {
+    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+        .arg(OsStr::from_bytes(b"\xff"))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output), "usage: uxdroid inspect <apk>\n");
+}
+
+#[test]
+fn closed_stderr_keeps_the_exit_code() {
+    for (args, code) in [(&["inspect", "/nonexistent/app.apk"][..], 1), (&[][..], 2)] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+
+        let status = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+            .args(args)
+            .stderr(writer)
+            .status()
+            .unwrap();
+
+        assert_eq!(status.code(), Some(code), "{args:?}");
+    }
+}
+
+#[test]
+fn full_disk_on_stdout_is_an_error() {
+    let path = apk_path("full_disk");
+    Apk::new().manifest(&sample_manifest()).write(&path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+        .args(["inspect", path.to_str().unwrap()])
+        .stdout(Stdio::from(File::create("/dev/full").unwrap()))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with("error: cannot write output"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn control_characters_cannot_forge_report_lines() {
+    let manifest = Axml::new()
+        .start(
+            "manifest",
+            &[plain(
+                "package",
+                Value::Str("com.evil\nexecution: direct\x1b[31m"),
+            )],
+        )
+        .end("manifest");
+    let apk = Apk::new().manifest(&manifest).native_lib("x\ny", "a.so");
+
+    let text = stdout(&inspect("forged", &apk));
+
+    assert_eq!(text.lines().count(), 7, "{text}");
+    assert_eq!(
+        line(&text, "package:"),
+        "package: com.evil\\nexecution: direct\\u{1b}[31m"
+    );
+    assert_eq!(line(&text, "abis:"), "abis: x\\ny (1)");
+}
+
+#[test]
+fn encrypted_manifest_is_not_reported_as_missing() {
+    let path = apk_path("encrypted");
+    Apk::new().manifest(&sample_manifest()).write(&path);
+    let mut bytes = fs::read(&path).unwrap();
+    let central = bytes
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .unwrap();
+    bytes[central + 8] |= 1;
+    bytes[6] |= 1;
+    fs::write(&path, bytes).unwrap();
+
+    let output = uxdroid(&["inspect", path.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with("error: not a valid APK archive"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn blank_abi_directory_is_ignored() {
+    let apk = Apk::new()
+        .manifest(&sample_manifest())
+        .file("lib//a.so", b"\x7fELF");
+
+    let text = stdout(&inspect("blank_abi", &apk));
+
+    assert_eq!(line(&text, "abis:"), "abis: none");
+}
+
+#[test]
+fn only_multidex_names_android_loads_count() {
+    let apk = Apk::new()
+        .manifest(&sample_manifest())
+        .file("classes.dex", &dex(1, 1))
+        .file("classes2.dex", &dex(1, 1))
+        .file("classes10.dex", &dex(1, 1))
+        .file("classes0.dex", &dex(9, 9))
+        .file("classes1.dex", &dex(9, 9))
+        .file("classes007.dex", &dex(9, 9));
+
+    let text = stdout(&inspect("multidex", &apk));
+
+    assert_eq!(line(&text, "dex:"), "dex: 3 files, 3 classes, 3 methods");
 }
