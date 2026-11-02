@@ -41,18 +41,21 @@ Inside one app, a platform service call becomes a direct in-process call instead
 
 Android Translation Layer (ATL) is GPL-3.0-or-later. We study its approach but copy no code from it, so uxdroid's license stays an open choice. AOSP code is Apache-2.0 and can be reused with attribution.
 
-### The loader never lets an incompatible symbol bind silently
+### The loader binds to glibc only what was audited
 
-bionic and glibc share most symbol names but not their ABI. A probe compiled against both measured `sigset_t` at 8 and 128 bytes, `jmp_buf` at 88 and 200, and different `sysconf` and `EAI_*` constants, while `addrinfo` swaps two fields. Passing those calls straight to glibc would corrupt memory with no error, so each symbol takes one of four paths:
+bionic and glibc share most symbol names but not their ABI. Probes compiled against both measured `sigset_t` at 8 and 128 bytes, `jmp_buf` at 88 and 200, `regex_t` at 32 and 64, different `sysconf`, `pathconf` and `EAI_*` constants, and `addrinfo` with two fields swapped. Passing those calls to glibc corrupts memory with no error, and a list of known bad symbols can never be complete. So the default is to refuse:
 
 | Symbol | Result |
 |--------|--------|
-| Same ABI in glibc | Binds directly, with no added cost |
+| Listed in `crates/bridge/src/glibc_compatible.txt` | Binds directly, with no added cost |
 | Different ABI, translatable | Binds to a shim in `crates/bridge/src/shims.rs` |
-| Different ABI, no shim yet, such as `long double` functions | Loads, and stops the program naming the symbol if it is called |
+| A function in glibc that nobody audited | Loads, and stops the program naming the symbol if it is called |
+| Data in glibc that nobody audited | The load fails, because data cannot trap |
 | Found nowhere | The load fails, listing every missing name |
 
-The list of incompatible symbols comes from the measured differences and is not proven complete, so a symbol nobody has audited still binds to glibc. Static initializers with non-zero bionic values, such as `PTHREAD_RECURSIVE_MUTEX_INITIALIZER`, are not translated. Libraries using ELF TLS, which means a minimum SDK of 29 or higher with `thread_local`, are rejected for now.
+Printing a `long double` also stops by name, because the `printf` family checks its format. To support a new symbol, compare its signature, structs and constants against the NDK headers, then add it to the list. The audit covers signatures, measured layouts and constants, and individual behavior differences can remain, such as `sysconf` returning `EINVAL` for names not yet mapped.
+
+Not translated yet: static initializers with non-zero bionic values, such as `PTHREAD_RECURSIVE_MUTEX_INITIALIZER`. Libraries using ELF TLS, which means a minimum SDK of 29 or higher with `thread_local`, are rejected.
 
 ## Roadmap
 
@@ -66,6 +69,7 @@ Each milestone removes the largest remaining risk first.
 | 3 | Launcher and first `Activity` | An APK opens a Wayland window |
 | 4 | `arm64-v8a` translation | ARM-only native apps run on x86_64 |
 | 5 | Google Play | See below |
+| 6 | macOS | Once the product is complete and optimized on Linux. iOS is out of scope. |
 
 ## Known limit: Google Play
 

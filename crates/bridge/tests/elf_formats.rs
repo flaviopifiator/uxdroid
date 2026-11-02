@@ -2,11 +2,20 @@
 #![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 
 use uxdroid_bridge::elf::{
-    Rela, decode_packed, for_each_relr, gnu_hash, parse_dynamic, parse_header,
+    ElfError, Rela, for_each_packed, for_each_relr, gnu_hash, parse_dynamic, parse_header,
     parse_program_headers, sysv_hash,
 };
 
 const R_RELATIVE: u64 = 8;
+
+fn decode_packed(data: &[u8], limit: u64) -> Result<Vec<Rela>, ElfError> {
+    let mut relocations = Vec::new();
+    for_each_packed(data, limit, |rela| {
+        relocations.push(rela);
+        Ok(())
+    })?;
+    Ok(relocations)
+}
 
 fn sleb(mut value: i64, out: &mut Vec<u8>) {
     loop {
@@ -222,8 +231,25 @@ fn dynamic_sections_reject_what_the_loader_cannot_honor() {
     assert_eq!(dynamic.needed, vec![5, 9]);
     assert_eq!(dynamic.strtab, 0x100);
 
+    let too_many: Vec<(u64, u64)> = (0..257).map(|_| (1, 0)).chain([(0, 0)]).collect();
+    assert!(parse_dynamic(&entries(&too_many)).is_err());
+
     assert!(parse_dynamic(&entries(&[(5, 0x100)])).is_err());
     assert!(parse_dynamic(&entries(&[(22, 0), (0, 0)])).is_err());
     assert!(parse_dynamic(&entries(&[(30, 4), (0, 0)])).is_err());
     assert!(parse_dynamic(&entries(&[(20, 17), (0, 0)])).is_err());
+}
+
+#[test]
+fn a_rejected_packed_relocation_stops_a_huge_declared_count_at_once() {
+    let bomb = packed(&[i64::from(i32::MAX), 0, i64::from(i32::MAX), 3, 8, 8]);
+    let mut applied = 0;
+
+    let result = for_each_packed(&bomb, u64::MAX, |_| {
+        applied += 1;
+        Err(ElfError::Malformed("outside the image"))
+    });
+
+    assert!(result.is_err());
+    assert_eq!(applied, 1);
 }

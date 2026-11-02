@@ -1,6 +1,7 @@
 services:
   # Builds and tests. Has network access to fetch crates.
   dev:
+    image: uxdroid-dev
     build: .
     user: "1000:1000"
     cap_drop: [ALL]

@@ -30,6 +30,14 @@ const CHECKS: &[&str] = &[
     "test_dlopen",
     "test_getaddrinfo",
     "test_strerror_r",
+    "test_setjmp_restores_the_signal_mask",
+    "test_sigsetjmp",
+    "test_path_helpers_leave_their_input_alone",
+    "test_getnameinfo",
+    "test_pathconf",
+    "test_setbuf",
+    "test_fortified_fread",
+    "test_printf_family",
     "test_atfork",
     "test_getprogname",
     "test_ifunc",
@@ -271,6 +279,181 @@ fn abi_incompatible_symbols_load_and_trap_by_name_when_called() {
         stderr(&output).contains("uxdroid: strtold has an incompatible ABI"),
         "{}",
         stderr(&output)
+    );
+}
+
+#[test]
+fn unaudited_glibc_symbols_stop_the_program_by_name_when_called() {
+    let library = plain_dir().join("libbasic.so");
+
+    for (function, message) in [
+        ("trap_unaudited", "uxdroid: regcomp is not audited"),
+        ("trap_long_double_math", "uxdroid: sincosl is not audited"),
+        (
+            "trap_printf_long_double",
+            "with a long double format has an incompatible ABI",
+        ),
+    ] {
+        let output = load_and_call(&library, function);
+
+        assert_eq!(output.status.code(), None, "{function} must die from abort");
+        assert!(
+            stderr(&output).contains(message),
+            "{function}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn unaudited_glibc_data_fails_the_load() {
+    let dir = build_root().join("data");
+    let source = dir.join("data.c");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        "extern int getdate_err;\nint entry(void) { return getdate_err; }\n",
+    )
+    .unwrap();
+    ndk_build(
+        &dir,
+        "libdata.so",
+        MIN_SDK,
+        &[source.to_str().unwrap()],
+        &["-Wl,-z,undefs"],
+    );
+
+    let output = uxdroid(&["load", dir.join("libdata.so").to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "error: libdata.so: unresolved symbols: getdate_err\n"
+    );
+}
+
+#[test]
+fn repeating_call_is_wrong_usage() {
+    let output = uxdroid(&["load", "a.so", "--call", "one", "--call", "two"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("usage: uxdroid load"));
+}
+
+#[test]
+fn a_bare_file_name_searches_the_current_directory_for_dependencies() {
+    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+        .args(["load", "libbasic.so", "--call", "answer"])
+        .current_dir(plain_dir())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).ends_with("call answer: 42\n"));
+}
+
+#[test]
+fn calling_an_exported_ifunc_calls_the_function_it_resolves_to() {
+    let dir = build_root().join("ifunc");
+    let source = dir.join("ifunc.c");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        "static int target(void) { return 99; }\n\
+         static int (*resolver(void))(void) { return target; }\n\
+         int exported(void) __attribute__((ifunc(\"resolver\")));\n",
+    )
+    .unwrap();
+    ndk_build(
+        &dir,
+        "libifunc.so",
+        MIN_SDK,
+        &[source.to_str().unwrap()],
+        &[],
+    );
+
+    let output = load_and_call(&dir.join("libifunc.so"), "exported");
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("call exported: 99\n"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn an_ifunc_resolver_outside_code_is_rejected_before_running() {
+    let dir = build_root().join("bad-ifunc");
+    let source = dir.join("bad.s");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        ".data\n.globl bad\n.type bad, @gnu_indirect_function\nbad:\n.quad 0\n\
+         .text\n.globl entry\nentry:\ncall bad@PLT\nret\n",
+    )
+    .unwrap();
+    ndk_build(&dir, "libbad.so", MIN_SDK, &[source.to_str().unwrap()], &[]);
+
+    let output = uxdroid(&["load", dir.join("libbad.so").to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1), "{:?}", output.status);
+    assert!(
+        stderr(&output).contains("ifunc resolver outside executable segments"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn the_same_name_at_another_path_is_a_different_library() {
+    let dir = build_root().join("same-name");
+    for (subdir, value) in [("a", 1), ("b", 2)] {
+        let source = dir.join(format!("{subdir}.c"));
+        std::fs::create_dir_all(dir.join(subdir)).unwrap();
+        std::fs::write(&source, format!("int value(void) {{ return {value}; }}\n")).unwrap();
+        ndk_build(
+            &dir.join(subdir),
+            "libsame.so",
+            MIN_SDK,
+            &[source.to_str().unwrap()],
+            &[],
+        );
+    }
+    let source = dir.join("top.c");
+    let first = dir.join("a/libsame.so");
+    let second = dir.join("b/libsame.so");
+    std::fs::write(
+        &source,
+        format!(
+            "#include <dlfcn.h>\n\
+             int entry(void) {{\n\
+               void *a = dlopen(\"{}\", RTLD_NOW);\n\
+               void *b = dlopen(\"{}\", RTLD_NOW);\n\
+               int (*fa)(void) = (int (*)(void))dlsym(a, \"value\");\n\
+               int (*fb)(void) = (int (*)(void))dlsym(b, \"value\");\n\
+               return fa() * 10 + fb();\n\
+             }}\n",
+            first.display(),
+            second.display()
+        ),
+    )
+    .unwrap();
+    ndk_build(
+        &dir,
+        "libtop.so",
+        MIN_SDK,
+        &[source.to_str().unwrap()],
+        &["-ldl"],
+    );
+
+    let output = load_and_call(&dir.join("libtop.so"), "entry");
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("call entry: 12\n"),
+        "{}",
+        stdout(&output)
     );
 }
 

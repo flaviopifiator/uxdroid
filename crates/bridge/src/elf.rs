@@ -12,6 +12,9 @@ const PAGE_SIZE: u64 = 4096;
 /// Android uses at most 64 KiB; the limit keeps address space reservations reasonable.
 const MAX_SEGMENT_ALIGN: u64 = 1 << 30;
 
+/// Real libraries need a handful. The limit bounds the memory a crafted file can make us use.
+const MAX_NEEDED: usize = 256;
+
 pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
 pub const PT_TLS: u32 = 7;
@@ -21,6 +24,7 @@ pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
 
 pub const STB_WEAK: u8 = 2;
+pub const STT_FUNC: u8 = 2;
 pub const STT_TLS: u8 = 6;
 pub const STT_GNU_IFUNC: u8 = 10;
 
@@ -221,7 +225,12 @@ pub fn parse_dynamic(section: &[u8]) -> Result<Dynamic> {
         let value = u64_at(entry, 8);
         match tag {
             0 => return Ok(dynamic),
-            1 => dynamic.needed.push(value),
+            1 => {
+                if dynamic.needed.len() == MAX_NEEDED {
+                    return Err(ElfError::Malformed("too many direct dependencies"));
+                }
+                dynamic.needed.push(value);
+            }
             2 => dynamic.pltrelsz = value,
             4 => dynamic.hash = value,
             5 => dynamic.strtab = value,
@@ -313,8 +322,13 @@ impl Rela {
 
 /// Decodes the "APS2" packed relocation format that `--pack-dyn-relocs=android` produces.
 ///
-/// `limit` caps the declared count: without it a few bytes could declare endless relocations.
-pub fn decode_packed(data: &[u8], limit: u64) -> Result<Vec<Rela>> {
+/// `limit` caps the declared count, and nothing is buffered: a few bytes can declare billions of
+/// relocations, and `apply` rejects the first one outside the image.
+pub fn for_each_packed(
+    data: &[u8],
+    limit: u64,
+    mut apply: impl FnMut(Rela) -> Result<()>,
+) -> Result<()> {
     const GROUPED_BY_INFO: i64 = 1;
     const GROUPED_BY_OFFSET_DELTA: i64 = 2;
     const GROUPED_BY_ADDEND: i64 = 4;
@@ -330,7 +344,6 @@ pub fn decode_packed(data: &[u8], limit: u64) -> Result<Vec<Rela>> {
     }
     let mut remaining = count as u64;
     let mut offset = reader.next_value()? as u64;
-    let mut relocations = Vec::with_capacity((remaining as usize).min(data.len()));
     let mut info = 0;
     let mut addend: i64 = 0;
 
@@ -367,11 +380,11 @@ pub fn decode_packed(data: &[u8], limit: u64) -> Result<Vec<Rela>> {
             if has_addend && flags & GROUPED_BY_ADDEND == 0 {
                 addend = addend.wrapping_add(reader.next_value()?);
             }
-            relocations.push(Rela::from_info(offset, info, addend));
+            apply(Rela::from_info(offset, info, addend))?;
         }
         remaining -= group_size as u64;
     }
-    Ok(relocations)
+    Ok(())
 }
 
 struct Sleb128<'a> {

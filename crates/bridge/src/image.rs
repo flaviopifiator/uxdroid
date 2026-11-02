@@ -8,6 +8,9 @@ use crate::elf::{
     ElfError, PF_R, PF_W, PF_X, PT_GNU_RELRO, PT_LOAD, ProgramHeader, page_ceil, page_floor,
 };
 
+/// Longer than any real symbol or library name.
+const MAX_STRING_BYTES: u64 = 64 * 1024;
+
 /// A mapped library. The mapping lives until `unmap`; loaded libraries are never unloaded.
 #[derive(Debug)]
 pub struct Image {
@@ -179,16 +182,17 @@ impl Image {
         if offset >= table_len {
             return Err(ElfError::Malformed("string offset past table"));
         }
+        // Bounded, so a crafted table cannot cost its whole size on every lookup.
         let bytes = self.bytes(
             table
                 .checked_add(offset)
                 .ok_or(ElfError::Malformed("string offset past table"))?,
-            table_len - offset,
+            (table_len - offset).min(MAX_STRING_BYTES),
         )?;
         let end = bytes
             .iter()
             .position(|&byte| byte == 0)
-            .ok_or(ElfError::Malformed("unterminated string"))?;
+            .ok_or(ElfError::Malformed("unterminated or oversized string"))?;
         Ok(&bytes[..end])
     }
 
@@ -234,10 +238,12 @@ impl Image {
                 continue;
             }
             let inside = self.loads.iter().any(|load| {
-                page_floor(load.vaddr) <= start && end <= page_ceil(load.end()).unwrap_or(0)
+                load.flags & PF_W != 0
+                    && page_floor(load.vaddr) <= start
+                    && end <= page_ceil(load.end()).unwrap_or(0)
             });
             if !inside {
-                return Err(ElfError::Malformed("RELRO outside loadable segments"));
+                return Err(ElfError::Malformed("RELRO outside writable segments"));
             }
             // SAFETY: the range is page-aligned and inside this image, and no code has run yet
             // that could depend on writing to it.

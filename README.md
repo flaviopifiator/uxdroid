@@ -57,9 +57,9 @@ call answer: 42
 | Option | Meaning |
 |--------|---------|
 | `--search-dir <dir>` | Also look for dependencies here, besides the library's own directory. Can repeat. |
-| `--call <symbol>` | Call the exported function `int symbol(void)` and print its result |
+| `--call <symbol>` | Call the exported function `int symbol(void)` and print its result. At most once. |
 
-Exit codes: `0` success, `1` the library or a dependency cannot be loaded, or the symbol does not exist, `2` wrong usage. A load that fails names every missing library or symbol it knows of. A function with no compatible ABI yet, such as `strtold`, stops the program with its name if called.
+Exit codes: `0` success, `1` the library or a dependency cannot be loaded, or the symbol does not exist, `2` wrong usage. A load that fails names every missing library or symbol it knows of. A function from glibc that has not been audited for bionic compatibility, such as `regcomp`, stops the program with its name if called. See [the architecture](docs/architecture.md).
 
 ## Performance
 

@@ -13,9 +13,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use crate::elf::{
     Dynamic, EHDR_SIZE, ElfError, PHDR_SIZE, PT_DYNAMIC, PT_LOAD, PT_TLS, ProgramHeader,
     R_X86_64_64, R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_GLOB_DAT, R_X86_64_IRELATIVE,
-    R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, RELA_SIZE, Rela, STB_WEAK, STT_GNU_IFUNC, STT_TLS,
-    SYM_SIZE, Symbol, decode_packed, for_each_relr, gnu_hash, parse_dynamic, parse_header,
-    parse_program_headers, sysv_hash,
+    R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, RELA_SIZE, Rela, STB_WEAK, STT_FUNC, STT_GNU_IFUNC,
+    STT_TLS, SYM_SIZE, Symbol, for_each_packed, for_each_relr, gnu_hash, parse_dynamic,
+    parse_header, parse_program_headers, sysv_hash,
 };
 use crate::image::Image;
 use crate::shims;
@@ -30,6 +30,7 @@ const SYSTEM_LIBRARIES: &[&str] = &[
 ];
 /// Stops a crafted dependency graph from exhausting memory or the stack.
 const MAX_LIBRARIES_PER_LOAD: usize = 1024;
+const MAX_REPORTED_SYMBOLS: usize = 4096;
 
 #[derive(Debug)]
 pub enum Error {
@@ -119,10 +120,30 @@ impl Library {
             .collect()
     }
 
-    /// The address of an exported symbol.
+    /// The address of an exported symbol, after running its resolver if it is an ifunc.
     pub fn symbol(&self, name: &str) -> Option<*const c_void> {
         let symbol = self.find(name.as_bytes())?;
-        Some(self.image.bias().wrapping_add(symbol.value as usize) as *const c_void)
+        let address = self.symbol_address(&symbol).ok()?;
+        Some(address as usize as *const c_void)
+    }
+
+    /// The runtime address of one of this library's defined symbols.
+    fn symbol_address(&self, symbol: &Symbol) -> Result<u64, ElfError> {
+        let address = self.image.bias().wrapping_add(symbol.value as usize) as u64;
+        match symbol.kind {
+            STT_TLS => Err(ElfError::Unsupported("ELF TLS")),
+            STT_GNU_IFUNC => {
+                if !self.image.is_executable(symbol.value) {
+                    return Err(ElfError::Malformed(
+                        "ifunc resolver outside executable segments",
+                    ));
+                }
+                // SAFETY: the check above proves the resolver is in this library's code, and
+                // the ELF format defines its signature.
+                Ok(unsafe { call_resolver(address) })
+            }
+            _ => Ok(address),
+        }
     }
 
     /// Calls an exported `int name(void)`.
@@ -230,6 +251,8 @@ impl Library {
         }
         let buckets = table.wrapping_add(8);
         let chains = buckets.wrapping_add(u64::from(bucket_count) * 4);
+        // The table must really hold the chains it declares, which bounds the walk below.
+        self.image.bytes(chains, u64::from(chain_count) * 4)?;
         let bucket = u64::from(sysv_hash(name) % bucket_count);
         let mut index = self.u32_at(buckets.wrapping_add(bucket * 4))?;
         // A chain visits each symbol at most once; more steps mean a crafted cycle.
@@ -327,12 +350,12 @@ pub fn load(path: &Path, search_dirs: &[PathBuf]) -> Result<&'static Library, Er
                 registry.search_dirs.push(dir.clone());
             }
         }
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            && !registry.search_dirs.iter().any(|dir| dir == parent)
-        {
-            registry.search_dirs.push(parent.to_path_buf());
+        let own_dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        if !registry.search_dirs.iter().any(|dir| dir == own_dir) {
+            registry.search_dirs.push(own_dir.to_path_buf());
         }
         link_tree(path, registry)?
     };
@@ -347,10 +370,17 @@ fn link_tree(
     registry: &mut Registry,
 ) -> Result<(&'static Library, Vec<&'static Library>), Error> {
     let root_name = file_name(path);
+    let same_file = |library: &Library| {
+        let loaded = Path::new(std::ffi::OsStr::from_bytes(library.path.as_bytes()));
+        match (std::fs::canonicalize(path), std::fs::canonicalize(loaded)) {
+            (Ok(requested), Ok(loaded)) => requested == loaded,
+            _ => false,
+        }
+    };
     if let Some(existing) = registry
         .libraries
         .iter()
-        .find(|library| library.name == root_name)
+        .find(|library| library.name == root_name && same_file(library))
     {
         return Ok((existing, Vec::new()));
     }
@@ -571,17 +601,14 @@ fn dependencies_first(
 }
 
 /// A symbol's address, searching `scope` in order, then the shims and glibc.
-fn resolve(scope: &[&'static Library], name: &[u8]) -> Result<Option<u64>, ElfError> {
+fn resolve(
+    scope: &[&'static Library],
+    name: &[u8],
+    is_data: bool,
+) -> Result<Option<u64>, ElfError> {
     for library in scope {
         if let Some(symbol) = library.find(name) {
-            let address = library.image.bias().wrapping_add(symbol.value as usize) as u64;
-            return match symbol.kind {
-                STT_TLS => Err(ElfError::Unsupported("ELF TLS")),
-                // SAFETY: the library declares this symbol to be an ifunc resolver, which
-                // takes nothing and returns the function's address.
-                STT_GNU_IFUNC => Ok(Some(unsafe { call_resolver(address) })),
-                _ => Ok(Some(address)),
-            };
+            return library.symbol_address(&symbol).map(Some);
         }
     }
     let mut owned = Vec::with_capacity(name.len() + 1);
@@ -590,7 +617,7 @@ fn resolve(scope: &[&'static Library], name: &[u8]) -> Result<Option<u64>, ElfEr
     let Ok(name) = CStr::from_bytes_with_nul(&owned) else {
         return Ok(None);
     };
-    Ok(shims::resolve(name).map(|address| address as u64))
+    Ok(shims::resolve(name, is_data).map(|address| address as u64))
 }
 
 /// # Safety
@@ -633,9 +660,7 @@ fn relocate(
             .max()
             .unwrap_or(0);
         let data = image.bytes(dynamic.android_rela, dynamic.android_relasz)?;
-        for rela in decode_packed(data, span / 8)? {
-            apply(rela)?;
-        }
+        for_each_packed(data, span / 8, &mut apply)?;
     }
     for (table, size) in [
         (dynamic.rela, dynamic.relasz),
@@ -682,7 +707,7 @@ fn apply_relocation(
             let address = match cache.get(&rela.symbol) {
                 Some(&address) => address,
                 None => {
-                    let address = symbol_address(library, scope, rela.symbol, missing)?;
+                    let address = symbol_address(library, scope, rela, missing)?;
                     cache.insert(rela.symbol, address);
                     address
                 }
@@ -702,18 +727,22 @@ fn apply_relocation(
 fn symbol_address(
     library: &'static Library,
     scope: &[&'static Library],
-    index: u32,
+    rela: Rela,
     missing: &mut BTreeSet<String>,
 ) -> Result<u64, ElfError> {
+    let index = rela.symbol;
     if index == 0 {
         return Ok(0);
     }
     let symbol = library.symbol_at(index)?;
     let name = library.symbol_name(&symbol)?;
-    if let Some(address) = resolve(scope, name)? {
+    // Only something known to be a function can trap when called; reading a trap as data can't.
+    let is_data = symbol.kind != STT_FUNC && rela.kind != R_X86_64_JUMP_SLOT;
+    if let Some(address) = resolve(scope, name, is_data)? {
         return Ok(address);
     }
-    if symbol.bind != STB_WEAK {
+    // The limit bounds the memory of an error report for a crafted file.
+    if symbol.bind != STB_WEAK && missing.len() < MAX_REPORTED_SYMBOLS {
         missing.insert(String::from_utf8_lossy(name).into_owned());
     }
     Ok(0)
@@ -825,7 +854,7 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
         // SYSTEM_HANDLE or RTLD_NEXT: only the host remains to search.
         Vec::new()
     };
-    match resolve(&scope, symbol.to_bytes()) {
+    match resolve(&scope, symbol.to_bytes(), false) {
         Ok(Some(address)) => address as *mut c_void,
         _ => {
             set_dl_error(format!("undefined symbol: {}", symbol.to_string_lossy()));

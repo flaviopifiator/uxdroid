@@ -4,11 +4,11 @@
 //! `sigset_t` is 8 bytes in bionic and 128 in glibc, `jmp_buf` 88 and 200, `fpos_t` 8 and 16.
 //! `long double` has the same size with another format: binary128 and x87 80-bit.
 
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::io::Write;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::loader;
 
@@ -26,14 +26,89 @@ unsafe impl Send for Target {}
 // SAFETY: as above.
 unsafe impl Sync for Target {}
 
-/// The address of `name` outside loaded libraries: a shim first, then glibc.
-pub fn resolve(name: &CStr) -> Option<usize> {
-    let bytes = name.to_str().ok()?;
-    match table().get(bytes) {
+/// The address of `name` outside loaded libraries: a shim, or glibc if the symbol is audited.
+///
+/// A function glibc has but nobody audited gets a trap that names it when called, because it may
+/// corrupt memory silently. A data symbol cannot trap, so it counts as not found.
+pub fn resolve(name: &CStr, is_data: bool) -> Option<usize> {
+    let text = name.to_str().ok()?;
+    match table().get(text) {
         Some(Target::Function(address)) => Some(*address as usize),
         Some(Target::Alias(target)) => host_symbol(target),
-        None => host_symbol(name),
+        None => {
+            let address = host_symbol(name)?;
+            if audited().contains(text) {
+                Some(address)
+            } else if is_data {
+                None
+            } else {
+                unaudited_trap(text)
+            }
+        }
     }
+}
+
+fn audited() -> &'static HashSet<&'static str> {
+    static AUDITED: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    AUDITED.get_or_init(|| {
+        include_str!("glibc_compatible.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .flat_map(str::split_whitespace)
+            .collect()
+    })
+}
+
+const UNAUDITED_SLOTS: usize = 4096;
+
+// One small stub per unaudited symbol, each pushing its slot number. Having them in the binary
+// means nothing is written at run time, and pages stay free of write-and-execute mappings.
+std::arch::global_asm!(
+    ".globl uxdroid_unaudited_stubs",
+    ".p2align 4",
+    "uxdroid_unaudited_stubs:",
+    ".set uxdroid_slot, 0",
+    ".rept 4096",
+    ".p2align 4",
+    "pushq $uxdroid_slot",
+    "jmp uxdroid_unaudited_common",
+    ".set uxdroid_slot, uxdroid_slot + 1",
+    ".endr",
+    "uxdroid_unaudited_common:",
+    "popq %rdi",
+    "subq $8, %rsp",
+    "call {report}",
+    report = sym report_unaudited,
+    options(att_syntax),
+);
+
+unsafe extern "C" {
+    fn uxdroid_unaudited_stubs();
+}
+
+static UNAUDITED_NAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn unaudited_trap(name: &str) -> Option<usize> {
+    const STUB_BYTES: usize = 16;
+    let mut names = UNAUDITED_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = match names.iter().position(|known| known == name) {
+        Some(slot) => slot,
+        None if names.len() < UNAUDITED_SLOTS => {
+            names.push(name.to_string());
+            names.len() - 1
+        }
+        None => return None,
+    };
+    Some(uxdroid_unaudited_stubs as *const () as usize + slot * STUB_BYTES)
+}
+
+extern "C" fn report_unaudited(slot: usize) -> ! {
+    let names = UNAUDITED_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let name = names.get(slot).map_or("unknown symbol", String::as_str);
+    die(format_args!(
+        "uxdroid: {} is not audited for bionic compatibility yet\n",
+        name.escape_debug()
+    ))
 }
 
 fn host_symbol(name: &CStr) -> Option<usize> {
@@ -86,10 +161,8 @@ macro_rules! traps {
 }
 
 traps! {
-    // These save a signal mask past the end of bionic's smaller buffer.
-    sigsetjmp siglongjmp
-    // Different buffer sizes or argument order.
-    fgetpos fsetpos __fgets_chk
+    // Different buffer size.
+    fgetpos fsetpos
     // Android's long double is binary128 in xmm0; glibc's is x87.
     strtold strtold_l wcstold wcstold_l
     acosl acoshl asinl asinhl atanl atan2l atanhl cbrtl ceill copysignl cosl coshl erfl erfcl
@@ -124,10 +197,6 @@ const ALIASES: &[(&str, &CStr)] = &[
     ("__errno", c"__errno_location"),
     ("__gnu_basename", c"basename"),
     ("__gnu_strerror_r", c"strerror_r"),
-    ("basename", c"__xpg_basename"),
-    // glibc's `setjmp` saves the signal mask and would overflow bionic's jmp_buf.
-    ("longjmp", c"_longjmp"),
-    ("setjmp", c"_setjmp"),
     ("strerror_r", c"__xpg_strerror_r"),
 ];
 
@@ -157,38 +226,58 @@ functions! {
     "__assert2" => assert2_failed,
     "__pthread_cleanup_pop" => pthread_cleanup_pop,
     "__pthread_cleanup_push" => pthread_cleanup_push,
+    "__fgets_chk" => fgets_chk,
+    "__fread_chk" => fread_chk,
+    "__fwrite_chk" => fwrite_chk,
+    "__snprintf_chk" => uxdroid_snprintf_chk,
+    "__sprintf_chk" => uxdroid_sprintf_chk,
     "__strchr_chk" => strchr_chk,
     "__strlcat_chk" => strlcat_chk,
     "__strlcpy_chk" => strlcpy_chk,
     "__strlen_chk" => strlen_chk,
     "__strncpy_chk2" => strncpy_chk2,
     "__strrchr_chk" => strrchr_chk,
+    "__vsnprintf_chk" => vsnprintf_chk,
+    "__vsprintf_chk" => vsprintf_chk,
+    "_longjmp" => uxdroid_longjmp,
+    "_setjmp" => uxdroid_underscore_setjmp,
     "__system_property_find" => system_property_find,
     "__system_property_get" => system_property_get,
     "android_dlopen_ext" => loader::android_dlopen_ext,
     "android_set_abort_message" => set_abort_message,
+    "asprintf" => uxdroid_asprintf,
+    "basename" => basename,
+    "dirname" => dirname,
     "dl_iterate_phdr" => loader::dl_iterate_phdr,
+    "dprintf" => uxdroid_dprintf,
     "dladdr" => loader::dladdr,
     "dlclose" => loader::dlclose,
     "dlerror" => loader::dlerror,
     "dlopen" => loader::dlopen,
     "dlsym" => loader::dlsym,
     "epoll_pwait" => epoll_pwait,
+    "fpathconf" => fpathconf,
     "fprintf" => uxdroid_fprintf,
     "freeaddrinfo" => freeaddrinfo,
     "fscanf" => uxdroid_fscanf,
     "fwprintf" => uxdroid_fwprintf,
     "fwscanf" => uxdroid_fwscanf,
     "gai_strerror" => gai_strerror,
+    "getnameinfo" => getnameinfo,
     "getprogname" => getprogname,
+    "longjmp" => uxdroid_longjmp,
     "getaddrinfo" => getaddrinfo,
     "nl_langinfo" => nl_langinfo,
+    "pathconf" => pathconf,
     "ppoll" => ppoll,
+    "printf" => uxdroid_printf,
     "pselect" => pselect,
     "pthread_atfork" => pthread_atfork,
     "pthread_exit" => pthread_exit,
     "pthread_sigmask" => pthread_sigmask,
     "pthread_sigmask64" => pthread_sigmask,
+    "setbuf" => setbuf,
+    "setjmp" => uxdroid_setjmp,
     "sigaction" => sigaction,
     "sigaction64" => sigaction,
     "sigaddset" => sigaddset,
@@ -201,11 +290,13 @@ functions! {
     "sigfillset64" => sigfillset,
     "sigismember" => sigismember,
     "sigismember64" => sigismember,
+    "siglongjmp" => uxdroid_longjmp,
     "signalfd" => signalfd,
     "sigpending" => sigpending,
     "sigpending64" => sigpending,
     "sigprocmask" => sigprocmask,
     "sigprocmask64" => sigprocmask,
+    "sigsetjmp" => uxdroid_sigsetjmp,
     "sigsuspend" => sigsuspend,
     "sigsuspend64" => sigsuspend,
     "sigtimedwait" => sigtimedwait,
@@ -214,7 +305,24 @@ functions! {
     "sigwait64" => sigwait,
     "sigwaitinfo" => sigwaitinfo,
     "sigwaitinfo64" => sigwaitinfo,
+    "snprintf" => uxdroid_snprintf,
+    "sprintf" => uxdroid_sprintf,
+    "sscanf" => uxdroid_sscanf,
+    "swprintf" => uxdroid_swprintf,
     "sysconf" => sysconf,
+    "syslog" => uxdroid_syslog,
+    "vasprintf" => vasprintf,
+    "vfprintf" => vfprintf,
+    "vfscanf" => vfscanf,
+    "vfwprintf" => vfwprintf,
+    "vfwscanf" => vfwscanf,
+    "vdprintf" => vdprintf,
+    "vprintf" => vprintf,
+    "vsnprintf" => checked_vsnprintf,
+    "vsprintf" => vsprintf,
+    "vsscanf" => vsscanf,
+    "vswprintf" => vswprintf,
+    "vsyslog" => vsyslog,
 }
 
 // --- Logging ---
@@ -232,6 +340,54 @@ unsafe extern "C" {
     fn uxdroid_fscanf();
     fn uxdroid_fwprintf();
     fn uxdroid_fwscanf();
+    fn uxdroid_printf();
+    fn uxdroid_sprintf();
+    fn uxdroid_snprintf();
+    fn uxdroid_asprintf();
+    fn uxdroid_dprintf();
+    fn uxdroid_sscanf();
+    fn uxdroid_swprintf();
+    fn uxdroid_syslog();
+    fn uxdroid_sprintf_chk();
+    fn uxdroid_snprintf_chk();
+    fn uxdroid_setjmp();
+    fn uxdroid_underscore_setjmp();
+    fn uxdroid_sigsetjmp();
+    fn uxdroid_longjmp();
+    fn __vsprintf_chk(
+        buffer: *mut c_char,
+        flags: c_int,
+        size: usize,
+        format: *const c_char,
+        args: *mut c_void,
+    ) -> c_int;
+    fn __vsnprintf_chk(
+        buffer: *mut c_char,
+        size: usize,
+        flags: c_int,
+        object_size: usize,
+        format: *const c_char,
+        args: *mut c_void,
+    ) -> c_int;
+    #[link_name = "vsprintf"]
+    fn host_vsprintf(buffer: *mut c_char, format: *const c_char, args: *mut c_void) -> c_int;
+    #[link_name = "vprintf"]
+    fn host_vprintf(format: *const c_char, args: *mut c_void) -> c_int;
+    #[link_name = "vasprintf"]
+    fn host_vasprintf(buffer: *mut *mut c_char, format: *const c_char, args: *mut c_void) -> c_int;
+    #[link_name = "vdprintf"]
+    fn host_vdprintf(fd: c_int, format: *const c_char, args: *mut c_void) -> c_int;
+    #[link_name = "vsscanf"]
+    fn host_vsscanf(text: *const c_char, format: *const c_char, args: *mut c_void) -> c_int;
+    #[link_name = "vswprintf"]
+    fn host_vswprintf(
+        buffer: *mut i32,
+        size: usize,
+        format: *const i32,
+        args: *mut c_void,
+    ) -> c_int;
+    #[link_name = "vsyslog"]
+    fn host_vsyslog(priority: c_int, format: *const c_char, args: *mut c_void);
 }
 
 // Stable Rust cannot define C-variadic functions, so these entry points build the System V
@@ -245,6 +401,7 @@ macro_rules! variadic_entry {
             concat!(".type ", $name, ", @function"),
             concat!($name, ":"),
             "sub rsp, 216",
+            "mov [rsp + 40], rsi",
             "mov [rsp + 48], rdx",
             "mov [rsp + 56], rcx",
             "mov [rsp + 64], r8",
@@ -283,10 +440,549 @@ variadic_entry!(
     "24",
     "rcx"
 );
-variadic_entry!("uxdroid_fprintf", stdio::vfprintf, "16", "rdx");
-variadic_entry!("uxdroid_fscanf", stdio::vfscanf, "16", "rdx");
-variadic_entry!("uxdroid_fwprintf", stdio::vfwprintf, "16", "rdx");
-variadic_entry!("uxdroid_fwscanf", stdio::vfwscanf, "16", "rdx");
+variadic_entry!("uxdroid_fprintf", vfprintf, "16", "rdx");
+variadic_entry!("uxdroid_fscanf", vfscanf, "16", "rdx");
+variadic_entry!("uxdroid_fwprintf", vfwprintf, "16", "rdx");
+variadic_entry!("uxdroid_fwscanf", vfwscanf, "16", "rdx");
+variadic_entry!("uxdroid_printf", vprintf, "8", "rsi");
+variadic_entry!("uxdroid_sprintf", vsprintf, "16", "rdx");
+variadic_entry!("uxdroid_snprintf", checked_vsnprintf, "24", "rcx");
+variadic_entry!("uxdroid_asprintf", vasprintf, "16", "rdx");
+variadic_entry!("uxdroid_dprintf", vdprintf, "16", "rdx");
+variadic_entry!("uxdroid_sscanf", vsscanf, "16", "rdx");
+variadic_entry!("uxdroid_swprintf", vswprintf, "24", "rcx");
+variadic_entry!("uxdroid_syslog", vsyslog, "16", "rdx");
+variadic_entry!("uxdroid_sprintf_chk", vsprintf_chk, "32", "r8");
+variadic_entry!("uxdroid_snprintf_chk", vsnprintf_chk, "40", "r9");
+
+// --- Formatted output ---
+
+/// A `long double` argument travels in SSE registers on Android and in memory for glibc, so a
+/// format that reads one would print garbage. Scanning costs little next to the formatting.
+fn reject_long_double(format: impl Iterator<Item = u32>, function: &str) {
+    const FLAGS_AND_WIDTH: &[u8] = b"-+ #0123456789.*'$";
+    let mut format = format.peekable();
+    while let Some(unit) = format.next() {
+        if unit != u32::from(b'%') {
+            continue;
+        }
+        while format
+            .next_if(|next| u8::try_from(*next).is_ok_and(|byte| FLAGS_AND_WIDTH.contains(&byte)))
+            .is_some()
+        {}
+        if format.peek() == Some(&u32::from(b'L')) {
+            die(format_args!(
+                "uxdroid: {function} with a long double format has an incompatible ABI and no shim yet\n"
+            ));
+        }
+        // Consumes `%%`, so its second `%` does not start a conversion.
+        format.next_if_eq(&u32::from(b'%'));
+    }
+}
+
+/// # Safety
+/// `format` must be a C string.
+unsafe fn check_format(format: *const c_char, function: &str) {
+    // SAFETY: the caller promises a C string.
+    let bytes = unsafe { CStr::from_ptr(format) }.to_bytes();
+    reject_long_double(bytes.iter().map(|&byte| u32::from(byte)), function);
+}
+
+/// # Safety
+/// `format` must be a NUL-terminated wide string.
+unsafe fn check_wide_format(format: *const i32, function: &str) {
+    let mut length = 0;
+    // SAFETY: the caller promises a terminator.
+    let units = unsafe {
+        while *format.add(length) != 0 {
+            length += 1;
+        }
+        std::slice::from_raw_parts(format, length)
+    };
+    reject_long_double(units.iter().map(|&unit| unit as u32), function);
+}
+
+unsafe extern "C" fn vprintf(format: *const c_char, args: *mut c_void) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vprintf");
+        host_vprintf(format, args)
+    }
+}
+
+unsafe extern "C" fn vsprintf(
+    buffer: *mut c_char,
+    format: *const c_char,
+    args: *mut c_void,
+) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vsprintf");
+        host_vsprintf(buffer, format, args)
+    }
+}
+
+unsafe extern "C" fn checked_vsnprintf(
+    buffer: *mut c_char,
+    size: usize,
+    format: *const c_char,
+    args: *mut c_void,
+) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vsnprintf");
+        vsnprintf(buffer, size, format, args)
+    }
+}
+
+unsafe extern "C" fn vasprintf(
+    buffer: *mut *mut c_char,
+    format: *const c_char,
+    args: *mut c_void,
+) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vasprintf");
+        host_vasprintf(buffer, format, args)
+    }
+}
+
+unsafe extern "C" fn vdprintf(fd: c_int, format: *const c_char, args: *mut c_void) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vdprintf");
+        host_vdprintf(fd, format, args)
+    }
+}
+
+unsafe extern "C" fn vsscanf(
+    text: *const c_char,
+    format: *const c_char,
+    args: *mut c_void,
+) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vsscanf");
+        host_vsscanf(text, format, args)
+    }
+}
+
+unsafe extern "C" fn vswprintf(
+    buffer: *mut i32,
+    size: usize,
+    format: *const i32,
+    args: *mut c_void,
+) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_wide_format(format, "vswprintf");
+        host_vswprintf(buffer, size, format, args)
+    }
+}
+
+unsafe extern "C" fn vsyslog(priority: c_int, format: *const c_char, args: *mut c_void) {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vsyslog");
+        host_vsyslog(priority, format, args);
+    }
+}
+
+unsafe extern "C" fn vsprintf_chk(
+    buffer: *mut c_char,
+    flags: c_int,
+    size: usize,
+    format: *const c_char,
+    args: *mut c_void,
+) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "__vsprintf_chk");
+        __vsprintf_chk(buffer, flags, size, format, args)
+    }
+}
+
+unsafe extern "C" fn vsnprintf_chk(
+    buffer: *mut c_char,
+    size: usize,
+    flags: c_int,
+    object_size: usize,
+    format: *const c_char,
+    args: *mut c_void,
+) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "__vsnprintf_chk");
+        __vsnprintf_chk(buffer, size, flags, object_size, format, args)
+    }
+}
+
+unsafe extern "C" fn vfprintf(
+    file: *mut c_void,
+    format: *const c_char,
+    args: *mut c_void,
+) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vfprintf");
+        stdio::vfprintf(file, format, args)
+    }
+}
+
+unsafe extern "C" fn vfscanf(file: *mut c_void, format: *const c_char, args: *mut c_void) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_format(format, "vfscanf");
+        stdio::vfscanf(file, format, args)
+    }
+}
+
+unsafe extern "C" fn vfwprintf(file: *mut c_void, format: *const i32, args: *mut c_void) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_wide_format(format, "vfwprintf");
+        stdio::vfwprintf(file, format, args)
+    }
+}
+
+unsafe extern "C" fn vfwscanf(file: *mut c_void, format: *const i32, args: *mut c_void) -> c_int {
+    // SAFETY: the C contract makes these valid.
+    unsafe {
+        check_wide_format(format, "vfwscanf");
+        stdio::vfwscanf(file, format, args)
+    }
+}
+
+// --- Non-local jumps ---
+
+// bionic's jmp_buf is 88 bytes and glibc's 200, and glibc's `setjmp` writes a whole signal mask.
+// These own the buffer: callee-saved registers at 0..56, the mask flag at 64, the mask at 72, and
+// the floating point control words at 80.
+std::arch::global_asm!(
+    ".globl uxdroid_setjmp",
+    ".globl uxdroid_underscore_setjmp",
+    ".globl uxdroid_sigsetjmp",
+    ".globl uxdroid_longjmp",
+    "uxdroid_setjmp:",
+    "mov esi, 1",
+    "jmp uxdroid_sigsetjmp",
+    "uxdroid_underscore_setjmp:",
+    "xor esi, esi",
+    "uxdroid_sigsetjmp:",
+    "mov [rdi], rbx",
+    "mov [rdi + 8], rbp",
+    "mov [rdi + 16], r12",
+    "mov [rdi + 24], r13",
+    "mov [rdi + 32], r14",
+    "mov [rdi + 40], r15",
+    "lea rax, [rsp + 8]",
+    "mov [rdi + 48], rax",
+    "mov rax, [rsp]",
+    "mov [rdi + 56], rax",
+    "mov eax, esi",
+    "mov [rdi + 64], rax",
+    "stmxcsr [rdi + 80]",
+    "fnstcw [rdi + 84]",
+    "test esi, esi",
+    "je 2f",
+    "sub rsp, 8",
+    "call {save_mask}",
+    "add rsp, 8",
+    "2:",
+    "xor eax, eax",
+    "ret",
+    "uxdroid_longjmp:",
+    "cmp qword ptr [rdi + 64], 0",
+    "je 3f",
+    "push rdi",
+    "push rsi",
+    "sub rsp, 8",
+    "call {restore_mask}",
+    "add rsp, 8",
+    "pop rsi",
+    "pop rdi",
+    "3:",
+    "ldmxcsr [rdi + 80]",
+    "fldcw [rdi + 84]",
+    "mov rbx, [rdi]",
+    "mov rbp, [rdi + 8]",
+    "mov r12, [rdi + 16]",
+    "mov r13, [rdi + 24]",
+    "mov r14, [rdi + 32]",
+    "mov r15, [rdi + 40]",
+    "mov eax, esi",
+    "test eax, eax",
+    "jne 4f",
+    "mov eax, 1",
+    "4:",
+    "mov rsp, [rdi + 48]",
+    "jmp qword ptr [rdi + 56]",
+    save_mask = sym save_jump_mask,
+    restore_mask = sym restore_jump_mask,
+);
+
+const JUMP_MASK_OFFSET: usize = 72;
+
+unsafe extern "C" fn save_jump_mask(buffer: *mut u8) {
+    // SAFETY: zero is a valid set, and `buffer` is the caller's jmp_buf, which holds this offset.
+    unsafe {
+        let mut current: libc::sigset_t = std::mem::zeroed();
+        libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut current);
+        buffer
+            .add(JUMP_MASK_OFFSET)
+            .cast::<u64>()
+            .write_unaligned(narrow(&current));
+    }
+}
+
+unsafe extern "C" fn restore_jump_mask(buffer: *const u8) {
+    // SAFETY: `buffer` is the caller's jmp_buf, which `save_jump_mask` filled.
+    unsafe {
+        let wide = widen(buffer.add(JUMP_MASK_OFFSET).cast::<u64>());
+        libc::pthread_sigmask(libc::SIG_SETMASK, &wide, std::ptr::null_mut());
+    }
+}
+
+// --- Path helpers ---
+
+thread_local! {
+    /// bionic's `basename` and `dirname` return a per-thread buffer and leave their input alone.
+    static PATH_RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+fn path_result(text: &[u8]) -> *mut c_char {
+    PATH_RESULT.with(|buffer| {
+        let mut buffer = buffer.borrow_mut();
+        buffer.clear();
+        buffer.extend_from_slice(text);
+        buffer.push(0);
+        buffer.as_mut_ptr().cast()
+    })
+}
+
+fn path_base(path: &[u8]) -> &[u8] {
+    let trimmed = path.trim_ascii_end_slashes();
+    if path.is_empty() {
+        return b".";
+    }
+    if trimmed.is_empty() {
+        return b"/";
+    }
+    let start = trimmed
+        .iter()
+        .rposition(|&byte| byte == b'/')
+        .map_or(0, |slash| slash + 1);
+    &trimmed[start..]
+}
+
+fn path_dir(path: &[u8]) -> &[u8] {
+    if path.is_empty() {
+        return b".";
+    }
+    let trimmed = path.trim_ascii_end_slashes();
+    if trimmed.is_empty() {
+        return b"/";
+    }
+    let Some(slash) = trimmed.iter().rposition(|&byte| byte == b'/') else {
+        return b".";
+    };
+    let parent = trimmed[..slash].trim_ascii_end_slashes();
+    if parent.is_empty() { b"/" } else { parent }
+}
+
+trait TrimSlashes {
+    fn trim_ascii_end_slashes(&self) -> &[u8];
+}
+
+impl TrimSlashes for [u8] {
+    fn trim_ascii_end_slashes(&self) -> &[u8] {
+        let end = self
+            .iter()
+            .rposition(|&byte| byte != b'/')
+            .map_or(0, |last| last + 1);
+        &self[..end]
+    }
+}
+
+/// # Safety
+/// `path` must be null or a C string.
+unsafe fn path_bytes<'a>(path: *const c_char) -> &'a [u8] {
+    if path.is_null() {
+        return b"";
+    }
+    // SAFETY: not null, and the caller promises a C string.
+    unsafe { CStr::from_ptr(path) }.to_bytes()
+}
+
+unsafe extern "C" fn basename(path: *const c_char) -> *mut c_char {
+    // SAFETY: the C contract makes `path` null or a C string.
+    path_result(path_base(unsafe { path_bytes(path) }))
+}
+
+unsafe extern "C" fn dirname(path: *const c_char) -> *mut c_char {
+    // SAFETY: the C contract makes `path` null or a C string.
+    path_result(path_dir(unsafe { path_bytes(path) }))
+}
+
+// --- Stream calls with another shape ---
+
+const BIONIC_BUFSIZ: usize = 1024;
+
+unsafe extern "C" fn setbuf(file: *mut c_void, buffer: *mut c_char) {
+    // glibc's own `setbuf` assumes its 8192-byte BUFSIZ and would overrun bionic's 1024.
+    let mode = if buffer.is_null() {
+        libc::_IONBF
+    } else {
+        libc::_IOFBF
+    };
+    // SAFETY: the C contract gives `buffer` BUFSIZ bytes, or makes it null.
+    unsafe { stdio::setvbuf(file, buffer, mode, BIONIC_BUFSIZ) };
+}
+
+fn check_stream_size(function: &str, size: usize, count: usize, object_size: usize) {
+    if size
+        .checked_mul(count)
+        .is_none_or(|total| total > object_size)
+    {
+        fortify_failure(function);
+    }
+}
+
+unsafe extern "C" fn fread_chk(
+    buffer: *mut c_void,
+    size: usize,
+    count: usize,
+    file: *mut c_void,
+    object_size: usize,
+) -> usize {
+    check_stream_size("fread", size, count, object_size);
+    // SAFETY: the check proves the read fits the caller's object.
+    unsafe { stdio::fread(buffer, size, count, file) }
+}
+
+unsafe extern "C" fn fwrite_chk(
+    buffer: *const c_void,
+    size: usize,
+    count: usize,
+    file: *mut c_void,
+    object_size: usize,
+) -> usize {
+    check_stream_size("fwrite", size, count, object_size);
+    // SAFETY: the check proves the write stays inside the caller's object.
+    unsafe { stdio::fwrite(buffer, size, count, file) }
+}
+
+unsafe extern "C" fn fgets_chk(
+    buffer: *mut c_char,
+    size: c_int,
+    file: *mut c_void,
+    object_size: usize,
+) -> *mut c_char {
+    if size < 0 || size as usize > object_size {
+        fortify_failure("fgets");
+    }
+    // SAFETY: the check proves the read fits the caller's object.
+    unsafe { stdio::fgets(buffer, size, file) }
+}
+
+// --- Name lookups and limits ---
+
+/// bionic's `_PC_*` values, from `unistd.h`, mapped to glibc's.
+const PATHCONF_NAMES: &[(c_int, c_int)] = &[
+    (0, libc::_PC_FILESIZEBITS),
+    (1, libc::_PC_LINK_MAX),
+    (2, libc::_PC_MAX_CANON),
+    (3, libc::_PC_MAX_INPUT),
+    (4, libc::_PC_NAME_MAX),
+    (5, libc::_PC_PATH_MAX),
+    (6, libc::_PC_PIPE_BUF),
+    (7, libc::_PC_2_SYMLINKS),
+    (8, libc::_PC_ALLOC_SIZE_MIN),
+    (9, libc::_PC_REC_INCR_XFER_SIZE),
+    (10, libc::_PC_REC_MAX_XFER_SIZE),
+    (11, libc::_PC_REC_MIN_XFER_SIZE),
+    (12, libc::_PC_REC_XFER_ALIGN),
+    (13, libc::_PC_SYMLINK_MAX),
+    (14, libc::_PC_CHOWN_RESTRICTED),
+    (15, libc::_PC_NO_TRUNC),
+    (16, libc::_PC_VDISABLE),
+    (17, libc::_PC_ASYNC_IO),
+    (18, libc::_PC_PRIO_IO),
+    (19, libc::_PC_SYNC_IO),
+];
+
+fn host_pathconf_name(name: c_int) -> Option<c_int> {
+    let host = PATHCONF_NAMES.iter().find(|(bionic, _)| *bionic == name);
+    if host.is_none() {
+        set_errno(libc::EINVAL);
+    }
+    host.map(|(_, glibc)| *glibc)
+}
+
+unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> c_long {
+    match host_pathconf_name(name) {
+        // SAFETY: the C contract makes `path` a C string.
+        Some(host) => unsafe { libc::pathconf(path, host) },
+        None => -1,
+    }
+}
+
+unsafe extern "C" fn fpathconf(fd: c_int, name: c_int) -> c_long {
+    match host_pathconf_name(name) {
+        // SAFETY: pathconf with a descriptor takes only integers.
+        Some(host) => unsafe { libc::fpathconf(fd, host) },
+        None => -1,
+    }
+}
+
+/// bionic's `NI_*` flags, from `netdb.h`, mapped to glibc's.
+const NI_FLAGS: &[(c_int, c_int)] = &[
+    (0x01, libc::NI_NOFQDN),
+    (0x02, libc::NI_NUMERICHOST),
+    (0x04, libc::NI_NAMEREQD),
+    (0x08, libc::NI_NUMERICSERV),
+    (0x10, libc::NI_DGRAM),
+];
+
+unsafe extern "C" fn getnameinfo(
+    address: *const libc::sockaddr,
+    address_size: libc::socklen_t,
+    host: *mut c_char,
+    host_size: usize,
+    service: *mut c_char,
+    service_size: usize,
+    flags: c_int,
+) -> c_int {
+    let (Ok(host_size), Ok(service_size)) = (host_size.try_into(), service_size.try_into()) else {
+        return bionic_eai(libc::EAI_OVERFLOW);
+    };
+    let mut host_flags = 0;
+    for &(bionic, glibc) in NI_FLAGS {
+        if flags & bionic != 0 {
+            host_flags |= glibc;
+        }
+    }
+    // SAFETY: the C contract makes these valid for the sizes given.
+    let status = unsafe {
+        libc::getnameinfo(
+            address,
+            address_size,
+            host,
+            host_size,
+            service,
+            service_size,
+            host_flags,
+        )
+    };
+    if status == 0 { 0 } else { bionic_eai(status) }
+}
+
+fn bionic_eai(status: c_int) -> c_int {
+    EAI_CODES
+        .iter()
+        .find(|(_, glibc)| *glibc == status)
+        .map_or(status.abs(), |(bionic, _)| *bionic)
+}
 
 // --- Standard streams ---
 
@@ -382,7 +1078,6 @@ stream_functions! {
     putc_unlocked(character: c_int;) -> c_int;
     putwc(character: i32;) -> u32;
     rewind(;) -> ();
-    setbuf(; buffer: *mut c_char) -> ();
     setbuffer(; buffer: *mut c_char, size: usize) -> ();
     setlinebuf(;) -> ();
     setvbuf(; buffer: *mut c_char, mode: c_int, size: usize) -> c_int;
@@ -539,11 +1234,18 @@ unsafe extern "C" fn strchr_chk(
     character: c_int,
     object_size: usize,
 ) -> *mut c_char {
-    // SAFETY: `strlen_chk` proves a terminator inside the object, so strchr stays in bounds.
-    unsafe {
-        strlen_chk(text, object_size);
-        libc::strchr(text, character)
+    let wanted = character as c_char;
+    for index in 0..object_size {
+        // SAFETY: `index` stays inside the object, whose size the compiler passed.
+        let (address, unit) = unsafe { (text.add(index), *text.add(index)) };
+        if unit == wanted {
+            return address.cast_mut();
+        }
+        if unit == 0 {
+            return std::ptr::null_mut();
+        }
     }
+    fortify_failure("strchr")
 }
 
 unsafe extern "C" fn strrchr_chk(
@@ -551,11 +1253,19 @@ unsafe extern "C" fn strrchr_chk(
     character: c_int,
     object_size: usize,
 ) -> *mut c_char {
-    // SAFETY: `strlen_chk` proves a terminator inside the object, so strrchr stays in bounds.
-    unsafe {
-        strlen_chk(text, object_size);
-        libc::strrchr(text, character)
+    let wanted = character as c_char;
+    let mut last = std::ptr::null_mut();
+    for index in 0..object_size {
+        // SAFETY: `index` stays inside the object, whose size the compiler passed.
+        let (address, unit) = unsafe { (text.add(index), *text.add(index)) };
+        if unit == wanted {
+            last = address.cast_mut();
+        }
+        if unit == 0 {
+            return last;
+        }
     }
+    fortify_failure("strrchr")
 }
 
 unsafe extern "C" fn strlcpy_chk(
@@ -1144,10 +1854,7 @@ unsafe extern "C" fn getaddrinfo(
             swap_addrinfo_fields(*result);
             return 0;
         }
-        EAI_CODES
-            .iter()
-            .find(|(_, glibc)| *glibc == status)
-            .map_or(status.abs(), |(bionic, _)| *bionic)
+        bionic_eai(status)
     }
 }
 

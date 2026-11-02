@@ -5,6 +5,9 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libgen.h>
+#include <math.h>
+#include <regex.h>
 #include <netdb.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -13,6 +16,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -243,6 +248,120 @@ int test_strerror_r(void) {
     char buffer[64];
     int status = strerror_r(ENOENT, buffer, sizeof buffer);
     return status == 0 && strstr(buffer, "No such file") != NULL ? 0 : 1;
+}
+
+int test_setjmp_restores_the_signal_mask(void) {
+    static struct {
+        jmp_buf buffer;
+        long canary;
+    } guarded = {.canary = CANARY};
+    sigset_t blocked, current;
+    sigemptyset(&blocked);
+    sigprocmask(SIG_SETMASK, &blocked, NULL);
+    if (setjmp(guarded.buffer) == 0) {
+        sigaddset(&blocked, SIGUSR1);
+        sigprocmask(SIG_SETMASK, &blocked, NULL);
+        longjmp(guarded.buffer, 1);
+    }
+    sigprocmask(SIG_SETMASK, NULL, &current);
+    return sigismember(&current, SIGUSR1) == 0 && guarded.canary == CANARY ? 0 : 1;
+}
+
+int test_sigsetjmp(void) {
+    static struct {
+        sigjmp_buf buffer;
+        long canary;
+    } guarded = {.canary = CANARY};
+    sigset_t blocked, current;
+    sigemptyset(&blocked);
+    sigprocmask(SIG_SETMASK, &blocked, NULL);
+    if (sigsetjmp(guarded.buffer, 0) == 0) {
+        sigaddset(&blocked, SIGUSR1);
+        sigprocmask(SIG_SETMASK, &blocked, NULL);
+        siglongjmp(guarded.buffer, 1);
+    }
+    sigprocmask(SIG_SETMASK, NULL, &current);
+    int kept = sigismember(&current, SIGUSR1);
+    sigemptyset(&blocked);
+    sigprocmask(SIG_SETMASK, &blocked, NULL);
+    return kept == 1 && guarded.canary == CANARY ? 0 : 1;
+}
+
+int test_path_helpers_leave_their_input_alone(void) {
+    const char *literal = "/usr/lib/";
+    if (strcmp(basename(literal), "lib") != 0) return 1;
+    if (strcmp(dirname(literal), "/usr") != 0) return 2;
+    if (strcmp(dirname("file"), ".") != 0 || strcmp(basename("/"), "/") != 0) return 3;
+    return strcmp(dirname(NULL), ".") == 0 && strcmp(literal, "/usr/lib/") == 0 ? 0 : 4;
+}
+
+int test_getnameinfo(void) {
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof address);
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(80);
+    char host[64], service[16];
+    int status = getnameinfo((struct sockaddr *)&address, sizeof address, host, sizeof host,
+                             service, sizeof service, NI_NUMERICHOST | NI_NUMERICSERV);
+    return status == 0 && strcmp(host, "127.0.0.1") == 0 && strcmp(service, "80") == 0 ? 0 : 1;
+}
+
+int test_pathconf(void) {
+    return pathconf("/", _PC_NAME_MAX) == 255 && pathconf("/", _PC_PATH_MAX) == 4096 ? 0 : 1;
+}
+
+int test_setbuf(void) {
+    static struct {
+        char buffer[BUFSIZ];
+        long canary;
+    } guarded = {.canary = CANARY};
+    FILE *file = fopen("/dev/null", "w");
+    if (file == NULL) return 1;
+    setbuf(file, guarded.buffer);
+    for (int i = 0; i < 100; i++) fputs("0123456789abcdef0123456789abcdef", file);
+    fclose(file);
+    return guarded.canary == CANARY ? 0 : 2;
+}
+
+int test_fortified_fread(void) {
+    char buffer[16];
+    FILE *file = fopen("/dev/zero", "r");
+    if (file == NULL) return 1;
+    size_t count = fread(buffer, 1, sizeof buffer, file);
+    fclose(file);
+    return count == sizeof buffer ? 0 : 2;
+}
+
+int test_printf_family(void) {
+    char buffer[32];
+    if (sprintf(buffer, "%d %s", 1, "a") != 3) return 1;
+    if (snprintf(buffer, sizeof buffer, "%%%d %.1f", 2, 0.5) != 6 || strcmp(buffer, "%2 0.5") != 0)
+        return 2;
+    int value = 0;
+    if (sscanf("41", "%d", &value) != 1 || value != 41) return 3;
+    char *allocated = NULL;
+    if (asprintf(&allocated, "%s", "heap") != 4 || strcmp(allocated, "heap") != 0) return 4;
+    free(allocated);
+    return 0;
+}
+
+int trap_printf_long_double(void) {
+    char buffer[32];
+    return snprintf(buffer, sizeof buffer, "%Lf", 1.5L);
+}
+
+int trap_unaudited(void) {
+    regex_t regex;
+    return regcomp(&regex, "a", 0);
+}
+
+void sincosl(long double value, long double *sine, long double *cosine);
+
+int trap_long_double_math(void) {
+    long double sine, cosine;
+    sincosl(1.0L, &sine, &cosine);
+    return sine > 0.0L ? 0 : 1;
 }
 
 static int child_handler_ran;

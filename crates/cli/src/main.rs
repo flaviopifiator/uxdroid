@@ -83,7 +83,7 @@ mod native {
             let (value, remaining) = values.split_first()?;
             if flag == "--search-dir" {
                 parsed.search_dirs.push(PathBuf::from(value));
-            } else if flag == "--call" {
+            } else if flag == "--call" && parsed.call.is_none() {
                 parsed.call = Some(value.to_str()?);
             } else {
                 return None;

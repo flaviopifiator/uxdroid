@@ -65,7 +65,7 @@ for name in libapp.so libc++_shared.so libflutter.so librustdesk.so; do
     measure uxdroid "$UXDROID" load "$LIBS/$name" --search-dir "$STUBS"
     competitor bionic_translation-no-logs /opt/competitor-quiet "$QUIET_CONFIG" "$LIBS/$name"
     competitor bionic_translation /opt/competitor "$SHIPPED_CONFIG" "$LIBS/$name"
-    # The system linker cannot resolve bionic's symbol versions, except with no imports at all.
+    # The system linker cannot load the others: they need bionic's libc.so and each other.
     if [ "$name" = libapp.so ]; then
         measure glibc-ld.so "$BENCH/glibc_load" "$LIBS/$name"
     fi
