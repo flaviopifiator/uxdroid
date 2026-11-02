@@ -1,0 +1,12 @@
+[package]
+name = "uxdroid-nativebridge"
+description = "Lets ART load bionic-linked libraries through the uxdroid bridge"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uxdroid-bridge = { path = "../bridge" }

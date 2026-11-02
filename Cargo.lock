@@ -203,6 +203,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uxdroid-nativebridge"
+version = "0.1.0"
+dependencies = [
+ "uxdroid-bridge",
+]
+
+[[package]]
 name = "uxdroid-testkit"
 version = "0.1.0"
 dependencies = [

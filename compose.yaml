@@ -11,6 +11,7 @@ services:
     volumes:
       - .:/work
       - cache:/cache
+      - art_runtime:/runtime:ro
 
   # Handles untrusted APKs: no network, source and samples read-only.
   sandbox:
@@ -21,6 +22,7 @@ services:
     volumes:
       - .:/work:ro
       - cache:/cache:ro
+      - art_runtime:/runtime:ro
       - ${UXDROID_SAMPLES:-./samples}:/samples:ro
 
   # Compares loader performance against competitors. Offline, with real libraries read-only.
