@@ -37,5 +37,20 @@ services:
       - cache:/cache:ro
       - ${UXDROID_SAMPLES:-./samples}:/samples:ro
 
+  # Downloads and builds ART. Network access only for the download; output stays in a volume.
+  art-builder:
+    profiles: [art]
+    build: runtime/art
+    user: "1000:1000"
+    # Running out of memory must kill the build, never freeze the machine (30 GiB RAM).
+    mem_limit: 22g
+    memswap_limit: 22g
+    cpus: 10
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - art_src:/aosp
+      - .:/work:ro
+
 volumes:
   cache:
+  art_src:
