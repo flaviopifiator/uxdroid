@@ -7,8 +7,10 @@ use uxdroid_apk::{Apk, host_abi, inspect};
 
 const INSPECT_USAGE: &str = "usage: uxdroid inspect <apk>";
 const LOAD_USAGE: &str = "usage: uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]";
+const RUN_USAGE: &str = "usage: uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]";
 const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
-                     uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]";
+                     uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n       \
+                     uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]";
 const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 
@@ -18,8 +20,25 @@ fn main() -> ExitCode {
     match args.split_first() {
         Some((command, rest)) if command == "inspect" => run_inspect(rest),
         Some((command, rest)) if command == "load" => native::run_load(rest),
+        Some((command, rest)) if command == "run" => run_command(rest),
         _ => fail(USAGE, EXIT_USAGE),
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+mod run;
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+fn run_command(args: &[OsString]) -> ExitCode {
+    run::run_app(args)
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")))]
+fn run_command(_args: &[OsString]) -> ExitCode {
+    fail(
+        "error: uxdroid run needs an x86_64 glibc host",
+        EXIT_FAILURE,
+    )
 }
 
 fn run_inspect(args: &[OsString]) -> ExitCode {

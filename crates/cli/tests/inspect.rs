@@ -277,11 +277,12 @@ fn wrong_usage_exits_2() {
 }
 
 const ALL_COMMANDS_USAGE: &str = "usage: uxdroid inspect <apk>\n       \
-     uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n";
+     uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n       \
+     uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]\n";
 
 #[test]
 fn no_command_or_an_unknown_one_lists_all_commands() {
-    for args in [&[][..], &["run", "app.apk"]] {
+    for args in [&[][..], &["launch", "app.apk"]] {
         let output = uxdroid(args);
 
         assert_eq!(output.status.code(), Some(2), "{args:?}");

@@ -16,6 +16,8 @@ pub use manifest::{Manifest, parse_manifest};
 const MANIFEST_ENTRY: &str = "AndroidManifest.xml";
 /// Larger manifests do not occur in practice; the limit stops decompression bombs.
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+/// The largest real library seen in samples is 54 MiB. The limit stops decompression bombs.
+const MAX_NATIVE_LIB_BYTES: u64 = 1024 * 1024 * 1024;
 const DEX_HEADER_BYTES: usize = 112;
 const DEX_METHOD_COUNT_OFFSET: usize = 88;
 const DEX_CLASS_COUNT_OFFSET: usize = 96;
@@ -27,6 +29,7 @@ pub enum Error {
     MissingManifest,
     MalformedManifest(&'static str),
     MalformedDex(String),
+    CannotExtract(String),
 }
 
 impl fmt::Display for Error {
@@ -39,6 +42,7 @@ impl fmt::Display for Error {
             Error::MissingManifest => write!(f, "APK has no {MANIFEST_ENTRY}"),
             Error::MalformedManifest(reason) => write!(f, "malformed manifest: {reason}"),
             Error::MalformedDex(entry) => write!(f, "malformed DEX {entry}"),
+            Error::CannotExtract(reason) => write!(f, "cannot extract native library: {reason}"),
         }
     }
 }
@@ -130,6 +134,48 @@ pub fn inspect(path: &Path) -> Result<Apk, Error> {
         dex,
         abis,
     })
+}
+
+/// Extracts the APK's native libraries for one ABI into `directory`, returning how many.
+///
+/// Entry names are untrusted: `native_lib_abi` accepts only `lib/<abi>/<file>.so`, and a file name
+/// of `..` cannot end in `.so`, so nothing lands outside `directory`.
+pub fn extract_native_libs(path: &Path, abi: &str, directory: &Path) -> Result<u32, Error> {
+    let file = File::open(path).map_err(|source| Error::Unreadable(path.to_path_buf(), source))?;
+    let mut archive = ZipArchive::new(BufReader::new(file))
+        .map_err(|source| Error::InvalidArchive(source.to_string()))?;
+    let cannot = |reason: String| Error::CannotExtract(reason);
+
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|name| name.map(|text| text.to_string()))
+        .collect::<Result<_, _>>()
+        .map_err(|source| Error::InvalidArchive(source.to_string()))?;
+    let mut count = 0;
+    for name in names
+        .iter()
+        .filter(|name| native_lib_abi(name) == Some(abi))
+    {
+        let Some(file_name) = name.rsplit('/').next().filter(|file| !file.contains('\\')) else {
+            return Err(cannot(format!("bad entry name {}", name.escape_debug())));
+        };
+        let entry = archive
+            .by_name(name)
+            .map_err(|source| Error::InvalidArchive(source.to_string()))?;
+        let mut limited = entry.take(MAX_NATIVE_LIB_BYTES + 1);
+        let partial = directory.join(format!("{file_name}.partial"));
+        let mut output = File::create(&partial).map_err(|error| cannot(error.to_string()))?;
+        let written =
+            io::copy(&mut limited, &mut output).map_err(|error| cannot(error.to_string()))?;
+        if written > MAX_NATIVE_LIB_BYTES {
+            let _ = std::fs::remove_file(&partial);
+            return Err(cannot(format!("{} is too large", name.escape_debug())));
+        }
+        std::fs::rename(&partial, directory.join(file_name))
+            .map_err(|error| cannot(error.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn read_manifest(archive: &mut ZipArchive<BufReader<File>>) -> Result<Vec<u8>, Error> {

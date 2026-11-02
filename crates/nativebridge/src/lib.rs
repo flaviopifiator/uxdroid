@@ -40,8 +40,7 @@ pub struct NativeBridgeCallbacks {
     unload_library: unsafe extern "C" fn(*mut c_void) -> c_int,
     get_error: unsafe extern "C" fn() -> *const c_char,
     is_path_supported: unsafe extern "C" fn(*const c_char) -> bool,
-    unused_init_anonymous_namespace:
-        unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
+    unused_init_anonymous_namespace: unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
     create_namespace: unsafe extern "C" fn(
         *const c_char,
         *const c_char,
@@ -85,7 +84,9 @@ unsafe extern "C" fn initialize(
 
 unsafe extern "C" fn load_library(path: *const c_char, _flag: c_int) -> *mut c_void {
     // SAFETY: ART passes a C string.
-    let path = Path::new(OsStr::from_bytes(unsafe { CStr::from_ptr(path) }.to_bytes()));
+    let path = Path::new(OsStr::from_bytes(
+        unsafe { CStr::from_ptr(path) }.to_bytes(),
+    ));
     match load(path, &[]) {
         Ok(library) => std::ptr::from_ref::<Library>(library).cast_mut().cast(),
         Err(error) => {

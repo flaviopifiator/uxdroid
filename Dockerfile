@@ -17,7 +17,10 @@ RUN apt-get update \
 FROM base AS dev
 COPY --from=ndk /opt/android-ndk /opt/android-ndk
 
-RUN rustup component add clippy rustfmt \
+# Weston's headless backend gives tests a real Wayland compositor.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends weston python3-minimal \
+    && rustup component add clippy rustfmt \
     && mkdir -p /cache \
     && chown 1000:1000 /cache
 
