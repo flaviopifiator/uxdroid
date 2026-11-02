@@ -19,15 +19,17 @@ docker compose run --rm -T dev bash /work/benches/art/first_frame.sh
 
 ## Last result
 
-2026-11-02, 50 runs each, measured twice on one idle x86_64 machine with 12 cores. Median time to first output, and the highest peak memory across runs. Both runtimes get the same `-Xnorelocate` and heap options.
+2026-11-02, 50 runs each, measured twice on one idle x86_64 machine with 12 cores. Median time to first output, and the highest peak memory across runs. Both runtimes get the same options. Peak memory for `Compute` varies by a few MiB between sets of runs, so differences that small mean little.
 
 | Program | `uxdroid` | `uxdroid`, no JIT | `art_standalone` | `art_standalone`, no JIT |
 |---------|-----------|-------------------|------------------|--------------------------|
-| `Hello` | 20.3 ms (37.4 MiB) | 20.5 ms (37.3 MiB) | 19.4 ms (34.0 MiB) | **16.1 ms (31.9 MiB)** |
-| `Compute` | 71.4 ms (47.3 MiB) | **71.2 ms** (46.9 MiB) | 75.2 ms (40.5 MiB) | 72.2 ms (**38.1 MiB**) |
+| `Hello` | 21.5 ms (33.5 MiB) | 21.4 ms (33.4 MiB) | 19.1 ms (34.6 MiB) | **16.3 ms (32.4 MiB)** |
+| `Compute` | 46.4 ms (43.7 MiB) | 46.2 ms (44.2 MiB) | 42.6 ms (38.6 MiB) | **39.6 ms (37.8 MiB)** |
 | Installed | 172 MiB | | 115 MiB, including its 68 MiB generated boot image | |
 
-**`art_standalone` still wins this comparison.** Against its best setting, no JIT, uxdroid takes 27% more time to start `Hello` and uses 17 to 23% more peak memory. With the JIT on, which is how `uxdroid run` works, those gaps are 5% on time and 10 to 17% on memory. uxdroid is about level on `Compute` time, and its installation is larger.
+**`art_standalone` still wins this comparison.** Against its best setting, no JIT, uxdroid takes 31% more time on `Hello` and 17% more on `Compute`, with 3% more peak memory on `Hello` and about 17% more on `Compute`. With the JIT on, which is how `uxdroid run` works, uxdroid's `Hello` uses 3% less peak memory and takes 13% more time. Its installation is larger.
+
+`uxdroid run` shows its first frame in a median of 25.3 ms, from `first_frame.sh`. There is no competitor figure for that: Android Translation Layer's own launcher was not built.
 
 ### Where the difference is
 
@@ -46,6 +48,7 @@ Heap and total private dirty memory also favor the competitor, by amounts that v
 |--------|----------------------------------------|
 | `-Xnorelocate` | `Hello` 26.8 to 20.2 ms; private dirty 19.9 to 11.7 MiB |
 | Heap limits | `Compute` peak 72 to about 50 MB |
+| No large object space, heap growth of 1 | `Compute` 73 to 46 ms. The competitor gains from it too, 73 to 39 ms |
 | Boot image from a profile | Image 33 to 9.7 MiB; peak about 12% less on `Hello` and 7 to 12% on `Compute`, at equal time |
 
 The profile comes from one small program. A real app uses other library code, which then runs through the JIT, and that cost has not been measured.

@@ -387,6 +387,10 @@ fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> 
         // These keep memory low; see runtime/art/run.sh for what each one saves.
         .args(["-Xnorelocate", "-XX:HeapMinFree=256k", "-XX:HeapMaxFree=1m"])
         .args([
+            "-XX:LargeObjectSpace=disabled",
+            "-XX:ForegroundHeapGrowthMultiplier=1.0",
+        ])
+        .args([
             "-XX:NativeBridge=libuxdroid_nativebridge.so",
             "-Xforce-nb-testing",
         ])

@@ -15,7 +15,8 @@ COMPETITOR_ENV=(env -u ANDROID_ROOT -u ANDROID_ART_ROOT -u ANDROID_I18N_ROOT -u 
 mkdir -p /tmp/competitor-data
 
 # The options that make uxdroid faster or smaller apply to the competitor too.
-SHARED_FLAGS=(-Xnorelocate -XX:HeapMinFree=256k -XX:HeapMaxFree=1m)
+SHARED_FLAGS=(-Xnorelocate -XX:HeapMinFree=256k -XX:HeapMaxFree=1m -XX:LargeObjectSpace=disabled
+    -XX:ForegroundHeapGrowthMultiplier=1.0)
 
 # The competitor compiles its boot image and each app on first use, which is not counted here.
 "${COMPETITOR_ENV[@]}" "$P/bin/dalvikvm" -cp "$SAMPLES/Hello.jar" Hello >/dev/null 2>&1
