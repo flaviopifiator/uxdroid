@@ -49,8 +49,24 @@ services:
     security_opt: ["no-new-privileges:true"]
     volumes:
       - art_src:/aosp
+      - art_runtime:/runtime
+      - .:/work:ro
+
+  # Runs packaged ART in a plain Ubuntu with no AOSP tree, no network and a read-only system.
+  art-runtime:
+    profiles: [art]
+    image: ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    read_only: true
+    tmpfs: ["/tmp:exec"]
+    volumes:
+      - art_runtime:/runtime:ro
       - .:/work:ro
 
 volumes:
   cache:
   art_src:
+  art_runtime:
