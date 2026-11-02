@@ -29,16 +29,18 @@ UXDROID_SAMPLES="$SAMPLES" docker compose --profile bench run --rm bench sh /wor
 
 ## Last result
 
-2026-11-02, RustDesk 1.5.1 x86_64 libraries, 50 runs each, in one Docker container on one x86_64 machine. Median wall time, with peak memory in parentheses.
+2026-11-02, RustDesk 1.5.1 x86_64 libraries, 50 runs each, in one Docker container on one idle x86_64 machine. Median wall time, with peak memory in parentheses.
 
 | Library | `uxdroid` | `bionic_translation-no-logs` | `bionic_translation` | `glibc-ld.so` |
 |---------|-----------|------------------------------|----------------------|---------------|
-| `libapp.so`, 12 MiB | 0.75 ms (2.4 MiB) | 10.66 ms (14.8 MiB) | 10.54 ms (14.9 MiB) | 0.56 ms (1.3 MiB) |
-| `libc++_shared.so`, 1.5 MiB | 1.29 ms (3.6 MiB) | 5.16 ms (5.9 MiB) | 22.05 ms (5.9 MiB) | Cannot load it |
-| `libflutter.so`, 11 MiB | 1.84 ms (5.7 MiB) | 15.51 ms (17.9 MiB) | 72.52 ms (17.9 MiB) | Cannot load it |
-| `librustdesk.so`, 40 MiB | 3.96 ms (10.3 MiB) | 46.15 ms (52.5 MiB) | 279.39 ms (52.4 MiB) | Cannot load it |
+| `libapp.so`, 12 MiB | 0.83 ms (2.5 MiB) | 10.70 ms (14.6 MiB) | 10.74 ms (14.8 MiB) | 0.54 ms (1.2 MiB) |
+| `libc++_shared.so`, 1.5 MiB | 1.44 ms (3.8 MiB) | 5.08 ms (5.8 MiB) | 22.22 ms (5.8 MiB) | Cannot load it |
+| `libflutter.so`, 11 MiB | 1.97 ms (5.9 MiB) | 15.69 ms (17.7 MiB) | 71.83 ms (17.9 MiB) | Cannot load it |
+| `librustdesk.so`, 40 MiB | 4.30 ms (10.4 MiB) | 47.17 ms (52.3 MiB) | 279.52 ms (52.3 MiB) | Cannot load it |
 
-uxdroid was 4 to 14 times faster than `bionic_translation-no-logs`, and used less memory, on these libraries. The system linker was still 0.19 ms faster on the one library it can load.
+uxdroid was 3.5 to 13 times faster than `bionic_translation-no-logs`, and used less memory, on these libraries. The system linker was still 0.29 ms faster on the one library it can load.
+
+The audited symbol list and the UTF-8 startup made uxdroid about 10% slower than the first measurement, which had no such protection (0.75, 1.29, 1.84 and 3.96 ms). That was accepted as the cost of not corrupting memory silently.
 
 ## Limits
 
