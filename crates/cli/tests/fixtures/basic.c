@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define CANARY 0x5AFEC0DE5AFEC0DEL
@@ -84,6 +85,7 @@ int test_fortify(void) {
 
 int test_log(void) {
     __android_log_write(ANDROID_LOG_INFO, "fixture", "plain message");
+    __android_log_buf_write(LOG_ID_MAIN, ANDROID_LOG_DEBUG, "fixture", "buffer message");
     // More arguments than registers, plus floats, to exercise every part of the va_list.
     __android_log_print(ANDROID_LOG_WARN, "fixture", "%d %s %.1f %d %d %d %d %d %.1f", 1, "two",
                         3.5, 4, 5, 6, 7, 8, 9.5);
@@ -242,6 +244,21 @@ int test_strerror_r(void) {
     int status = strerror_r(ENOENT, buffer, sizeof buffer);
     return status == 0 && strstr(buffer, "No such file") != NULL ? 0 : 1;
 }
+
+static int child_handler_ran;
+
+static void on_fork_child(void) { child_handler_ran = 1; }
+
+int test_atfork(void) {
+    if (pthread_atfork(NULL, NULL, on_fork_child) != 0) return 1;
+    pid_t child = fork();
+    if (child == 0) _exit(child_handler_ran == 1 ? 0 : 3);
+    int status = 0;
+    if (child < 0 || waitpid(child, &status, 0) != child) return 2;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 4;
+}
+
+int test_getprogname(void) { return strcmp(getprogname(), "uxdroid") == 0 ? 0 : 1; }
 
 static int ifunc_target(void) { return 9; }
 

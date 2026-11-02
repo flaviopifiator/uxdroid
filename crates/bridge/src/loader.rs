@@ -21,7 +21,13 @@ use crate::image::Image;
 use crate::shims;
 
 /// libraries that uxdroid provides from glibc and the shims instead of loading a file.
-const SYSTEM_LIBRARIES: &[&str] = &["libc.so", "libdl.so", "liblog.so", "libm.so"];
+const SYSTEM_LIBRARIES: &[&str] = &[
+    "libc.so",
+    "libdl.so",
+    "liblog.so",
+    "libm.so",
+    "libstdc++.so",
+];
 /// Stops a crafted dependency graph from exhausting memory or the stack.
 const MAX_LIBRARIES_PER_LOAD: usize = 1024;
 
@@ -34,10 +40,8 @@ pub enum Error {
         by: String,
     },
     TooManyLibraries,
-    UnresolvedSymbols {
-        library: String,
-        symbols: Vec<String>,
-    },
+    /// Every library with symbols found nowhere, each with all of its names.
+    UnresolvedSymbols(Vec<(String, Vec<String>)>),
 }
 
 impl fmt::Display for Error {
@@ -56,17 +60,22 @@ impl fmt::Display for Error {
                 needed.escape_debug()
             ),
             Error::TooManyLibraries => write!(f, "too many dependencies"),
-            Error::UnresolvedSymbols { library, symbols } => {
-                let names: Vec<String> = symbols
+            Error::UnresolvedSymbols(libraries) => {
+                let reports: Vec<String> = libraries
                     .iter()
-                    .map(|symbol| symbol.escape_debug().to_string())
+                    .map(|(library, symbols)| {
+                        let names: Vec<String> = symbols
+                            .iter()
+                            .map(|symbol| symbol.escape_debug().to_string())
+                            .collect();
+                        format!(
+                            "{}: unresolved symbols: {}",
+                            library.escape_debug(),
+                            names.join(", ")
+                        )
+                    })
                     .collect();
-                write!(
-                    f,
-                    "{}: unresolved symbols: {}",
-                    library.escape_debug(),
-                    names.join(", ")
-                )
+                write!(f, "{}", reports.join("; "))
             }
         }
     }
@@ -411,19 +420,16 @@ fn map_and_link(
     let root = pending[0];
     let scope = breadth_first(root);
     let ordered = dependencies_first(root, pending);
-    let mut unresolved = None;
+    let mut unresolved = Vec::new();
     for library in &ordered {
         let mut missing = BTreeSet::new();
         relocate(library, &scope, &mut missing).map_err(|error| library.invalid(error))?;
-        if !missing.is_empty() && unresolved.is_none() {
-            unresolved = Some(Error::UnresolvedSymbols {
-                library: library.name.clone(),
-                symbols: missing.into_iter().collect(),
-            });
+        if !missing.is_empty() {
+            unresolved.push((library.name.clone(), missing.into_iter().collect()));
         }
     }
-    if let Some(error) = unresolved {
-        return Err(error);
+    if !unresolved.is_empty() {
+        return Err(Error::UnresolvedSymbols(unresolved));
     }
     for library in &ordered {
         library

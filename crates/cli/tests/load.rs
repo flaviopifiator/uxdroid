@@ -30,6 +30,8 @@ const CHECKS: &[&str] = &[
     "test_dlopen",
     "test_getaddrinfo",
     "test_strerror_r",
+    "test_atfork",
+    "test_getprogname",
     "test_ifunc",
     "test_emulated_tls",
 ];
@@ -205,7 +207,7 @@ fn android_log_formats_register_float_and_stack_arguments() {
 
     assert_eq!(
         stderr(&output),
-        "I/fixture: plain message\nW/fixture: 1 two 3.5 4 5 6 7 8 9.5\n"
+        "I/fixture: plain message\nD/fixture: buffer message\nW/fixture: 1 two 3.5 4 5 6 7 8 9.5\n"
     );
 }
 

@@ -233,10 +233,9 @@ impl Image {
             if end <= start {
                 continue;
             }
-            let inside = self
-                .loads
-                .iter()
-                .any(|load| page_floor(load.vaddr) <= start && end <= load.end());
+            let inside = self.loads.iter().any(|load| {
+                page_floor(load.vaddr) <= start && end <= page_ceil(load.end()).unwrap_or(0)
+            });
             if !inside {
                 return Err(ElfError::Malformed("RELRO outside loadable segments"));
             }

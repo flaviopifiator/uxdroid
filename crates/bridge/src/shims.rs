@@ -149,6 +149,7 @@ functions! {
     "__FD_ISSET_chk" => fd_isset_chk,
     "__FD_SET_chk" => fd_set_chk,
     "__android_log_assert" => uxdroid_android_log_assert,
+    "__android_log_buf_write" => android_log_buf_write,
     "__android_log_print" => uxdroid_android_log_print,
     "__android_log_vprint" => android_log_vprint,
     "__android_log_write" => android_log_write,
@@ -179,10 +180,12 @@ functions! {
     "fwprintf" => uxdroid_fwprintf,
     "fwscanf" => uxdroid_fwscanf,
     "gai_strerror" => gai_strerror,
+    "getprogname" => getprogname,
     "getaddrinfo" => getaddrinfo,
     "nl_langinfo" => nl_langinfo,
     "ppoll" => ppoll,
     "pselect" => pselect,
+    "pthread_atfork" => pthread_atfork,
     "pthread_exit" => pthread_exit,
     "pthread_sigmask" => pthread_sigmask,
     "pthread_sigmask64" => pthread_sigmask,
@@ -425,6 +428,16 @@ unsafe extern "C" fn android_log_write(
         priority_letter(priority)
     ));
     1
+}
+
+unsafe extern "C" fn android_log_buf_write(
+    _buffer: c_int,
+    priority: c_int,
+    tag: *const c_char,
+    message: *const c_char,
+) -> c_int {
+    // SAFETY: the NDK contract makes these C strings.
+    unsafe { android_log_write(priority, tag, message) }
 }
 
 const LOG_LINE_MAX: usize = 4096;
@@ -971,7 +984,36 @@ unsafe extern "C-unwind" fn pthread_exit(value: *mut c_void) -> ! {
     unsafe { host_pthread_exit(value) }
 }
 
+type ForkHandler = Option<unsafe extern "C" fn()>;
+
+// glibc links this one statically into each program, so it cannot be found dynamically.
+unsafe extern "C" fn pthread_atfork(
+    prepare: ForkHandler,
+    parent: ForkHandler,
+    child: ForkHandler,
+) -> c_int {
+    unsafe extern "C" {
+        fn __register_atfork(
+            prepare: ForkHandler,
+            parent: ForkHandler,
+            child: ForkHandler,
+            dso_handle: *mut c_void,
+        ) -> c_int;
+    }
+    // SAFETY: a null handle means the handlers are never unregistered, and libraries are never
+    // unloaded.
+    unsafe { __register_atfork(prepare, parent, child, std::ptr::null_mut()) }
+}
+
 // --- System configuration ---
+
+extern "C" fn getprogname() -> *const c_char {
+    unsafe extern "C" {
+        static __progname: *const c_char;
+    }
+    // SAFETY: glibc sets this before any library can run.
+    unsafe { __progname }
+}
 
 /// bionic's `_SC_*` values, from `bits/sysconf.h`, mapped to glibc's.
 const SYSCONF_NAMES: &[(c_int, c_int)] = &[
