@@ -10,6 +10,7 @@
 //! same user. The protocol is in `protocol`; `server` serves it and `client` calls it.
 
 pub mod client;
+mod java;
 pub mod protocol;
 #[cfg(test)]
 mod protocol_tests;
@@ -21,6 +22,8 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
+
+pub use java::register_natives;
 
 /// The longest path a Unix socket address holds, its terminating zero excluded.
 const MAX_SOCKET_PATH: usize = 107;

@@ -1,0 +1,397 @@
+//! The natives of `dev.uxdroid.system.Control`: the app's side of the instance lock and the control
+//! socket. Commands cross to the main Looper through an eventfd the Looper watches: a connection thread
+//! queues its command and waits; the Looper takes it, runs it, and answers.
+
+use std::collections::{HashMap, VecDeque};
+use std::fs::File;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use jni_sys::{JNIEnv, jboolean, jclass, jint, jlong, jobjectArray, jstring};
+use serde_json::Value;
+
+use super::client::{self, CallError};
+use super::protocol::{self, Command, Failure, Intent};
+use super::server::{self, Bound, Handler, Info, Server};
+use crate::{Method, java_string, new_string, register, throw};
+
+/// How long a command waits for the main thread, which may be busy drawing or stuck.
+const MAIN_THREAD_WAIT: Duration = Duration::from_secs(10);
+
+/// The instance lock, held until the process ends.
+static INSTANCE: Mutex<Option<File>> = Mutex::new(None);
+static CONTROL: Mutex<Option<(Server, Arc<Queue>)>> = Mutex::new(None);
+
+type Answer = Result<Value, Failure>;
+
+/// Commands waiting for the main Looper.
+struct Queue {
+    pending: Mutex<VecDeque<(u64, Command)>>,
+    waiting: Mutex<HashMap<u64, Sender<Answer>>>,
+    event: OwnedFd,
+    next: AtomicU64,
+    closed: AtomicBool,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+impl Queue {
+    fn signal(&self) {
+        let one = 1u64.to_ne_bytes();
+        // SAFETY: an eventfd takes an 8-byte counter; a full counter only means it is already signaled.
+        unsafe { libc::write(self.event.as_raw_fd(), one.as_ptr().cast(), one.len()) };
+    }
+
+    /// Fails every command still waiting, so no connection waits for a Looper that has stopped.
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        lock(&self.pending).clear();
+        for (_, sender) in lock(&self.waiting).drain() {
+            let _ = sender.send(Err(stopping()));
+        }
+    }
+}
+
+fn stopping() -> Failure {
+    Failure::new(protocol::BUSY, "the app is stopping")
+}
+
+impl Handler for Queue {
+    fn handle(&self, command: Command) -> Answer {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(stopping());
+        }
+        let sequence = self.next.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        lock(&self.waiting).insert(sequence, sender);
+        lock(&self.pending).push_back((sequence, command));
+        self.signal();
+        match receiver.recv_timeout(MAIN_THREAD_WAIT) {
+            Ok(answer) => answer,
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                lock(&self.waiting).remove(&sequence);
+                lock(&self.pending).retain(|(queued, _)| *queued != sequence);
+                Err(Failure::new(
+                    protocol::BUSY,
+                    &format!(
+                        "the app's main thread did not answer within {} s",
+                        MAIN_THREAD_WAIT.as_secs()
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+/// # Safety
+/// `env` must be the calling thread's JNI environment, and `text` a string or null.
+unsafe fn argument(env: *mut JNIEnv, text: jstring, what: &str) -> Option<String> {
+    // SAFETY: as above.
+    let value = unsafe { java_string(env, text) };
+    if value.is_none() {
+        // SAFETY: as above.
+        unsafe {
+            throw(
+                env,
+                c"java/lang/NullPointerException",
+                &format!("no {what}"),
+            )
+        };
+    }
+    value
+}
+
+/// `static native boolean claim(String lockFile)`: takes the instance lock; false if another
+/// process holds it.
+unsafe extern "system" fn claim(env: *mut JNIEnv, _class: jclass, path: jstring) -> jboolean {
+    // SAFETY: ART passes a valid environment.
+    let Some(path) = (unsafe { argument(env, path, "lock file") }) else {
+        return false;
+    };
+    match super::claim_instance(std::path::Path::new(&path)) {
+        Ok(Some(file)) => {
+            *lock(&INSTANCE) = Some(file);
+            true
+        }
+        Ok(None) => false,
+        Err(error) => {
+            // SAFETY: as above.
+            unsafe {
+                throw(
+                    env,
+                    c"java/lang/IllegalStateException",
+                    &format!("cannot lock {path}: {error}"),
+                )
+            };
+            false
+        }
+    }
+}
+
+/// `static native int serve(String package)`: binds the package's socket and serves it; returns the
+/// descriptor the main Looper watches for commands.
+unsafe extern "system" fn serve(env: *mut JNIEnv, _class: jclass, package: jstring) -> jint {
+    // SAFETY: ART passes a valid environment.
+    let Some(package) = (unsafe { argument(env, package, "package") }) else {
+        return -1;
+    };
+    match start(&package) {
+        Ok(event) => event,
+        Err(problem) => {
+            // SAFETY: as above.
+            unsafe { throw(env, c"java/lang/IllegalStateException", &problem) };
+            -1
+        }
+    }
+}
+
+fn start(package: &str) -> Result<jint, String> {
+    let mut control = lock(&CONTROL);
+    if control.is_some() {
+        return Err("the control socket is already served".into());
+    }
+    let dir = super::control_dir()?;
+    let listener = match server::bind(&dir, package)? {
+        Bound::Listening(listener) => listener,
+        Bound::Owned => {
+            return Err(format!(
+                "{} is served by another instance of {package}, over another data directory",
+                super::socket_path(&dir, package)?.display()
+            ));
+        }
+    };
+    // SAFETY: eventfd has no memory preconditions; its result is checked before it is owned.
+    let event = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if event < 0 {
+        return Err(format!(
+            "cannot make an eventfd: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `event` is a descriptor nothing else owns.
+    let event = unsafe { OwnedFd::from_raw_fd(event) };
+    let queue = Arc::new(Queue {
+        pending: Mutex::default(),
+        waiting: Mutex::default(),
+        event,
+        next: AtomicU64::new(1),
+        closed: AtomicBool::new(false),
+    });
+    let info = Info {
+        package: package.to_string(),
+        pid: std::process::id(),
+    };
+    let server = server::serve(listener, info, super::euid(), queue.clone())
+        .map_err(|error| format!("cannot start the control thread: {error}"))?;
+    let raw = queue.event.as_raw_fd();
+    *control = Some((server, queue));
+    Ok(raw)
+}
+
+/// `static native String[] take()`: the next command as {sequence, name, intent JSON or null}, or null.
+unsafe extern "system" fn take(env: *mut JNIEnv, _class: jclass) -> jobjectArray {
+    let Some(queue) = lock(&CONTROL).as_ref().map(|(_, queue)| queue.clone()) else {
+        return std::ptr::null_mut();
+    };
+    let mut counter = [0u8; 8];
+    // SAFETY: reads the 8-byte counter, which resets it; the descriptor does not block.
+    unsafe {
+        libc::read(
+            queue.event.as_raw_fd(),
+            counter.as_mut_ptr().cast(),
+            counter.len(),
+        )
+    };
+    let Some((sequence, command)) = lock(&queue.pending).pop_front() else {
+        return std::ptr::null_mut();
+    };
+    // More may be queued behind this one; the Looper comes back for it.
+    if !lock(&queue.pending).is_empty() {
+        queue.signal();
+    }
+    let intent = match &command {
+        Command::Start(intent) | Command::Intent(intent) => Some(intent.to_json().to_string()),
+        _ => None,
+    };
+    let fields = [
+        Some(sequence.to_string()),
+        Some(command.name().to_string()),
+        intent,
+    ];
+    // SAFETY: ART passes a valid environment; String is a boot class.
+    unsafe {
+        let jni = &**env;
+        let string = (jni.v1_1.FindClass)(env, c"java/lang/String".as_ptr());
+        let array =
+            (jni.v1_1.NewObjectArray)(env, fields.len() as jint, string, std::ptr::null_mut());
+        if array.is_null() {
+            return array;
+        }
+        for (index, field) in fields.iter().enumerate() {
+            if let Some(field) = field {
+                (jni.v1_1.SetObjectArrayElement)(env, array, index as jint, new_string(env, field));
+            }
+        }
+        array
+    }
+}
+
+/// `static native void answer(long sequence, String result, String code, String message)`: the
+/// result as JSON, or the code and message of a refusal when the result is null.
+unsafe extern "system" fn answer(
+    env: *mut JNIEnv,
+    _class: jclass,
+    sequence: jlong,
+    result: jstring,
+    code: jstring,
+    message: jstring,
+) {
+    // SAFETY: ART passes a valid environment and strings or nulls.
+    let (result, code, message) = unsafe {
+        (
+            java_string(env, result),
+            java_string(env, code),
+            java_string(env, message),
+        )
+    };
+    let answer = match result {
+        Some(result) => serde_json::from_str(&result).map_err(|error| {
+            Failure::new(
+                protocol::FAILED,
+                &format!("the app answered no JSON: {error}"),
+            )
+        }),
+        None => Err(Failure::new(
+            code.as_deref().unwrap_or(protocol::FAILED),
+            message.as_deref().unwrap_or("the app could not do it"),
+        )),
+    };
+    let Some(queue) = lock(&CONTROL).as_ref().map(|(_, queue)| queue.clone()) else {
+        return;
+    };
+    if let Some(sender) = lock(&queue.waiting).remove(&(sequence as u64)) {
+        let _ = sender.send(answer);
+    }
+}
+
+/// `static native void close()`: stops serving and removes the socket; the instance lock stays until
+/// the process ends.
+unsafe extern "system" fn close(_env: *mut JNIEnv, _class: jclass) {
+    let control = lock(&CONTROL).take();
+    if let Some((server, queue)) = control {
+        queue.close();
+        server.shutdown();
+    }
+}
+
+/// `static native String intent(String json)`: the intent as the protocol accepts it, or an
+/// IllegalArgumentException saying why not.
+unsafe extern "system" fn intent(env: *mut JNIEnv, _class: jclass, json: jstring) -> jstring {
+    // SAFETY: ART passes a valid environment.
+    let Some(json) = (unsafe { argument(env, json, "intent") }) else {
+        return std::ptr::null_mut();
+    };
+    let parsed = serde_json::from_str::<Value>(&json)
+        .map_err(|error| error.to_string())
+        .and_then(|value| Intent::from_json(&value).map_err(|failure| failure.message));
+    match parsed {
+        // SAFETY: as above.
+        Ok(intent) => unsafe { new_string(env, &intent.to_json().to_string()) },
+        Err(problem) => {
+            // SAFETY: as above.
+            unsafe {
+                throw(
+                    env,
+                    c"java/lang/IllegalArgumentException",
+                    &format!("bad intent: {problem}"),
+                )
+            };
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `static native String forward(String package, String intent, int timeoutMs)`: hands a launch to the
+/// running instance; returns its answer's result as JSON. The instance may still be starting, so a
+/// socket that is not there yet is tried again until the timeout.
+unsafe extern "system" fn forward(
+    env: *mut JNIEnv,
+    _class: jclass,
+    package: jstring,
+    intent: jstring,
+    timeout: jint,
+) -> jstring {
+    // SAFETY: ART passes a valid environment.
+    let (Some(package), Some(intent)) = (unsafe { argument(env, package, "package") }, unsafe {
+        argument(env, intent, "intent")
+    }) else {
+        return std::ptr::null_mut();
+    };
+    let deadline = Instant::now() + Duration::from_millis(timeout.max(0) as u64);
+    match call_running(&package, &intent, deadline) {
+        // SAFETY: as above.
+        Ok(result) => unsafe { new_string(env, &result.to_string()) },
+        Err(problem) => {
+            // SAFETY: as above.
+            unsafe { throw(env, c"java/lang/IllegalStateException", &problem) };
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn call_running(package: &str, intent: &str, deadline: Instant) -> Result<Value, String> {
+    let intent = serde_json::from_str::<Value>(intent)
+        .map_err(|error| error.to_string())
+        .and_then(|value| Intent::from_json(&value).map_err(|failure| failure.message))?;
+    let path = super::socket_path(&super::control_dir()?, package)?;
+    let stream = loop {
+        match client::connect(&path) {
+            Ok(stream) => break stream,
+            Err(CallError::NotRunning) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        }
+    };
+    let left = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_secs(1));
+    match client::call_on(&stream, &Command::Start(intent), left) {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(failure)) => Err(format!("{} ({})", failure.message, failure.code)),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+/// # Safety
+/// `env` must be the calling thread's JNI environment.
+pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
+    let methods: [Method; 7] = [
+        (c"claim", c"(Ljava/lang/String;)Z", f!(claim)),
+        (c"serve", c"(Ljava/lang/String;)I", f!(serve)),
+        (c"take", c"()[Ljava/lang/String;", f!(take)),
+        (
+            c"answer",
+            c"(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            f!(answer),
+        ),
+        (c"close", c"()V", f!(close)),
+        (
+            c"intent",
+            c"(Ljava/lang/String;)Ljava/lang/String;",
+            f!(intent),
+        ),
+        (
+            c"forward",
+            c"(Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;",
+            f!(forward),
+        ),
+    ];
+    // SAFETY: the table matches the Java declarations.
+    unsafe { register(env, c"dev/uxdroid/system/Control", &methods) }
+}

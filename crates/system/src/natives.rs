@@ -455,6 +455,7 @@ pub unsafe fn register_all(env: *mut JNIEnv) -> Result<(), String> {
         crate::input::kcm::register_natives(env)?;
         crate::vsync::register_natives(env)?;
         crate::audio::register_natives(env)?;
+        crate::control::register_natives(env)?;
     }
     Ok(())
 }
