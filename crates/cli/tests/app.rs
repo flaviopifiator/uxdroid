@@ -16,7 +16,14 @@ const APP_USAGE: &str = "usage: uxdroid app list\n       \
      uxdroid app <package> status [--profile <name>]\n       \
      uxdroid app <package> start [--activity <class>] [--action <action>] [--data <uri>] [--extra <key>=<value>]... [--flags <n>] [--profile <name>] [--data-dir <dir>] [--runtime <dir>]\n       \
      uxdroid app <package> intent [--activity <class>] [--action <action>] [--data <uri>] [--extra <key>=<value>]... [--flags <n>] [--profile <name>]\n       \
-     uxdroid app <package> stop [--profile <name>]\n";
+     uxdroid app <package> stop [--profile <name>]\n       \
+     uxdroid app <package> ui [--max-nodes <n>] [--max-depth <n>] [--profile <name>]\n       \
+     uxdroid app <package> screenshot <file.png> [--window <n>] [--max-size <n>] [--profile <name>]\n       \
+     uxdroid app <package> tap <x> <y> | --node <id> [--snapshot <n>] [--profile <name>]\n       \
+     uxdroid app <package> type <text> [--node <id> [--snapshot <n>]] [--profile <name>]\n       \
+     uxdroid app <package> scroll <x> <y> | --node <id> [--snapshot <n>] [--dx <steps>] [--dy <steps>] [--profile <name>]\n       \
+     uxdroid app <package> back|key <name> [--profile <name>]\n       \
+     uxdroid app <package> wait --text <text> | --idle [--timeout <ms>] [--profile <name>]\n";
 
 /// A private runtime directory, as `$XDG_RUNTIME_DIR` is, and a home.
 fn scratch(name: &str) -> PathBuf {
@@ -175,6 +182,10 @@ fn the_command_list_names_app() {
         stderr(&output)
             .contains("\n       uxdroid app <package> status|start|intent|stop [<options>]\n")
     );
+    assert!(stderr(&output).contains(
+        "\n       uxdroid app <package> ui|screenshot|tap|type|scroll|back|key|wait [<options>]\n"
+    ));
+    assert!(stderr(&output).contains("\n       uxdroid mcp\n"));
     assert!(stderr(&output).ends_with("\n       uxdroid app list\n"));
 }
 

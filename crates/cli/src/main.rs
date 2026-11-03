@@ -14,7 +14,9 @@ const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
                      uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]\n       \
                      uxdroid install <apk> --data <dir>\n       \
                      uxdroid service enable|disable|status|run <package> [<options>]\n       \
+                     uxdroid mcp\n       \
                      uxdroid app <package> status|start|intent|stop [<options>]\n       \
+                     uxdroid app <package> ui|screenshot|tap|type|scroll|back|key|wait [<options>]\n       \
                      uxdroid app list";
 const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
