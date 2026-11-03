@@ -124,6 +124,24 @@ Not yet: input events, resizing a window after it opens, placing dialogs and pop
 
 The spike measured 28 MiB of private dirty memory per process. Most of the rest was clean framework pages, shared between processes.
 
+### Audio goes to the host's sound server over the PulseAudio protocol
+
+Every Android audio API an app uses becomes one stream of `crates/audio`: interleaved `f32` frames at the app's own rate and channel count, converted from the app's sample format at the API's edge. Each stream has one thread that moves a 10 ms period, as Android's mixer does, between the stream and the device, whose clock paces it. A push stream, such as an `AudioTrack` in streaming mode, buffers what the app writes and plays silence when the buffer runs dry, counting each gap as one underrun. A callback stream, such as AAudio's data callback or an OpenSL ES buffer queue, asks the app for each period on that thread. `AudioTrack.setPlaybackRate` resamples linearly to the stream's rate. Nothing is mixed in the process: each stream is its own client of the server, which mixes and resamples to the hardware.
+
+`UXDROID_AUDIO` chooses the backend:
+
+| Value | Backend |
+|-------|---------|
+| unset | The PulseAudio protocol, else ALSA's `default` device, else silence with a warning; the first that opens is kept for the process |
+| `pulse`, `pulse:<server>` | The PulseAudio protocol only |
+| `alsa`, `alsa:<device>` | ALSA only |
+| `null` | Silence, at the device clock |
+| `file:<dir>` | Each output stream writes `output-<n>-<rate>hz-<channels>ch.f32` into the directory, and input streams read `input.f32` from it, then silence; raw little-endian `f32`, at the device clock. Tests read back every sample |
+
+The PulseAudio protocol was chosen over PipeWire's own because it reaches both servers a Linux desktop runs: PipeWire serves it through `pipewire-pulse`, and older systems run PulseAudio itself. Its client library, `libpulse-simple`, is five functions over a blocking stream, against PipeWire's stream API, which needs the format built as SPA pods from inline header code. The latency an app gets is set explicitly: two periods (20 ms) queued on the server, plus the server's own quantum. PipeWire's native API would save the hop through `pipewire-pulse` and could run the callback on PipeWire's real-time thread; that was not measured, because the test environment has no PipeWire server, and is the first thing to try if the measured latency is not good enough. ALSA is the fallback for hosts without a server: two periods of latency, with its own resampler when the device lacks the rate.
+
+The host's sound libraries are opened with `dlopen` when the first stream opens, never linked, so uxdroid adds no build dependency and starts on hosts without them.
+
 ### Guest architecture stays inside the native bridge
 
 The platform is built once, for the host. Only an app's own `.so` files have a guest ABI, and only the bridge knows which one. These rules let `arm64-v8a`, and later `armeabi-v7a`, arrive without changes elsewhere:

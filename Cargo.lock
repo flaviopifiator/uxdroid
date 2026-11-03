@@ -301,6 +301,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uxdroid-audio"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "uxdroid-bridge"
 version = "0.1.0"
 dependencies = [
