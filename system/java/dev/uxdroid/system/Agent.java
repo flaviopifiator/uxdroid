@@ -316,7 +316,11 @@ public final class Agent {
         json.put("class", view.getClass().getName());
         if (view instanceof android.widget.TextView) {
             android.widget.TextView text = (android.widget.TextView) view;
-            json.putOpt("text", cut(text.getText()));
+            // A password's characters never leave the app, as accessibility masks them too.
+            boolean password = text.getTransformationMethod()
+                    instanceof android.text.method.PasswordTransformationMethod;
+            if (!password) json.putOpt("text", cut(text.getText()));
+            flag(json, "password", password);
             json.putOpt("hint", cut(text.getHint()));
             flag(json, "editable", text.onCheckIsTextEditor());
         }
