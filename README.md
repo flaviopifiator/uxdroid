@@ -84,7 +84,8 @@ docker compose run --rm -T dev bash /work/runtime/framework/app_smoke.sh
 docker compose run --rm -T dev bash /work/runtime/framework/window_smoke.sh
 # Bundles, Intents, file descriptors and AIDL calls through android.os.Parcel, whose natives are ours.
 docker compose run --rm -T dev bash /work/runtime/framework/parcel_smoke.sh
-# An NDK-built library using liblog, libandroid, libjnigraphics, EGL, GLES and OpenSL ES.
+# An NDK-built library using liblog, libandroid (with AChoreographer), libjnigraphics, EGL, GLES and
+# OpenSL ES.
 docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
 # Sound through AudioTrack, AudioRecord, OpenSL ES and AAudio, checked sample by sample in files, then
 # played through a private PulseAudio server.

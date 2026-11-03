@@ -11,6 +11,7 @@
 mod aaudio;
 mod assets;
 mod bitmap;
+mod choreographer;
 mod egl;
 mod egl_table;
 mod gles_table;
@@ -82,6 +83,76 @@ pub static LIBANDROID: Table = Table {
         function!(c"AAsset_read", "i32(ptr,ptr,u64)", assets::asset_read),
         function!(c"AAsset_seek", "i64(ptr,i64,i32)", assets::asset_seek),
         function!(c"AAsset_seek64", "i64(ptr,i64,i32)", assets::asset_seek),
+        function!(
+            c"AChoreographerFrameCallbackData_getFrameTimeNanos",
+            "i64(ptr)",
+            choreographer::data_frame_time
+        ),
+        function!(
+            c"AChoreographerFrameCallbackData_getFrameTimelineDeadlineNanos",
+            "i64(ptr,u64)",
+            choreographer::data_deadline
+        ),
+        function!(
+            c"AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos",
+            "i64(ptr,u64)",
+            choreographer::data_expected_presentation
+        ),
+        function!(
+            c"AChoreographerFrameCallbackData_getFrameTimelineVsyncId",
+            "i64(ptr,u64)",
+            choreographer::data_vsync_id
+        ),
+        function!(
+            c"AChoreographerFrameCallbackData_getFrameTimelinesLength",
+            "u64(ptr)",
+            choreographer::data_timelines_length
+        ),
+        function!(
+            c"AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex",
+            "u64(ptr)",
+            choreographer::data_preferred_timeline
+        ),
+        function!(
+            c"AChoreographer_getInstance",
+            "ptr()",
+            choreographer::get_instance
+        ),
+        function!(
+            c"AChoreographer_postFrameCallback",
+            "void(ptr,ptr,ptr)",
+            choreographer::post_frame_callback
+        ),
+        function!(
+            c"AChoreographer_postFrameCallback64",
+            "void(ptr,ptr,ptr)",
+            choreographer::post_frame_callback64
+        ),
+        function!(
+            c"AChoreographer_postFrameCallbackDelayed",
+            "void(ptr,ptr,ptr,i64)",
+            choreographer::post_frame_callback_delayed
+        ),
+        function!(
+            c"AChoreographer_postFrameCallbackDelayed64",
+            "void(ptr,ptr,ptr,u32)",
+            choreographer::post_frame_callback_delayed64
+        ),
+        function!(
+            c"AChoreographer_postVsyncCallback",
+            "void(ptr,ptr,ptr)",
+            choreographer::post_vsync_callback
+        ),
+        function!(
+            c"AChoreographer_registerRefreshRateCallback",
+            "void(ptr,ptr,ptr)",
+            choreographer::register_refresh_rate_callback
+        ),
+        function!(
+            c"AChoreographer_unregisterRefreshRateCallback",
+            "void(ptr,ptr,ptr)",
+            choreographer::unregister_refresh_rate_callback
+        ),
         function!(c"ALooper_acquire", "void(ptr)", looper::acquire),
         function!(
             c"ALooper_addFd",

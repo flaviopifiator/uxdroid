@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runs an APK whose native library, built here by the NDK, uses the Android system libraries apps link
-# against: liblog, libandroid's assets, looper and native window, libjnigraphics, EGL and GLES over
+# against: liblog, libandroid's assets, looper, choreographer and native window, libjnigraphics, EGL and GLES over
 # Mesa, and OpenSL ES. The native bridge loads it and binds those libraries to their signature tables.
 # Two screenshots from a headless compositor check the ANativeWindow frame, then the EGL one. Runs in
 # the dev service, which has the NDK and Mesa; the APK is ours, built by build_system.sh. With
@@ -45,7 +45,7 @@ wait_for() {
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
 
 wait_for "ndk cpu frame:"
-expect "^ndk check: assets bitmap opensl looper ok$" "the native checks failed"
+expect "^ndk check: assets bitmap opensl looper choreographer ok$" "the native checks failed"
 expect "^ndk bitmap pixel written natively: ff405060$" "AndroidBitmap_unlockPixels did not write back"
 expect "^I/ndksample: liblog print 42$" "__android_log_print"
 expect "^W/ndksample: liblog write$" "__android_log_write"
@@ -53,6 +53,18 @@ expect "^E/ndksample: liblog buf_write$" "__android_log_buf_write"
 expect "^I/ndksample: liblog vprint ok$" "__android_log_vprint"
 expect "^I/ndksample: looper callback fired: byte x, events 1, data 7, main thread yes$" \
     "the pipe's ALooper callback did not run on the main Looper"
+# AChoreographer: 30 frames, each posting the next, on the main thread and on a native looper thread,
+# at the vsync pace the framework's Choreographer also follows (29 intervals of 16.7 ms is 483 ms).
+for chain in main looper; do
+    wait_for "choreographer $chain: 30 frames"
+    read -r took shortest < <(sed -n -E "s/^I\/ndksample: choreographer $chain: 30 frames in ([0-9]+) ms, intervals ([0-9]+) to [0-9]+ us$/\1 \2/p" "$WORK/out")
+    [ -n "${took:-}" ] || fail "no frame report from the $chain thread"
+    [ "$took" -ge 440 ] && [ "$took" -le 1000 ] || fail "30 frames on the $chain thread took $took ms"
+    [ "$shortest" -ge 15000 ] || fail "frames on the $chain thread came $shortest us apart, faster than 60 Hz"
+    echo "ok: AChoreographer ran 30 chained frames on the $chain thread in $took ms, no two closer than $shortest us"
+done
+expect "^I/ndksample: choreographer vsync: 1 timeline, deadline 16666 us after its frame$" "AChoreographer_postVsyncCallback"
+expect "^I/ndksample: choreographer refresh period 16666666 ns$" "AChoreographer_registerRefreshRateCallback"
 expect "^ndk cpu frame: ([0-9]+)x([0-9]+) format 1, window \\1x\\2, posted$" "ANativeWindow did not post"
 
 shoot() {

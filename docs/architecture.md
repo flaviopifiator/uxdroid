@@ -81,6 +81,7 @@ App libraries name `liblog.so`, `libandroid.so`, `libjnigraphics.so`, `libEGL.so
 | `liblog` | stderr, with the minimum priority, default tag, logger and aborter an app may set |
 | `libandroid` assets | The framework's `AssetManager`: each asset is read into memory when it opens, and stored entries also open as file descriptors |
 | `libandroid` looper | One epoll set per thread. On a thread with a Java `Looper`, `MessageQueue.addOnFileDescriptorEventListener` watches that set, so the app's callbacks run inside `Looper.loop` |
+| `libandroid` choreographer | `AChoreographer`: one per thread with an `ALooper`, a timer on that looper armed by the same frame clock as the framework's `Choreographer`, which `libuxdroid_system.so` hands over by address through `VsyncListener.clock()` (a 60 Hz clock of its own without it). Frame callbacks, 32- and 64-bit and delayed, vsync callbacks with one frame timeline, and refresh rate callbacks, which hear 60 Hz once. Flutter's engine finds it and paces its frames by it |
 | `libandroid` native window | The Java `Surface`: a lock hands out a buffer, and posting copies it into a `Bitmap` and draws it through `Surface.lockCanvas` |
 | `libjnigraphics` | `Bitmap.getPixels` and `setPixels`, converted to Android's memory layout |
 | `libEGL` | Mesa's surfaceless platform, with llvmpipe when there is no GPU. A window surface is a pbuffer that each swap reads back into its native window. Configs report `EGL_WINDOW_BIT` and Android's visual IDs |
@@ -92,7 +93,7 @@ Pixels cross into Java as `int` arrays, because AOSP's host graphics library can
 
 A translator needs more than the tables: callbacks into app code, such as `ALooper` callbacks and an app's logger, and host functions handed out as pointers, such as `eglGetProcAddress` results and OpenSL ES method tables, cross the same boundary. OpenSL ES's method tables and the audio callbacks, OpenSL ES buffer queues' and AAudio's, already have signatures, in `uxdroid_ndk::opensles_interfaces`.
 
-Not yet: `AChoreographer`, `AHardwareBuffer` and Android image extensions for EGL, OpenSL ES players of encoded data and its event callbacks, and the rest of `libandroid`, such as sensors, input queues and configuration.
+Not yet: `ASurfaceControl` and `ASurfaceTransaction` (Flutter's Impeller would use them with `AHardwareBuffer`, which does not exist here), `AHardwareBuffer` and Android image extensions for EGL, OpenSL ES players of encoded data and its event callbacks, and the rest of `libandroid`, such as sensors, input queues and configuration.
 
 ### The platform is AOSP's own framework
 
