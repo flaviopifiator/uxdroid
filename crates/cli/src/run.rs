@@ -12,18 +12,9 @@ use std::process::{Command, ExitCode};
 use uxdroid_apk::{ExecutionPath, extract_native_libs, fingerprint, host_abi, inspect};
 
 use crate::install::valid_package;
+use crate::runtime::{boot_class_path, default_runtime, failure, home_dir, runtime_environment};
 use crate::{EXIT_FAILURE, EXIT_USAGE, RUN_USAGE, fail};
 
-/// The boot class path, in the order the boot image was compiled with.
-const BOOT_JARS: [&str; 7] = [
-    "core-oj",
-    "core-libart",
-    "okhttp",
-    "bouncycastle",
-    "apache-xml",
-    "core-icu4j",
-    "conscrypt",
-];
 const LAUNCHER_CLASS: &str = "dev.uxdroid.runtime.Launcher";
 /// Running apps hold a shared lock on this file, inside their install directory.
 const IN_USE_MARKER: &str = "in-use";
@@ -59,39 +50,6 @@ fn parse(args: &[OsString]) -> Option<RunArgs<'_>> {
         }
     }
     Some(parsed)
-}
-
-fn home_dir(variable: &str, fallback: &str) -> Result<PathBuf, String> {
-    // The XDG specification treats an empty value as unset.
-    if let Some(value) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(value));
-    }
-    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-    Ok(Path::new(&home).join(fallback))
-}
-
-fn boot_class_path(runtime: &Path) -> String {
-    let jars: Vec<String> = BOOT_JARS
-        .iter()
-        .map(|jar| {
-            runtime
-                .join("javalib")
-                .join(format!("{jar}.jar"))
-                .display()
-                .to_string()
-        })
-        .collect();
-    jars.join(":")
-}
-
-fn runtime_environment(command: &mut Command, runtime: &Path, data: &Path, library_path: &str) {
-    command
-        .env("ANDROID_ROOT", runtime)
-        .env("ANDROID_ART_ROOT", runtime)
-        .env("ANDROID_I18N_ROOT", runtime.join("com.android.i18n"))
-        .env("ANDROID_TZDATA_ROOT", runtime.join("com.android.tzdata"))
-        .env("ANDROID_DATA", data)
-        .env("LD_LIBRARY_PATH", library_path);
 }
 
 /// Compiles the APK at `work` to machine code, as the file it will become at `location`.
@@ -136,14 +94,7 @@ fn compile_app(
         .output()
         .map_err(|error| format!("cannot start dex2oat: {error}"))?;
     if !output.status.success() {
-        // Its last line is usually a timing summary, so errors are searched for first.
-        let log = String::from_utf8_lossy(&output.stderr);
-        let line = log
-            .lines()
-            .rfind(|line| line.contains(" E ") || line.contains(" F "))
-            .or(log.lines().last())
-            .unwrap_or("");
-        return Err(format!("dex2oat failed: {}", line.escape_debug()));
+        return Err(format!("dex2oat failed: {}", failure(&output.stderr, &[])));
     }
     Ok(())
 }
@@ -316,10 +267,7 @@ fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> 
 
     let runtime = match &args.runtime {
         Some(runtime) => runtime.clone(),
-        None => match std::env::var_os("UXDROID_RUNTIME").filter(|value| !value.is_empty()) {
-            Some(runtime) => PathBuf::from(runtime),
-            None => home_dir("XDG_DATA_HOME", ".local/share")?.join("uxdroid/runtime"),
-        },
+        None => default_runtime()?,
     };
     let runtime = std::fs::canonicalize(&runtime)
         .map_err(|error| format!("cannot find the runtime at {}: {error}", runtime.display()))?;

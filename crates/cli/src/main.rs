@@ -29,6 +29,7 @@ fn main() -> ExitCode {
 }
 
 mod install;
+mod runtime;
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 mod run;

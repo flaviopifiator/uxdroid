@@ -109,8 +109,26 @@ Exit codes: `1` it cannot start, `2` wrong usage. Once started, the process is t
 `dev.uxdroid.system.Launcher`, which starts an APK on AOSP's framework, reads app files where Android's installer leaves them. `uxdroid install` does the installer's part before the first start: it extracts the APK's native libraries for this CPU into `<data>/data/<package>/lib`, the directory `ApplicationInfo.nativeLibraryDir` names, and records the chosen ABI in `<data>/data/<package>/abi`. `<data>` is the absolute directory the launcher gets as `ANDROID_DATA`. Installing again replaces the libraries, and APKs with native code only for another CPU are refused, as are archives that name an entry twice, which Android refuses too. Installs of one package into one data directory take turns, through a lock on `<data>/app/.<package>.lock`, and clear what an interrupted install left.
 
 ```sh
-uxdroid install app.apk --data /path/to/android-data
+UXDROID_RUNTIME=/runtime/art uxdroid install app.apk --data /path/to/android-data
 ```
+
+With the framework's runtime, found as for `uxdroid run` through `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime`, the install also prepares everything a start would otherwise redo, in the app's code directory `<data>/app/<package>`, as Android's installer does:
+
+| File | What a start does with it instead of the work |
+|------|-----------------------------------------------|
+| `base.apk` | A copy of the APK, which the launcher is given: `Launcher <runtime> <libuxdroid_system.so> <data>/app/<package>/base.apk` |
+| `oat/x86_64/base.odex`, `base.vdex` | The DEX compiled by `dex2oat` with the `verify` filter, against the boot image and the framework's class loader, which ART maps instead of verifying the code at each start |
+| `package.record` | The framework's own `PackageParser` result: `ApplicationInfo`, the launcher `ActivityInfo` and `PackageInfo`, read back instead of parsing the manifest |
+| `defaults.so` | The default bodies of every framework native, bound by ART by name on first call, instead of a stub per native made at each start |
+
+The report then has a second line:
+
+```
+installed com.example.app: 2 native libraries for x86_64 in /data/data/com.example.app/lib
+prepared com.example.app in /data/app/com.example.app: code compiled (verify), manifest recorded with launcher com.example.app.MainActivity, 5207 default bodies
+```
+
+The `verify` filter was chosen by measurement, in [benches/framework](benches/framework/README.md). The record and the library are valid only for the runtime and the `base.apk` they were made with: if either changes, the launcher says so on stderr and parses the APK and makes the default bodies itself, and ART ignores compiled code that no longer matches. On a file system mounted `noexec`, `defaults.so` cannot be mapped and the bodies are made at start. If preparing fails, the install fails with `error: cannot prepare <package> for the framework: ...` and the previous install stays. Without a framework, only the libraries are installed, an older preparation is removed, and stderr says `note: no framework in <runtime>, so <package> is not prepared: ...`; the launcher then works from the APK as before. The install runs the framework's parser on the manifest, not the app's code.
 
 ## Tests
 

@@ -23,13 +23,64 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Installs with no runtime to be found, as these tests always did.
 fn install(apk: &Path, data: &Path) -> Output {
-    uxdroid(&[
-        "install",
-        apk.to_str().unwrap(),
-        "--data",
-        data.to_str().unwrap(),
-    ])
+    install_with(apk, data, &[("UXDROID_RUNTIME", "")])
+}
+
+fn install_with(apk: &Path, data: &Path, env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_uxdroid"));
+    command
+        .args(["install", apk.to_str().unwrap(), "--data"])
+        .arg(data)
+        .env("XDG_DATA_HOME", "/nonexistent")
+        .env_remove("FAKE_FAIL");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().unwrap()
+}
+
+/// A runtime whose dalvikvm64 and dex2oat64 are scripts: each logs its arguments, writes what the real
+/// one writes, and fails when FAKE_FAIL names it.
+fn fake_runtime(dir: &Path) -> (PathBuf, PathBuf) {
+    let runtime = dir.join("runtime");
+    let log = dir.join("calls.log");
+    std::fs::create_dir_all(runtime.join("bin")).unwrap();
+    std::fs::create_dir_all(runtime.join("framework")).unwrap();
+    for file in ["framework.jar", "uxdroid-system.jar", "natives.txt"] {
+        std::fs::write(runtime.join("framework").join(file), b"").unwrap();
+    }
+    let scripts = [
+        (
+            "dalvikvm64",
+            "[ \"$FAKE_FAIL\" = installer ] && { echo 'Exception in thread main: bad manifest' >&2; exit 1; }\n\
+             eval staged=\\${$(($# - 1))}\n\
+             dir=$(dirname \"$staged\")\n\
+             echo record > \"$dir/package.record\"\n\
+             echo library > \"$dir/defaults.so\"\n\
+             echo 'launcher com.example.app.MainActivity'\n\
+             echo 'defaults 3'\n",
+        ),
+        (
+            "dex2oat64",
+            "[ \"$FAKE_FAIL\" = dex2oat ] && { echo '11-03 E dex2oat64: dex file is broken' >&2; echo 'dex2oat took 1ms' >&2; exit 1; }\n\
+             for arg; do case $arg in --oat-file=*) out=${arg#--oat-file=};; esac; done\n\
+             echo odex > \"$out\"\n\
+             echo vdex > \"${out%.odex}.vdex\"\n",
+        ),
+    ];
+    for (name, body) in scripts {
+        let path = runtime.join("bin").join(name);
+        let script = format!(
+            "#!/bin/sh\necho \"{name} ANDROID_DATA=$ANDROID_DATA $*\" >> {}\n{body}",
+            log.display()
+        );
+        std::fs::write(&path, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (runtime, log)
 }
 
 fn listing(directory: &Path) -> Vec<String> {
@@ -314,6 +365,219 @@ fn an_install_removes_what_an_interrupted_one_left() {
 
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(listing(&app), ["abi", "lib"]);
+}
+
+#[test]
+fn with_a_framework_the_code_is_compiled_and_the_manifest_and_default_bodies_recorded() {
+    let dir = scratch("prepared");
+    let apk = dir.join("app.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib("x86_64", "liba.so")
+        .write(&apk);
+    let data = dir.join("data");
+    let (runtime, log) = fake_runtime(&dir);
+
+    let output = install_with(
+        &apk,
+        &data,
+        &[("UXDROID_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let code = data.join("app/com.example.app");
+    assert_eq!(
+        text(&output.stdout),
+        format!(
+            "installed com.example.app: 1 native libraries for x86_64 in {}\n\
+             prepared com.example.app in {}: code compiled (verify), manifest recorded with launcher \
+             com.example.app.MainActivity, 3 default bodies\n",
+            data.join("data/com.example.app/lib").display(),
+            code.display()
+        )
+    );
+    assert_eq!(
+        std::fs::read(code.join("base.apk")).unwrap(),
+        std::fs::read(&apk).unwrap()
+    );
+    assert_eq!(
+        listing(&code),
+        ["base.apk", "defaults.so", "oat", "package.record"]
+    );
+    assert_eq!(
+        listing(&code.join("oat/x86_64")),
+        ["base.odex", "base.vdex"]
+    );
+    assert_eq!(listing(&data.join("data/com.example.app")), ["abi", "lib"]);
+    assert_eq!(
+        listing(&data.join("app")),
+        [".com.example.app.lock", "com.example.app"]
+    );
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let installer = calls
+        .lines()
+        .find(|line| line.starts_with("dalvikvm64 "))
+        .unwrap();
+    assert!(
+        installer.contains(&format!("ANDROID_DATA={} ", data.display())),
+        "{installer}"
+    );
+    // The installer reads the staged copy and records the path it will have once installed.
+    let staged = data.join("app/.com.example.app.new-");
+    assert!(
+        installer.contains(&format!(
+            " dev.uxdroid.system.Installer {} {} {}",
+            runtime.display(),
+            Path::new(env!("CARGO_BIN_EXE_uxdroid"))
+                .with_file_name("libuxdroid_system.so")
+                .display(),
+            staged.display()
+        )) && installer.ends_with(&format!("/base.apk {}", code.join("base.apk").display())),
+        "{installer}"
+    );
+    let dex2oat = calls
+        .lines()
+        .find(|line| line.starts_with("dex2oat64 "))
+        .unwrap();
+    for argument in [
+        "--compiler-filter=verify".to_string(),
+        "--instruction-set=x86_64".to_string(),
+        format!("--dex-location={}", code.join("base.apk").display()),
+        format!(
+            "--class-loader-context=PCL[];PCL[{0}/framework/framework.jar:{0}/framework/uxdroid-system.jar]",
+            runtime.display()
+        ),
+    ] {
+        assert!(
+            dex2oat.split(' ').any(|word| word == argument),
+            "{argument} in {dex2oat}"
+        );
+    }
+}
+
+#[test]
+fn installing_again_with_a_framework_replaces_the_prepared_app() {
+    let dir = scratch("prepared-again");
+    let data = dir.join("data");
+    let (runtime, _) = fake_runtime(&dir);
+    let env = [("UXDROID_RUNTIME", runtime.to_str().unwrap())];
+    let old = dir.join("old.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .file("assets/v", b"1")
+        .write(&old);
+    let new = dir.join("new.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .file("assets/v", b"2")
+        .write(&new);
+
+    assert_eq!(install_with(&old, &data, &env).status.code(), Some(0));
+    let output = install_with(&new, &data, &env);
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let code = data.join("app/com.example.app");
+    assert_eq!(
+        std::fs::read(code.join("base.apk")).unwrap(),
+        std::fs::read(&new).unwrap()
+    );
+    assert_eq!(
+        listing(&code),
+        ["base.apk", "defaults.so", "oat", "package.record"]
+    );
+    assert_eq!(
+        listing(&data.join("app")),
+        [".com.example.app.lock", "com.example.app"]
+    );
+}
+
+#[test]
+fn a_preparation_that_fails_fails_the_install_and_keeps_the_previous_one() {
+    for (failing, message) in [
+        (
+            "dex2oat",
+            "dex2oat failed: 11-03 E dex2oat64: dex file is broken",
+        ),
+        (
+            "installer",
+            "the framework installer failed: Exception in thread main: bad manifest",
+        ),
+    ] {
+        let dir = scratch(&format!("prepare-fails-{failing}"));
+        let data = dir.join("data");
+        let (runtime, _) = fake_runtime(&dir);
+        let old = dir.join("old.apk");
+        Apk::new()
+            .manifest(&sample_manifest())
+            .native_lib("x86_64", "libold.so")
+            .write(&old);
+        let new = dir.join("new.apk");
+        Apk::new()
+            .manifest(&sample_manifest())
+            .native_lib("x86_64", "libnew.so")
+            .write(&new);
+        let env = [("UXDROID_RUNTIME", runtime.to_str().unwrap())];
+        assert_eq!(install_with(&old, &data, &env).status.code(), Some(0));
+
+        let output = install_with(&new, &data, &[env[0], ("FAKE_FAIL", failing)]);
+
+        assert_eq!(output.status.code(), Some(1), "{failing}");
+        assert_eq!(
+            text(&output.stderr),
+            format!("error: cannot prepare com.example.app for the framework: {message}\n")
+        );
+        let code = data.join("app/com.example.app");
+        assert_eq!(
+            std::fs::read(code.join("base.apk")).unwrap(),
+            std::fs::read(&old).unwrap()
+        );
+        assert_eq!(
+            listing(&data.join("data/com.example.app/lib")),
+            ["libold.so"]
+        );
+        assert_eq!(listing(&data.join("data/com.example.app")), ["abi", "lib"]);
+        assert_eq!(
+            listing(&data.join("app")),
+            [".com.example.app.lock", "com.example.app"]
+        );
+    }
+}
+
+#[test]
+fn without_a_framework_the_app_is_not_prepared_and_an_old_preparation_goes() {
+    let dir = scratch("unprepared");
+    let data = dir.join("data");
+    let (runtime, _) = fake_runtime(&dir);
+    let apk = dir.join("app.apk");
+    Apk::new().manifest(&sample_manifest()).write(&apk);
+    assert_eq!(
+        install_with(
+            &apk,
+            &data,
+            &[("UXDROID_RUNTIME", runtime.to_str().unwrap())]
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+
+    let output = install_with(&apk, &data, &[("UXDROID_RUNTIME", "/no/runtime")]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        format!(
+            "installed com.example.app: 0 native libraries for x86_64 in {}\n",
+            data.join("data/com.example.app/lib").display()
+        )
+    );
+    assert_eq!(
+        text(&output.stderr),
+        "note: no framework in /no/runtime, so com.example.app is not prepared: its manifest is parsed, \
+         its default bodies made and its code run uncompiled at each start\n"
+    );
+    assert_eq!(listing(&data.join("app")), [".com.example.app.lock"]);
 }
 
 #[test]
