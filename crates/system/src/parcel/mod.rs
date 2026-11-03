@@ -12,6 +12,7 @@
 //! bytes read as an error, never as memory past the end, and nothing allocates more than the data
 //! already holds. Buffers grow as Android's do, by half of what they need, from 128 bytes.
 
+mod host;
 mod jni;
 
 use std::collections::BTreeMap;
@@ -19,7 +20,17 @@ use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-pub use jni::register_natives;
+/// Registers Parcel's natives, and replaces the host library's natives that take a parcel.
+///
+/// # Safety
+/// `env` must be the calling thread's JNI environment, after AOSP's host library has loaded.
+pub unsafe fn register_natives(env: *mut ::jni_sys::JNIEnv) -> Result<(), String> {
+    // SAFETY: as above.
+    unsafe {
+        jni::register_natives(env)?;
+        host::register_natives(env)
+    }
+}
 
 /// A `status_t` from `utils/Errors.h`.
 pub type Status = i32;

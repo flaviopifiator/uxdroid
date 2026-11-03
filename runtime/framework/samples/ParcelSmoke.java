@@ -1,5 +1,6 @@
 import android.content.ComponentName;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.os.Binder;
@@ -9,6 +10,7 @@ import android.os.IInterface;
 import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
 import android.os.ResultReceiver;
+import android.view.MotionEvent;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.lang.reflect.Constructor;
@@ -29,6 +31,8 @@ public class ParcelSmoke {
         fileDescriptor();
         binder();
         aidl();
+        bitmap();
+        hostParcel();
         System.out.println("allocations " + (Parcel.getGlobalAllocCount() >= 0));
     }
 
@@ -185,5 +189,51 @@ public class ParcelSmoke {
             System.out.println("aidl refused: " + expected.getMessage());
         }
         data.recycle();
+    }
+
+    /** A Bitmap inside a Bundle, through marshall and unmarshall. */
+    static void bitmap() {
+        Bitmap bitmap = Bitmap.createBitmap(3, 2, Bitmap.Config.ARGB_8888);
+        bitmap.setPixel(0, 0, 0xff112233);
+        bitmap.setPixel(2, 1, 0xff00ff00);
+        bitmap.setDensity(240);
+        Bundle b = new Bundle();
+        b.putParcelable("bitmap", bitmap);
+        Parcel p = Parcel.obtain();
+        p.writeBundle(b);
+        Parcel q = copy(p);
+        Bundle read = q.readBundle(ParcelSmoke.class.getClassLoader());
+        Bitmap copy = read.getParcelable("bitmap", Bitmap.class);
+        System.out.println("bitmap " + copy.getWidth() + "x" + copy.getHeight() + " " + copy.getConfig() + " "
+                + copy.getDensity() + " " + Integer.toHexString(copy.getPixel(0, 0)) + " "
+                + Integer.toHexString(copy.getPixel(2, 1)) + " " + Integer.toHexString(copy.getPixel(1, 0))
+                + " mutable " + copy.isMutable() + " same " + copy.sameAs(bitmap));
+        p.recycle();
+        q.recycle();
+        // A forged header asks for 40 GB of pixels and holds 4 bytes: refused before allocating.
+        Parcel forged = Parcel.obtain();
+        for (int value : new int[] {1, 5, 100000, 100000, 160, 1, 1}) forged.writeInt(value);
+        forged.writeBlob(new byte[4]);
+        forged.setDataPosition(0);
+        try {
+            Bitmap.CREATOR.createFromParcel(forged);
+            System.out.println("bitmap forged accepted");
+        } catch (RuntimeException expected) {
+            System.out.println("bitmap forged refused: " + expected.getMessage());
+        }
+        forged.recycle();
+    }
+
+    /** A host native that cannot read uxdroid's parcels says so, by name. */
+    static void hostParcel() {
+        MotionEvent event = MotionEvent.obtain(0, 0, MotionEvent.ACTION_DOWN, 1, 2, 0);
+        Parcel p = Parcel.obtain();
+        try {
+            event.writeToParcel(p, 0);
+            System.out.println("motion written");
+        } catch (UnsupportedOperationException expected) {
+            System.out.println("motion refused: " + expected.getMessage());
+        }
+        p.recycle();
     }
 }

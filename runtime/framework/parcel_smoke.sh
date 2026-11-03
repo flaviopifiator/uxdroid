@@ -33,7 +33,12 @@ expect "binders true" "a binder was not written"
 expect "binder same true" "a binder read back is not the same object"
 expect "aidl result 3 $BUNDLE" "the framework's AIDL proxy did not reach its stub through parcels"
 expect "aidl refused: Binder invocation to an incorrect interface" "enforceInterface accepted a wrong token"
+expect "bitmap 3x2 ARGB_8888 240 ff112233 ff00ff00 0 mutable true same true" \
+    "a Bitmap in a Bundle did not round-trip"
+expect "bitmap forged refused: Failed to unparcel Bitmap" "a forged Bitmap header was not refused"
+expect "motion refused: android.view.MotionEvent.nativeWriteToParcel: AOSP's host library cannot use uxdroid's parcels" \
+    "a host native was handed a parcel it cannot read"
 expect "allocations true" "Parcel.getGlobalAllocCount failed"
 if grep -q "unimplemented native android.os.Parcel" "$WORK/out"; then fail "a Parcel native has a default body"; fi
-grep -E "^(primitives|bundle|intent|fds|marshall|pipe|binder|aidl) " "$WORK/out" | cut -c1-200
+grep -E "^(primitives|bundle|intent|fds|marshall|pipe|binder|aidl|bitmap|motion) " "$WORK/out" | cut -c1-200
 echo "ok: Bundles, Intents, file descriptors, binders and AIDL calls passed through uxdroid's Parcel"
