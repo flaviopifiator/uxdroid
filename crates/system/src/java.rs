@@ -285,3 +285,19 @@ pub unsafe fn delete_local(env: *mut JNIEnv, local: jobject) {
         unsafe { ((**env).v1_1.DeleteLocalRef)(env, local) };
     }
 }
+
+/// # Safety
+/// `env` must be the calling thread's JNI environment, and `object` a live non-null reference.
+pub unsafe fn long_field(env: *mut JNIEnv, object: jobject, name: &CStr) -> Result<jlong, Pending> {
+    // SAFETY: as above.
+    unsafe {
+        let jni = &**env;
+        let class = (jni.v1_1.GetObjectClass)(env, object);
+        let id = (jni.v1_1.GetFieldID)(env, class, name.as_ptr(), c"J".as_ptr());
+        (jni.v1_1.DeleteLocalRef)(env, class);
+        if id.is_null() {
+            return Err(Pending);
+        }
+        Ok((jni.v1_1.GetLongField)(env, object, id))
+    }
+}

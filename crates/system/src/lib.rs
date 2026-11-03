@@ -17,6 +17,7 @@ mod compose;
 pub mod default_library;
 pub mod defaults;
 mod handles;
+pub mod input;
 mod java;
 mod natives;
 pub mod parcel;
@@ -25,6 +26,7 @@ pub mod properties;
 pub mod shared_memory;
 mod surface;
 mod vsync;
+mod wayland;
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_void};

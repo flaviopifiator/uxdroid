@@ -77,5 +77,6 @@ PY
 build_app /work/runtime/framework/samples/app "$RUNTIME/samples/framework/app.apk"
 build_app /work/runtime/framework/samples/ndk "$RUNTIME/samples/framework/ndk.apk"
 build_app /work/runtime/framework/samples/audio "$RUNTIME/samples/framework/audio.apk"
+build_app /work/runtime/framework/samples/input "$RUNTIME/samples/framework/input.apk"
 ls -la "$RUNTIME/framework/uxdroid-system.jar" "$RUNTIME/samples/framework/smoke.jar" "$RUNTIME/samples/framework/app.apk" \
-    "$RUNTIME/samples/framework/ndk.apk" "$RUNTIME/samples/framework/audio.apk"
+    "$RUNTIME/samples/framework/ndk.apk" "$RUNTIME/samples/framework/audio.apk" "$RUNTIME/samples/framework/input.apk"

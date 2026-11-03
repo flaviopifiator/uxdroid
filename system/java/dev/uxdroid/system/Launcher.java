@@ -79,7 +79,7 @@ public final class Launcher {
         Services.register("display", android.hardware.display.IDisplayManager.class, new DisplayService());
         Services.register("user", android.os.IUserManager.class, new UserManager());
         Services.register("window", android.view.IWindowManager.class, new WindowService());
-        // A window looks the input method service up; with no keyboard yet, every call is counted.
+        // A window looks the input method service up; with no soft keyboard, every call is counted.
         Services.register("input_method", com.android.internal.view.IInputMethodManager.class, null);
         Services.register("input", android.hardware.input.IInputManager.class, new InputService());
         // Content observers, such as Settings watchers, register here; with no other process to

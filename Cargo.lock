@@ -360,7 +360,8 @@ dependencies = [
  "jni-sys",
  "libc",
  "uxdroid-audio",
- "uxdroid-platform",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

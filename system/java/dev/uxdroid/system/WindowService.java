@@ -36,6 +36,8 @@ public final class WindowService {
     /** The handler of IWindowSession. */
     public static final class Session {
         private final Map<IBinder, SurfaceControl> layers = new HashMap<>();
+        /** The server end of each window's input channel, which its layer's Wayland window feeds. */
+        private final Map<IBinder, InputChannel> inputs = new HashMap<>();
 
         public int addToDisplayAsUser(IWindow window, WindowManager.LayoutParams attrs, int viewVisibility,
                 int displayId, int userId, int requestedVisibleTypes, InputChannel outInputChannel,
@@ -43,6 +45,16 @@ public final class WindowService {
                 float[] outSizeCompatScale) {
             outInsetsState.setDisplayFrame(displayBounds());
             outAttachedFrame.setEmpty(); // not attached to a parent window
+            // As InputDispatcher does, the window manager keeps the server end and hands the window
+            // the client end, which its ViewRootImpl reads with a WindowInputEventReceiver.
+            if (outInputChannel != null) {
+                String name = attrs.getTitle() != null ? attrs.getTitle().toString() : "uxdroid";
+                InputChannel[] pair = InputChannel.openInputChannelPair(name);
+                pair[1].copyTo(outInputChannel);
+                pair[1].dispose();
+                InputChannel old = inputs.put(window.asBinder(), pair[0]);
+                if (old != null) old.dispose();
+            }
             outSizeCompatScale[0] = 1f;
             return WindowManagerGlobal.ADD_OKAY | WindowManagerGlobal.ADD_FLAG_IN_TOUCH_MODE
                     | WindowManagerGlobal.ADD_FLAG_APP_VISIBLE;
@@ -80,6 +92,7 @@ public final class WindowService {
                 layer = new SurfaceControl.Builder().setName(title).setBufferSize(width, height)
                         .setFormat(attrs.format).setCallsite("WindowService.relayout").build();
                 layers.put(key, layer);
+                WindowInput.attach(layer, inputs.get(key));
                 result = WindowManagerGlobal.RELAYOUT_RES_FIRST_TIME | WindowManagerGlobal.RELAYOUT_RES_SURFACE_CHANGED;
             }
             out.surfaceControl.copyFrom(layer, "WindowService.relayout");
@@ -97,7 +110,12 @@ public final class WindowService {
 
         public void remove(IBinder window) {
             SurfaceControl layer = layers.remove(window);
-            if (layer != null) layer.release();
+            if (layer != null) {
+                WindowInput.attach(layer, null);
+                layer.release();
+            }
+            InputChannel input = inputs.remove(window);
+            if (input != null) input.dispose();
         }
     }
 }

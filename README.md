@@ -2,7 +2,7 @@
 
 Run Android APKs as native Linux processes, with no emulator, no container and no Android system image.
 
-**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Milestone 4, AOSP's own framework below real apps, is in progress: RustDesk's x86_64 build shows its first Flutter screen through `dev.uxdroid.system.Launcher`, with no input yet. See [the architecture](docs/architecture.md) for the design and roadmap.
+**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Milestone 4, AOSP's own framework below real apps, is in progress: RustDesk's x86_64 build shows its first Flutter screen through `dev.uxdroid.system.Launcher` and takes clicks, touch and typed text from the Wayland seat. See [the architecture](docs/architecture.md) for the design and roadmap.
 
 ## Quick path
 
@@ -89,9 +89,13 @@ docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
 # Sound through AudioTrack, AudioRecord, OpenSL ES and AAudio, checked sample by sample in files, then
 # played through a private PulseAudio server.
 docker compose run --rm -T dev bash /work/runtime/framework/audio_smoke.sh
-# RustDesk 1.5.1's x86_64 build (Flutter) to its first frame. Its code is untrusted: sandbox only.
+# Wayland pointer, touch and keyboard input to an SDK-built APK's Views, through a scripted seat.
+docker compose run --rm -T dev bash /work/runtime/framework/input_smoke.sh
+# RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
+# is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
 UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_smoke.sh
+UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_input_smoke.sh
 
 # Apps play to the host's PulseAudio or PipeWire server, else ALSA. UXDROID_AUDIO=null plays into
 # silence, and UXDROID_AUDIO=file:<dir> writes each stream's samples to a file.

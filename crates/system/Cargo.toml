@@ -12,4 +12,5 @@ crate-type = ["cdylib", "rlib"]
 jni-sys = "0.4"
 libc = "0.2"
 uxdroid-audio = { path = "../audio" }
-uxdroid-platform = { path = "../platform" }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }

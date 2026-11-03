@@ -14,7 +14,17 @@ UXDROID_SAMPLES=<directory with the RustDesk APK> docker compose run --rm -T \
     -v uxdroid-framework-bench:/var/tmp sandbox bash /work/benches/framework/rustdesk.sh
 ```
 
-`RUNS` sets the measured runs per row (default 30), for example `docker compose run --rm -T -e RUNS=10 dev ...`.
+`RUNS` sets the measured runs per row (default 30), for example `docker compose run --rm -T -e RUNS=10 dev ...`. Both scripts use the release build in `CARGO_TARGET_DIR` (default `/cache/target`).
+
+The runtime must be at `/runtime/art`, the path its boot image and framework record. A copy elsewhere, such as `/runtime/art-<unit>`, runs without its boot image and gives wrong times; mount the copy at `/runtime/art` instead (with `docker run --mount type=volume,src=uxdroid-art_art_runtime,dst=/runtime/art,volume-subpath=<copy>`), and build it there.
+
+Input latency, through the scripted Wayland seat of `runtime/framework/input_compositor.py`:
+
+```sh
+docker compose run --rm -T dev bash /work/benches/framework/input.sh
+UXDROID_SAMPLES=<directory with the RustDesk APK> docker compose run --rm -T \
+    -v uxdroid-framework-bench:/var/tmp -e APP=rustdesk sandbox bash /work/benches/framework/input.sh
+```
 
 ## Method
 
@@ -133,6 +143,20 @@ Latency and pacing on a private PulseAudio server with null devices (`crates/aud
 | A recording's half second | read in 0.5 s, at the server's pace |
 
 The latency an app sees is the server's plus what it buffered: the sample's `AudioTrack`, of four minimum buffers, holds up to 80 ms at 48 kHz, and an AAudio stream up to four periods, 40 ms; a blocking write keeps them full. Null devices idle in 2 s blocks and wake for a new stream only at the end of one, which hardware devices do not do, so the script keeps a silent stream on each; without it the first sound of a stream came about 2 s late. Not measured: latency on PipeWire, PipeWire's own protocol, ALSA on real hardware, and a round trip from speaker to microphone. No competitor plays audio here either.
+## Input
+
+[`input.sh`](input.sh) measures, for each click or key, the time from the compositor sending it to the first frame the compositor receives whose pixels differ. Each event toggles what is drawn: the input sample's button switches the page color, and a key alternates `a` and backspace in its text field, whose cursor is hidden so blinking changes nothing; on RustDesk, clicks alternate the Chat and Settings tabs, and keys `2` and backspace in the Remote ID field. Every event waits until no frame came for 0.5 s. 30 clicks and 30 keys per app.
+
+2026-11-03, branch `feat/compat-input`, other writers' builds running on the machine. Median (interquartile range), min-max:
+
+| App | Click | Key |
+|-----|-------|-----|
+| Input sample APK (`View`s, software drawing) | 29.2 ms (24.7-33.8), 21.3-38.1 | 13.4 ms (9.0-17.8), 4.8-37.2 |
+| RustDesk 1.5.1 (Flutter) | 16.6 ms (13.4-20.5), 7.3-82.4 | 14.7 ms (9.6-17.7), 6.0-22.7 |
+
+This is input to a frame received by the compositor, not to light on a screen: no display scan-out is counted. Frames are paced by the 60 Hz vsync timer, so up to 16.7 ms of each figure is waiting for the next tick.
+
+Input added nothing measurable to startup or memory. Against the base commit, both mounted at `/runtime/art` and measured back to back with 30 runs per row: framework sample to first frame warm 139.4 against 141.0 ms, 19.5 against 19.6 MiB private dirty; RustDesk to its first Flutter frame warm 253.8 against 252.2 ms, 87.5 against 86.1 MiB private dirty, cold 1064 against 1049 ms. One row moved: `FrameworkSmoke` warm read 73.0 against 155.9 ms, with a tight range, while other writers built on the machine; interleaved runs of base and branch on an idle machine afterwards gave 81.0 and 82.2 ms against 81.5 and 81.5 ms to exit (medians of 15).
 
 ## Limits
 
@@ -159,4 +183,4 @@ No competitor runs these workloads here, so **no claim of being faster or smalle
 | Android emulator | No `/dev/kvm` on this machine; without KVM an x86_64 system image runs under full software emulation, which is no fair comparison | No |
 | A real Android device | None available | |
 
-Also not measured: frame rate or time after the first frame, input latency, memory over time, GPU rendering, and RustDesk with its data on tmpfs (only on disk).
+Also not measured: frame rate or time after the first frame, input latency on a real compositor or against any competitor, memory over time, GPU rendering, and RustDesk with its data on tmpfs (only on disk).
