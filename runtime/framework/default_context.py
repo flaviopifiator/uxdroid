@@ -16,7 +16,7 @@ METHOD = re.compile(r"(public|protected) abstract (<.+?> )?(\S+) (\w+)\((.*)\)$"
 
 def java_type(name):
     """javap writes nested classes as Outer$Inner; Java source wants Outer.Inner."""
-    return re.sub(r"(\w)\$(\w)", r"\1.\2", name)
+    return re.sub(r"(?<=\w)\$(?=\w)", ".", name)
 
 
 def generate(javap_lines):
