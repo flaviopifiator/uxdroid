@@ -14,6 +14,7 @@ macro_rules! f {
 
 mod audio;
 mod compose;
+pub mod default_library;
 pub mod defaults;
 mod handles;
 mod java;
@@ -214,6 +215,91 @@ unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: 
     bound
 }
 
+/// `static native int writeDefaults(String list, String library)`: writes the library of default
+/// bodies for every listed native, made once at install time, and returns how many it holds.
+unsafe extern "system" fn write_defaults(
+    env: *mut JNIEnv,
+    _class: jclass,
+    list: jstring,
+    library: jstring,
+) -> jint {
+    // SAFETY: ART passes a valid environment and strings or null.
+    let (list, library) = unsafe { (java_string(env, list), java_string(env, library)) };
+    let result = match (list, library) {
+        (Some(list), Some(library)) => std::fs::read_to_string(&list)
+            .map_err(|error| format!("{list}: {error}"))
+            .and_then(|text| {
+                let natives = defaults::parse(&text);
+                std::fs::write(&library, default_library::build(&natives))
+                    .map_err(|error| format!("{library}: {error}"))
+                    .map(|()| natives.len() as jint)
+            }),
+        _ => Err("no list or library path".to_string()),
+    };
+    result.unwrap_or_else(|error| {
+        // SAFETY: as above.
+        unsafe { throw(env, c"java/lang/IllegalStateException", &error) };
+        0
+    })
+}
+
+/// `static native String defaultsProblem(String library)`: why a library from `writeDefaults` cannot
+/// be loaded as code, or null. On a `noexec` file system glibc cannot map it, and the native bridge
+/// would copy it into private memory before `attachDefaults` refused it.
+unsafe extern "system" fn defaults_problem(
+    env: *mut JNIEnv,
+    _class: jclass,
+    library: jstring,
+) -> jstring {
+    // SAFETY: ART passes a valid environment and a string or null.
+    let library = unsafe { java_string(env, library) }.unwrap_or_default();
+    let problem = std::ffi::CString::new(library.as_str())
+        .map_err(|_| "its path holds a NUL".to_string())
+        .and_then(|path| {
+            // SAFETY: a zeroed statvfs is a valid output buffer, and the path is a C string.
+            let mut info: libc::statvfs = unsafe { std::mem::zeroed() };
+            if unsafe { libc::statvfs(path.as_ptr(), &mut info) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            if info.f_flag & libc::ST_NOEXEC != 0 {
+                return Err("its file system does not allow running code".to_string());
+            }
+            Ok(())
+        });
+    match problem {
+        Ok(()) => std::ptr::null_mut(),
+        // SAFETY: as above.
+        Err(problem) => unsafe { new_string(env, &problem) },
+    }
+}
+
+/// `static native int attachDefaults(String library, String list)`: connects a library from
+/// `writeDefaults`, which `System.load` loaded, to this one, and returns how many bodies it holds.
+unsafe extern "system" fn attach_defaults(
+    env: *mut JNIEnv,
+    _class: jclass,
+    library: jstring,
+    list: jstring,
+) -> jint {
+    // SAFETY: ART passes a valid environment and strings or null.
+    let (library, list) = unsafe { (java_string(env, library), java_string(env, list)) };
+    #[cfg(target_arch = "x86_64")]
+    let result = match (library, list) {
+        (Some(library), Some(list)) => default_library::attach(&library, &list),
+        _ => Err("no library or list path".to_string()),
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let result: Result<usize, String> = {
+        let _ = (library, list);
+        Err("install-time default bodies are x86_64 code".to_string())
+    };
+    result.map(|count| count as jint).unwrap_or_else(|error| {
+        // SAFETY: as above.
+        unsafe { throw(env, c"java/lang/IllegalStateException", &error) };
+        0
+    })
+}
+
 /// `static native void bindSystem(String buildProp)`: loads properties, then replaces default bodies
 /// with this library's natives.
 unsafe extern "system" fn bind_system(env: *mut JNIEnv, _class: jclass, build_prop: jstring) {
@@ -253,11 +339,26 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
         if ((**vm).v1_2.GetEnv)(vm, &mut env, JNI_VERSION_1_6) != JNI_OK {
             return JNI_ERR;
         }
-        let methods: [Method; 2] = [
+        let methods: [Method; 5] = [
+            (
+                c"defaultsProblem",
+                c"(Ljava/lang/String;)Ljava/lang/String;",
+                defaults_problem as *mut c_void,
+            ),
             (
                 c"bindDefaults",
                 c"(Ljava/lang/String;)I",
                 bind_defaults as *mut c_void,
+            ),
+            (
+                c"writeDefaults",
+                c"(Ljava/lang/String;Ljava/lang/String;)I",
+                write_defaults as *mut c_void,
+            ),
+            (
+                c"attachDefaults",
+                c"(Ljava/lang/String;Ljava/lang/String;)I",
+                attach_defaults as *mut c_void,
             ),
             (
                 c"bindSystem",

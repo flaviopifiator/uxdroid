@@ -47,10 +47,32 @@ public final class Launcher {
             System.err.println("usage: Launcher [--once] <runtime root> <libuxdroid_system.so> <apk> [activity class]");
             System.exit(2);
         }
-        Boot.start(args[first], args[first + 1]);
+        String root = args[first];
+        File apk = new File(args[first + 2]).getAbsoluteFile();
+        String activityName = args.length - first == 4 ? args[first + 3] : null;
+        // What uxdroid install prepared beside an installed APK, if it was made for this runtime and file.
+        File record = new File(apk.getParentFile(), Record.FILE);
+        String identity = Record.identity(root, apk);
+        boolean prepared = record.isFile() && Record.matches(record, identity);
+        File defaults = new File(apk.getParentFile(), Installer.DEFAULTS);
+        Boot.start(root, args[first + 1], prepared && defaults.isFile() ? defaults.getPath() : null);
         Services.register("permissionmgr", android.permission.IPermissionManager.class, new PermissionManager());
-        App app = App.parse(new File(args[first + 2]), args.length - first == 4 ? args[first + 3] : null);
-        Permissions.declare(app.parsed.requestedPermissions);
+        App app = null;
+        if (record.isFile()) {
+            try {
+                app = App.recorded(apk, Record.read(record, identity), activityName);
+            } catch (java.io.IOException | ReflectiveOperationException | RuntimeException e) {
+                System.err.println("uxdroid: the install record " + record + " is not used, the APK is parsed instead"
+                        + " until uxdroid install runs again: " + e.getMessage());
+            }
+        }
+        if (app == null) app = App.parse(apk, activityName);
+        App started = app;
+        Permissions.declare(() -> {
+            String[] names = started.packageInfo(android.content.pm.PackageManager.GET_PERMISSIONS, 0)
+                    .requestedPermissions;
+            return names == null ? java.util.List.of() : java.util.Arrays.asList(names);
+        });
         Services.register("activity", IActivityManager.class, new ActivityManager(app, once));
         Services.register("activity_task", IActivityTaskManager.class, new ActivityTaskManager());
         Services.register("package", IPackageManager.class, new PackageManager(app));
@@ -76,48 +98,90 @@ public final class Launcher {
         ActivityThread.main(new String[0]);
     }
 
-    /** The parsed APK: its application and the Activity to launch. */
+    /** The installed APK: its application and the Activity to launch, from its record or parsed now. */
     static final class App {
-        final PackageParser.Package parsed;
+        /** PackageManager flags whose answer holds more than the record: components, permissions and such. */
+        private static final long BEYOND_RECORD = android.content.pm.PackageManager.GET_ACTIVITIES
+                | android.content.pm.PackageManager.GET_RECEIVERS | android.content.pm.PackageManager.GET_SERVICES
+                | android.content.pm.PackageManager.GET_PROVIDERS | android.content.pm.PackageManager.GET_INSTRUMENTATION
+                | android.content.pm.PackageManager.GET_INTENT_FILTERS | android.content.pm.PackageManager.GET_GIDS
+                | android.content.pm.PackageManager.GET_URI_PERMISSION_PATTERNS
+                | android.content.pm.PackageManager.GET_PERMISSIONS
+                | android.content.pm.PackageManager.GET_CONFIGURATIONS;
+
+        private final File apk;
+        private PackageParser.Package parsed;
+        private final Record.Contents record;
         final ApplicationInfo application;
         final ActivityInfo activity;
 
-        private App(PackageParser.Package parsed, ApplicationInfo application, ActivityInfo activity) {
+        private App(File apk, PackageParser.Package parsed, Record.Contents record, ApplicationInfo application,
+                ActivityInfo activity) {
+            this.apk = apk;
             this.parsed = parsed;
+            this.record = record;
             this.application = application;
             this.activity = activity;
         }
 
+        /** From the install record, or null if the record holds another Activity than the one asked for. */
+        static App recorded(File apk, Record.Contents record, String activityName) {
+            if (record.activity == null || (activityName != null && !activityName.equals(record.activity.name))) {
+                return null;
+            }
+            place(record.application, apk, true);
+            return new App(apk, null, record, record.application, record.activity);
+        }
+
         static App parse(File apk, String activityName) throws PackageParser.PackageParserException {
-            // The framework's own manifest parser, so the app sees the values Android would give it.
-            PackageParser.Package parsed = new PackageParser().parsePackage(apk, 0);
-            FrameworkPackageUserState state = FrameworkPackageUserState.DEFAULT;
-            ApplicationInfo application = PackageParser.generateApplicationInfo(parsed, 0, state, 0);
-            place(application, apk);
+            PackageParser.Package parsed = parsePackage(apk);
+            ApplicationInfo application = applicationInfo(parsed, apk, true);
+            ActivityInfo activity = activity(parsed, application, activityName);
+            if (activity == null) {
+                throw new IllegalArgumentException(activityName != null
+                        ? apk + " declares no activity " + activityName
+                        : apk + " declares no launcher activity");
+            }
+            return new App(apk, parsed, null, application, activity);
+        }
+
+        /** The framework's own manifest parser, so the app sees the values Android would give it. */
+        static PackageParser.Package parsePackage(File apk) throws PackageParser.PackageParserException {
+            return new PackageParser().parsePackage(apk, 0);
+        }
+
+        static ApplicationInfo applicationInfo(PackageParser.Package parsed, File apk, boolean create) {
+            ApplicationInfo application = PackageParser.generateApplicationInfo(parsed, 0,
+                    FrameworkPackageUserState.DEFAULT, 0);
+            place(application, apk, create);
+            return application;
+        }
+
+        /** The named Activity, or the launcher Activity; null if there is none. */
+        static ActivityInfo activity(PackageParser.Package parsed, ApplicationInfo application, String activityName) {
             for (PackageParser.Activity candidate : parsed.activities) {
                 boolean chosen = activityName != null
                         ? candidate.className.equals(activityName)
                         : candidate.intents.stream().anyMatch(filter -> filter.hasAction(Intent.ACTION_MAIN)
                                 && filter.hasCategory(Intent.CATEGORY_LAUNCHER));
                 if (chosen) {
-                    ActivityInfo activity = PackageParser.generateActivityInfo(candidate, 0, state, 0);
+                    ActivityInfo activity = PackageParser.generateActivityInfo(candidate, 0,
+                            FrameworkPackageUserState.DEFAULT, 0);
                     activity.applicationInfo = application;
-                    return new App(parsed, application, activity);
+                    return activity;
                 }
             }
-            throw new IllegalArgumentException(activityName != null
-                    ? apk + " declares no activity " + activityName
-                    : apk + " declares no launcher activity");
+            return null;
         }
 
-        /** Where the installer would have put the app: its code is the APK, its data under ANDROID_DATA. */
-        private static void place(ApplicationInfo application, File apk) {
+        /** Where the installer put the app: its code is the APK, its data under ANDROID_DATA. */
+        private static void place(ApplicationInfo application, File apk, boolean create) {
             String path = apk.getAbsolutePath();
             application.sourceDir = path;
             application.publicSourceDir = path;
             File data = new File(dataRoot(), "data/" + application.packageName);
             File libraries = new File(data, "lib");
-            if (!libraries.isDirectory() && !libraries.mkdirs()) {
+            if (create && !libraries.isDirectory() && !libraries.mkdirs()) {
                 throw new IllegalStateException("cannot create " + libraries);
             }
             application.dataDir = data.getPath();
@@ -126,6 +190,20 @@ public final class Launcher {
             application.nativeLibraryDir = libraries.getPath();
             application.uid = android.os.Process.myUid();
             if (application.processName == null) application.processName = application.packageName;
+        }
+
+        /** What PackageManager.getPackageInfo answers; parses the APK only when the record holds too little. */
+        android.content.pm.PackageInfo packageInfo(long flags, int userId) {
+            if (record != null && (flags & BEYOND_RECORD) == 0) return record.packageInfo();
+            if (parsed == null) {
+                try {
+                    parsed = parsePackage(apk);
+                } catch (PackageParser.PackageParserException e) {
+                    throw new IllegalStateException("cannot parse " + apk, e);
+                }
+            }
+            return PackageParser.generatePackageInfo(parsed, new int[0], (int) flags, 0, 0,
+                    java.util.Collections.emptySet(), FrameworkPackageUserState.DEFAULT, userId);
         }
 
         ComponentName component() {
@@ -292,8 +370,7 @@ public final class Launcher {
 
         public android.content.pm.PackageInfo getPackageInfo(String packageName, long flags, int userId) {
             if (!packageName.equals(app.application.packageName)) return null;
-            android.content.pm.PackageInfo info = PackageParser.generatePackageInfo(app.parsed, new int[0], (int) flags,
-                    0, 0, java.util.Collections.emptySet(), FrameworkPackageUserState.DEFAULT, userId);
+            android.content.pm.PackageInfo info = app.packageInfo(flags, userId);
             info.applicationInfo = app.application;
             if (info.activities != null) {
                 for (ActivityInfo activity : info.activities) activity.applicationInfo = app.application;

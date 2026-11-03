@@ -32,10 +32,14 @@ export ANDROID_DATA="$WORK/data"
 mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
 
 # The installer's part, as Android's does it: native libraries where nativeLibraryDir points.
-"$TARGET/uxdroid" install "$APK" --data "$ANDROID_DATA" >"$WORK/install" 2>&1 || { cat "$WORK/install"; fail "install"; }
+# It also compiles the app's DEX, records its manifest and writes its default bodies.
+UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$APK" --data "$ANDROID_DATA" >"$WORK/install" 2>&1 \
+    || { cat "$WORK/install"; fail "install"; }
 grep -q -E "^installed $PACKAGE: [1-9][0-9]* native libraries for x86_64 in " "$WORK/install" \
     || { cat "$WORK/install"; fail "the install found no x86_64 libraries"; }
-reached "installed ($(grep -o '[0-9]* native libraries' "$WORK/install"))"
+grep -q -E "^prepared $PACKAGE in $ANDROID_DATA/app/$PACKAGE: code compiled " "$WORK/install" \
+    || { cat "$WORK/install"; fail "the install did not prepare the app"; }
+reached "installed ($(grep -o '[0-9]* native libraries' "$WORK/install"), $(grep -o '[0-9]* default bodies' "$WORK/install"))"
 
 source /work/runtime/art/test_lib.sh
 start_compositor
@@ -43,7 +47,8 @@ start_compositor
 export LD_LIBRARY_PATH="$RUNTIME/lib64:$TARGET"
 CP="$RUNTIME/framework/framework.jar:$RUNTIME/framework/uxdroid-system.jar"
 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -XX:NativeBridge=libuxdroid_nativebridge.so -Xforce-nb-testing \
-    -cp "$CP" dev.uxdroid.system.Launcher "$RUNTIME" "$TARGET/libuxdroid_system.so" "$APK" >"$WORK/out" 2>&1 &
+    -cp "$CP" dev.uxdroid.system.Launcher "$RUNTIME" "$TARGET/libuxdroid_system.so" \
+    "$ANDROID_DATA/app/$PACKAGE/base.apk" >"$WORK/out" 2>&1 &
 app=$!
 trap 'kill "$app" "$compositor" 2>/dev/null; wait 2>/dev/null; rm -rf "$WORK"' EXIT
 
@@ -136,7 +141,8 @@ if black > MAX_BLACK:
 EOF
 reached "the screenshot shows RustDesk's screen"
 
-grep -E "^uxdroid: (first frame|activity fully drawn)" "$WORK/out"
+grep -E "^uxdroid: (first frame|activity fully drawn|the install record|default bodies of)" "$WORK/out"
+grep -q "^uxdroid: the install record" "$WORK/out" && fail "the recorded manifest was not used"
 echo "unhandled service calls and default native bodies: $(grep -c -E '^uxdroid: (unhandled|unimplemented native) ' "$WORK/out")"
 grep -E "^uxdroid: (unhandled|unimplemented native) " "$WORK/out" | sed -E 's/^uxdroid: //; s/ returned its default$//' | sort | cut -c1-160
 echo "ok: RustDesk's first Flutter frame is in a Wayland window"

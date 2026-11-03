@@ -29,10 +29,45 @@ UXDROID_SAMPLES=<directory with the RustDesk APK> docker compose run --rm -T \
 | Workload | Marker (first-frame moment) | Expected output |
 |----------|-----------------------------|-----------------|
 | `FrameworkSmoke`: framework start, text, resources, a framework `TextView` | `view <w>x<h> <ink>`, after the `TextView` drew; also time to exit | `string OK`, `sdk 36 abi x86_64`, `text <n>` |
-| Framework sample APK (`runtime/framework/window_smoke.sh`) | `first frame posted` on Wayland | `activity resumed com.example.framework.MainActivity` |
-| RustDesk 1.5.1, `sandbox` only | `uxdroid: activity fully drawn: com.carriez.flutter_hbb/.MainActivity` | `I/flutter:` output, and a frame posted on Flutter's `SurfaceView` |
+| Framework sample APK (`runtime/framework/window_smoke.sh`), from the APK and installed | `first frame posted` on Wayland | `activity resumed com.example.framework.MainActivity` |
+| RustDesk 1.5.1, `sandbox` only, from the APK and installed | `uxdroid: activity fully drawn: com.carriez.flutter_hbb/.MainActivity` | `I/flutter:` output, and a frame posted on Flutter's `SurfaceView` |
 | Milestone 3 baseline: `uxdroid run` with the first sample (`runtime/art/app_smoke.sh`) | `frame presented` | `activity created in com.example.first` |
-| `uxdroid install` RustDesk, into an emptied directory each run | `installed com.carriez.flutter_hbb: 4 native libraries ...`, and exit | |
+| `uxdroid install` RustDesk, into an emptied directory each run, without a framework and with one | `installed com.carriez.flutter_hbb: 4 native libraries ...`, or `prepared com.carriez.flutter_hbb in ...`, and exit | |
+
+"From the APK" starts the launcher on the APK file, as every start did before `uxdroid install` prepared apps: it parses the manifest, makes a stub for every framework native, and runs the app's DEX uncompiled. "Installed" starts it on `<data>/app/<package>/base.apk` after `uxdroid install` with the framework, which compiled the DEX, recorded the manifest and wrote the default bodies' library.
+
+## Install-time preparation
+
+2026-11-03, 30 runs per row, from ext4, the same method as below, measured in the `art-prep` runtime copy (its boot image, framework and system odex recompiled at that path, so ART runs with its image). Median, interquartile range in brackets. Memory is from the warm rows. The machine was not idle: other builds and tests ran beside these (load average 2 to 6), so cold times are wider than in the table below, and three runs of the same unchanged row, `FrameworkSmoke` warm, read 74.0, 84.6 and 84.2 ms.
+
+| Workload | Cold time | Warm time | Peak RSS | PSS | Private dirty |
+|----------|-----------|-----------|----------|-----|---------------|
+| Framework sample APK to first frame, from the APK | 1198 ms (1021-1364) | 140.5 ms (137.6-155.4) | 146.7 MiB | 133.4 MiB | 19.5 MiB |
+| Framework sample APK to first frame, installed | 799 ms (744-1218) | 123.5 ms (122.2-124.1) | 141.0 MiB | 127.5 MiB | 19.1 MiB |
+| RustDesk 1.5.1 to its first Flutter frame, from the APK | 1464 ms (1170-2396) | 274.2 ms (261.8-298.3) | 307.7 MiB | 295.9 MiB | 87.5 MiB |
+| RustDesk 1.5.1 to its first Flutter frame, installed | 1152 ms (1074-1250) | 222.2 ms (217.6-224.0) | 301.3 MiB | 289.4 MiB | 80.8 MiB |
+
+| Install of RustDesk | Cold | Warm | On disk |
+|---------------------|------|------|---------|
+| Without a framework: libraries only | 240 ms (203-265) | 198 ms (196-403) | 65 MiB of libraries |
+| With the framework: also `base.apk`, odex, record, `defaults.so` | 2071 ms (1696-6260) | 528 ms (491-543) | 81 MiB more: `base.apk` 75.3 MiB, odex and vdex 4.1 MiB, `defaults.so` 0.6 MiB, `package.record` 4 KiB |
+
+Warm, an installed start of RustDesk is 52 ms (19%) faster to its first Flutter frame than one from the APK, with 6.7 MiB less private dirty memory and 6.4 MiB less peak RSS; the sample is 17 ms (12%) faster, with 0.4 MiB less private dirty and 5.7 MiB less peak RSS. Against milestone 4's table below, measured on the shared runtime on an idle machine, installed RustDesk is 28 ms faster warm (222 against 250 ms) with 6.7 MiB less private dirty, and the installed sample is the same warm (123.5 against 123.8 ms) with 0.4 MiB less private dirty. Cold, both installed starts are faster by median, but the brackets of this loaded run overlap, so no cold claim is made. The price is install time, about 0.3 s more warm, and disk, mostly the copy of the APK, which Android's installer makes too.
+
+What each part removes, measured by timing the launcher's phases (3 warm runs each, sample and RustDesk alike): making a stub for each of the 5,207 natives, which loads every class that has one, about 11.5 ms; the manifest parse, about 10 ms; and for RustDesk, running its 4.2 MB of DEX uncompiled.
+
+The compiler filter for the app's DEX was chosen on RustDesk, warm, 10 runs each, from ext4:
+
+| Filter | dex2oat | Output | Time to first frame | Private dirty |
+|--------|---------|--------|---------------------|---------------|
+| none (JIT and interpreter) | | | 247.8 ms (246.6-252.3) | 119.2 MiB |
+| `verify` | 223 ms | 4.2 MiB | 215.6 ms (213.2-220.7) | 113.9 MiB |
+| `speed` | 1092 ms | 17.8 MiB | 220.1 ms (215.5-222.2) | 114.7 MiB, and 6.6 MiB more peak RSS |
+| `speed-profile` | | | not measurable | |
+
+`speed-profile` needs a profile. The APK ships `assets/dexopt/baseline.prof`, but in profile version 010, which this ART refuses ("Profile version mismatch"), and `profman` is not in the runtime. On the sample, with two classes, the three filters measured within 0.4 ms of each other. `verify` is the install's filter. (That table's absolute memory differs from the rows above: it was measured with a hand-made launch script before the default bodies' library existed.)
+
+On a `noexec` file system, such as the sandbox's `/tmp`, `defaults.so` cannot be mapped, so the launcher makes the stubs at start as before, and says so; compiled `verify` code still loads, since it holds no machine code.
 
 ## Last result
 
@@ -100,6 +135,9 @@ Latency and pacing on a private PulseAudio server with null devices (`crates/aud
 The latency an app sees is the server's plus what it buffered: the sample's `AudioTrack`, of four minimum buffers, holds up to 80 ms at 48 kHz, and an AAudio stream up to four periods, 40 ms; a blocking write keeps them full. Null devices idle in 2 s blocks and wake for a new stream only at the end of one, which hardware devices do not do, so the script keeps a silent stream on each; without it the first sound of a stream came about 2 s late. Not measured: latency on PipeWire, PipeWire's own protocol, ALSA on real hardware, and a round trip from speaker to microphone. No competitor plays audio here either.
 
 ## Limits
+
+- The install-time preparation rows were measured with other workloads running on the machine; their warm rows are tight, their cold rows are not.
+- In those runs, cold `uxdroid run` of milestone 3 read 35 ms, against 170 ms on the idle machine; the cause was not looked for. The cold rows of that section are comparable with each other only.
 
 - Cold times are bimodal on this machine: most runs are in the low group (for example 963 ms for RustDesk), and a quarter or more take up to about twice as long. The cause was not found; the disk is an SSD and the eviction is the same each run. Compare medians, and read the brackets.
 - Without the 0.3 s settle, warm times are about 2 ms lower for milestone 3 (15.5 ms), which matches `benches/art/first_frame.sh`'s 14.9 ms. Back-to-back launches are slightly faster here; the settle is the price of correct memory figures.

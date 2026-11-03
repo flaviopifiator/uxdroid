@@ -46,16 +46,22 @@ for file in uxdroid libuxdroid_system.so libuxdroid_nativebridge.so; do
     EVICT+=(--evict "$TARGET/$file")
 done
 
-# uxdroid install, into an emptied data directory each time.
+# uxdroid install, into an emptied data directory each time: without a framework it only extracts the
+# native libraries; with one it also compiles the DEX, records the manifest and writes default bodies.
 INSTALL=(sh -c 'rm -rf "$1" && mkdir -p "$1/dalvik-cache/x86_64" && exec "$2" install "$3" --data "$1"' install
     "$BENCH/install" "$TARGET/uxdroid" "$APK")
 for mode in --cold ""; do
-    "${MEASURE[@]}" --label "uxdroid install RustDesk" --runs "$RUNS" $mode "${EVICT[@]}" --until-exit \
+    UXDROID_RUNTIME=/nonexistent "${MEASURE[@]}" --label "uxdroid install RustDesk, libraries only" --runs "$RUNS" \
+        $mode "${EVICT[@]}" --until-exit \
         --marker "^installed $PACKAGE: [1-9][0-9]* native libraries for x86_64 in " -- "${INSTALL[@]}" || exit 1
+    UXDROID_RUNTIME="$RUNTIME" "${MEASURE[@]}" --label "uxdroid install RustDesk, prepared" --runs "$RUNS" \
+        $mode "${EVICT[@]}" --until-exit --marker "^prepared $PACKAGE in " -- "${INSTALL[@]}" || exit 1
 done
-"$TARGET/uxdroid" install "$APK" --data "$DATA" | tee "$WORK/install"
+UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$APK" --data "$DATA" | tee "$WORK/install"
 mkdir -p "$DATA/dalvik-cache/x86_64"
-echo "install size: APK $(du -m "$APK" | cut -f1) MiB; data after install $(du -sm "$DATA" | cut -f1) MiB"
+echo "install size: APK $(du -m "$APK" | cut -f1) MiB; data after install $(du -sm "$DATA" | cut -f1) MiB, of which" \
+    "libraries $(du -sm "$DATA/data/$PACKAGE/lib" | cut -f1) MiB and code directory $(du -sm "$DATA/app/$PACKAGE" | cut -f1) MiB:"
+du -k "$DATA/app/$PACKAGE"/* "$DATA/app/$PACKAGE"/oat/x86_64/* 2>/dev/null | sed "s#$DATA/app/$PACKAGE/##"
 
 source /work/runtime/art/test_lib.sh
 trap 'kill "$compositor" 2>/dev/null; wait 2>/dev/null; rm -rf "$WORK"' EXIT
@@ -65,13 +71,16 @@ start_compositor
 # not counted. Every measured launch then starts with that state, as a user's second start does.
 export LD_LIBRARY_PATH="$RUNTIME/lib64:$TARGET"
 CP="$RUNTIME/framework/framework.jar:$RUNTIME/framework/uxdroid-system.jar"
+# From the APK, as every start was before uxdroid install prepared apps, then installed.
 for mode in --cold ""; do
-    "${MEASURE[@]}" --label "RustDesk 1.5.1 to its first Flutter frame (activity fully drawn)" \
-        --runs "$RUNS" $mode "${EVICT[@]}" --timeout 120 --cwd "$DATA" \
-        --marker "^uxdroid: activity fully drawn: $PACKAGE/\.MainActivity$" \
-        --expect "^I/flutter: " --expect "^uxdroid: first frame posted on .*SurfaceView\[$PACKAGE/" -- \
-        "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -XX:NativeBridge=libuxdroid_nativebridge.so -Xforce-nb-testing \
-        -cp "$CP" dev.uxdroid.system.Launcher "$RUNTIME" "$TARGET/libuxdroid_system.so" "$APK" || exit 1
+    for start in "from the APK:$APK" "installed:$DATA/app/$PACKAGE/base.apk"; do
+        "${MEASURE[@]}" --label "RustDesk 1.5.1 to its first Flutter frame (activity fully drawn), ${start%%:*}" \
+            --runs "$RUNS" $mode "${EVICT[@]}" --timeout 120 --cwd "$DATA" \
+            --marker "^uxdroid: activity fully drawn: $PACKAGE/\.MainActivity$" \
+            --expect "^I/flutter: " --expect "^uxdroid: first frame posted on .*SurfaceView\[$PACKAGE/" -- \
+            "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -XX:NativeBridge=libuxdroid_nativebridge.so -Xforce-nb-testing \
+            -cp "$CP" dev.uxdroid.system.Launcher "$RUNTIME" "$TARGET/libuxdroid_system.so" "${start#*:}" || exit 1
+    done
 done
 echo "data after the launches: $(du -sm "$DATA" | cut -f1) MiB"
 echo "storage: app data on $STORAGE, $RUNTIME on $(findmnt -n -o FSTYPE -T "$RUNTIME"), APK on $(findmnt -n -o FSTYPE -T "$APK")"

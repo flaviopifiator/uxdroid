@@ -6,18 +6,22 @@ set -u -o pipefail
 WORK=$(mktemp -d)
 fail() { echo "FAIL: $*"; tail -"${TAIL:-25}" "$WORK/out" | cut -c1-220; exit 1; }
 
-cargo build -q --release -p uxdroid-system --manifest-path /work/Cargo.toml || fail "build"
-LIBRARY="$(cargo metadata -q --format-version 1 --no-deps --manifest-path /work/Cargo.toml \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')/release/libuxdroid_system.so"
+cargo build -q --release -p uxdroid-system -p uxdroid-cli --manifest-path /work/Cargo.toml || fail "build"
+TARGET="$(cargo metadata -q --format-version 1 --no-deps --manifest-path /work/Cargo.toml \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')/release"
+LIBRARY="$TARGET/libuxdroid_system.so"
 source /work/runtime/art/run.sh
 export ANDROID_DATA="$WORK/data"
 mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
 source /work/runtime/art/test_lib.sh
 start_compositor
+# Installed as uxdroid install leaves it: compiled, with its manifest recorded and its default bodies.
+UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$RUNTIME/samples/framework/app.apk" --data "$ANDROID_DATA" \
+    >"$WORK/install" 2>&1 || { cat "$WORK/install"; fail "install"; }
 
 CP="$RUNTIME/framework/framework.jar:$RUNTIME/framework/uxdroid-system.jar"
 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher \
-    "$RUNTIME" "$LIBRARY" "$RUNTIME/samples/framework/app.apk" >"$WORK/out" 2>&1 &
+    "$RUNTIME" "$LIBRARY" "$ANDROID_DATA/app/com.example.framework/base.apk" >"$WORK/out" 2>&1 &
 app=$!
 trap 'kill "$app" "$compositor" 2>/dev/null; wait 2>/dev/null; rm -rf "$WORK"' EXIT
 for _ in $(seq 600); do
@@ -29,6 +33,7 @@ done
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
 expect "^activity resumed com\.example\.framework\.MainActivity$" "the Activity did not reach onResume"
 expect "first frame posted" "ViewRootImpl posted no frame"
+if grep -E "uxdroid: (the install record|default bodies of) " "$WORK/out"; then fail "what the install prepared was not used"; fi
 kill -0 "$app" 2>/dev/null || fail "the app exited after its first frame"
 
 # The compositor fades the desktop in, which shifts colors until it finishes.

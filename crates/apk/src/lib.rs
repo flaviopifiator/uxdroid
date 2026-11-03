@@ -175,6 +175,13 @@ pub fn extract_native_libs(path: &Path, abi: &str, directory: &Path) -> Result<u
     let mut archive = ZipArchive::new(BufReader::new(file))
         .map_err(|source| Error::InvalidArchive(source.to_string()))?;
     let cannot = |reason: String| Error::CannotExtract(reason);
+    // Which of two entries with one name gets extracted depends on the reader; Android's refuses the
+    // whole archive, and so does this.
+    if archive.has_duplicate_names() {
+        return Err(Error::InvalidArchive(
+            "it names an entry twice, which Android refuses".to_string(),
+        ));
+    }
 
     let names: Vec<String> = archive
         .file_names()
