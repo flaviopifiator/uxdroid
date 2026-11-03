@@ -119,6 +119,50 @@ struct Display {
     toplevel: Option<wl_surface::WlSurface>,
     /// The toplevel's size, once a window has it.
     size: (i32, i32),
+    /// Windows open, the toplevel's own included.
+    windows: usize,
+    /// The toplevel whose window closed while later windows still show on it as subsurfaces.
+    orphan: Option<Orphan>,
+}
+
+/// A toplevel kept with its last frame after its window closed, because subsurfaces need a parent.
+struct Orphan {
+    surface: wl_surface::WlSurface,
+    xdg_surface: xdg_surface::XdgSurface,
+    toplevel: xdg_toplevel::XdgToplevel,
+    _pixels: Pixels,
+}
+
+// SAFETY: the orphan owns its mapping alone, and nothing reads it; it lives inside the display's
+// mutex until it is destroyed.
+unsafe impl Send for Orphan {}
+
+impl Orphan {
+    fn destroy(self) {
+        self.toplevel.destroy();
+        self.xdg_surface.destroy();
+        self.surface.destroy();
+    }
+}
+
+/// What a closing window does to the display's toplevel.
+#[derive(Debug, PartialEq)]
+enum Close {
+    Keep,
+    /// The toplevel's own window closed while others show on it: keep the toplevel, orphaned.
+    Orphan,
+    Destroy,
+}
+
+/// `toplevel_window`: the closing window is the toplevel's; `open_after`: windows left open after
+/// it; `orphaned`: the toplevel already lost its own window.
+fn on_close(toplevel_window: bool, open_after: usize, orphaned: bool) -> Close {
+    match (toplevel_window, open_after, orphaned) {
+        (true, 0, _) => Close::Destroy,
+        (true, _, _) => Close::Orphan,
+        (false, 0, true) => Close::Destroy,
+        _ => Close::Keep,
+    }
 }
 
 /// What the compositor asked of the display that the window manager must act on.
@@ -157,6 +201,8 @@ impl Display {
             _seat: seat,
             toplevel: None,
             size: (0, 0),
+            windows: 0,
+            orphan: None,
         })
     }
 }
@@ -238,7 +284,8 @@ enum Role {
 pub struct Window {
     surface: wl_surface::WlSurface,
     role: Role,
-    pixels: Pixels,
+    /// Taken only when the window closes and its toplevel keeps the last frame.
+    pixels: Option<Pixels>,
     width: i32,
     height: i32,
 }
@@ -328,10 +375,11 @@ impl Window {
                 subsurface.set_position(x, y);
                 parent.commit();
                 let pixels = allocate(&display.shm, &handle, width, height)?;
+                display.windows += 1;
                 return Ok(Window {
                     surface,
                     role: Role::Sub(subsurface),
-                    pixels,
+                    pixels: Some(pixels),
                     width,
                     height,
                 });
@@ -355,10 +403,11 @@ impl Window {
             let pixels = allocate(&display.shm, &handle, width, height)?;
             display.toplevel = Some(surface.clone());
             display.size = (width, height);
+            display.windows += 1;
             Ok(Window {
                 surface,
                 role: Role::Toplevel(xdg_surface, toplevel),
-                pixels,
+                pixels: Some(pixels),
                 width,
                 height,
             })
@@ -391,7 +440,7 @@ impl Window {
             }
             Ok(pixels)
         })?;
-        self.pixels = pixels;
+        self.pixels = Some(pixels);
         (self.width, self.height) = (width, height);
         Ok(())
     }
@@ -413,12 +462,10 @@ impl Window {
     }
 
     pub fn frame(&mut self) -> Frame<'_> {
+        let mapping = self.pixels.as_ref().expect("an open window has pixels");
         // SAFETY: the mapping holds `length` bytes aligned to a page, and lives as long as `self`.
         let pixels = unsafe {
-            std::slice::from_raw_parts_mut(
-                self.pixels.mapping.cast::<u32>(),
-                self.pixels.length / 4,
-            )
+            std::slice::from_raw_parts_mut(mapping.mapping.cast::<u32>(), mapping.length / 4)
         };
         Frame {
             pixels,
@@ -430,6 +477,11 @@ impl Window {
     /// Shows the frame, telling the compositor that only `damage` changed, and asks for a frame
     /// callback, which paces the app's vsync.
     pub fn present(&mut self, damage: Rect) -> Result<(), Box<dyn Error>> {
+        let buffer = &self
+            .pixels
+            .as_ref()
+            .expect("an open window has pixels")
+            .buffer;
         with_display(|display| {
             let key = self.key();
             if !display.state.frames.contains(&key) {
@@ -437,7 +489,7 @@ impl Window {
                 display.state.frames.push(key);
                 vsync::frame_requested();
             }
-            self.surface.attach(Some(&self.pixels.buffer), 0, 0);
+            self.surface.attach(Some(buffer), 0, 0);
             self.surface
                 .damage_buffer(damage.left, damage.top, damage.width(), damage.height());
             self.surface.commit();
@@ -451,32 +503,49 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
-        let mut display = display();
+        let mut guard = display();
+        let Some(display) = guard.as_mut() else {
+            return;
+        };
         let key = self.key();
-        if let Some(display) = display.as_mut()
-            && let Some(at) = display
-                .state
-                .frames
-                .iter()
-                .position(|surface| *surface == key)
-        {
+        if let Some(at) = display.state.frames.iter().position(|surface| *surface == key) {
             display.state.frames.remove(at);
             vsync::frame_dropped();
         }
+        display.windows = display.windows.saturating_sub(1);
+        let close = on_close(
+            matches!(self.role, Role::Toplevel(..)),
+            display.windows,
+            display.orphan.is_some(),
+        );
         match &self.role {
+            Role::Toplevel(xdg_surface, toplevel) if close == Close::Orphan => {
+                // Later windows are subsurfaces of this surface, so it stays with its last frame.
+                display.orphan = Some(Orphan {
+                    surface: self.surface.clone(),
+                    xdg_surface: xdg_surface.clone(),
+                    toplevel: toplevel.clone(),
+                    _pixels: self.pixels.take().expect("an open window has pixels"),
+                });
+            }
             Role::Toplevel(xdg_surface, toplevel) => {
                 toplevel.destroy();
                 xdg_surface.destroy();
-                if let Some(display) = display.as_mut() {
+                self.surface.destroy();
+                display.toplevel = None;
+            }
+            Role::Sub(subsurface) => {
+                subsurface.destroy();
+                self.surface.destroy();
+                if close == Close::Destroy
+                    && let Some(orphan) = display.orphan.take()
+                {
+                    orphan.destroy();
                     display.toplevel = None;
                 }
             }
-            Role::Sub(subsurface) => subsurface.destroy(),
         }
-        self.surface.destroy();
-        if let Some(display) = display.as_mut() {
-            let _ = display.queue.flush();
-        }
+        let _ = display.queue.flush();
     }
 }
 
@@ -819,3 +888,22 @@ delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_buffer::WlBuffer);
 delegate_noop!(State: ignore wl_subcompositor::WlSubcompositor);
 delegate_noop!(State: ignore wl_subsurface::WlSubsurface);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_toplevel_outlives_its_window_while_other_windows_show_on_it() {
+        // A splash activity that finished while the main one, a subsurface of it, still shows.
+        assert_eq!(on_close(true, 1, false), Close::Orphan);
+        // The last window then closes the orphaned toplevel with it.
+        assert_eq!(on_close(false, 0, true), Close::Destroy);
+        // The toplevel's own window closing last closes it, as before.
+        assert_eq!(on_close(true, 0, false), Close::Destroy);
+        // A dialog closing leaves the toplevel alone, orphaned or not.
+        assert_eq!(on_close(false, 1, false), Close::Keep);
+        assert_eq!(on_close(false, 2, true), Close::Keep);
+        assert_eq!(on_close(false, 0, false), Close::Keep);
+    }
+}
