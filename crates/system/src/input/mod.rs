@@ -8,9 +8,11 @@
 //! [`charmap`], and they cross the window's channel, a socket pair, as the records of [`wire`].
 //! [`natives`] implements `InputChannel`, `InputEventReceiver` and `KeyCharacterMap` over them.
 
+pub mod charmap;
 pub mod keys;
 pub mod translate;
 pub mod wire;
+pub mod xkb;
 
 /// `InputDevice` ids of the seat's devices, which `dev.uxdroid.system.InputService` describes.
 pub const KEYBOARD_DEVICE: i32 = 1;
