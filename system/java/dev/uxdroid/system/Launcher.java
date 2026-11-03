@@ -134,7 +134,7 @@ public final class Launcher {
 
     private static void refuseActivation(String packageName) {
         System.err.println("uxdroid: " + packageName + " is already running over " + dataRoot()
-                + " outside its service; stop it with uxdroid app " + packageName + " stop, then start the service");
+                + " outside its service; stop that process, then start the service");
         System.exit(EXIT_RUNNING_OUTSIDE_SERVICE);
     }
 

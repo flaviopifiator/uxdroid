@@ -14,6 +14,7 @@ uxdroid-apk = { path = "../apk" }
 uxdroid-bridge = { path = "../bridge" }
 libc = "0.2"
 serde_json = "1"
+zip = { version = "9.2.2", default-features = false, features = ["deflate"] }
 uxdroid-system = { path = "../system" }
 
 [dev-dependencies]
