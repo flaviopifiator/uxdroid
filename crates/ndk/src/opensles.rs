@@ -284,7 +284,11 @@ pub(crate) unsafe extern "C" fn create_engine(
     if out.is_null() || (interface_count > 0 && (interfaces.is_null() || required.is_null())) {
         return PARAMETER_INVALID;
     }
-    for index in 0..interface_count.min(64) as usize {
+    // Every requested interface counts; a list far longer than the API has interfaces is malformed.
+    if interface_count > 1024 {
+        return PARAMETER_INVALID;
+    }
+    for index in 0..interface_count as usize {
         // SAFETY: the API gives both arrays `interface_count` entries; both were checked non-null.
         let (id, needed) = unsafe { (*interfaces.add(index), *required.add(index)) };
         if needed != 0 && id != ids::SL_IID_ENGINE.0 && id != ids::SL_IID_OBJECT.0 {
@@ -384,6 +388,27 @@ mod tests {
                 0,
                 std::ptr::null(),
                 1,
+                interfaces.as_ptr(),
+                required.as_ptr(),
+            )
+        };
+        assert_eq!(result, FEATURE_UNSUPPORTED);
+    }
+
+    #[test]
+    fn a_required_interface_late_in_a_long_list_still_counts() {
+        let mut object: *const *const ObjectMethods = std::ptr::null();
+        let mut interfaces = vec![ids::SL_IID_ENGINE.0; 70];
+        let mut required = vec![0u32; 70];
+        interfaces[69] = ids::SL_IID_PLAY.0;
+        required[69] = 1;
+        // SAFETY: both arrays hold 70 entries.
+        let result = unsafe {
+            create_engine(
+                &mut object,
+                0,
+                std::ptr::null(),
+                70,
                 interfaces.as_ptr(),
                 required.as_ptr(),
             )

@@ -191,12 +191,16 @@ JNIEXPORT jstring JNICALL Java_com_example_ndk_NdkActivity_drawGl(JNIEnv* env, j
     eglGetConfigAttrib(display, config, EGL_SURFACE_TYPE, &surface_type);
     if (!(surface_type & EGL_WINDOW_BIT)) return (*env)->NewStringUTF(env, "the config cannot draw windows");
     ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+    if (window == NULL) return (*env)->NewStringUTF(env, "no native window");
     ANativeWindow_setBuffersGeometry(window, 0, 0, visual);
     EGLSurface egl_surface = eglCreateWindowSurface(display, config, window, NULL);
     const EGLint context_attributes[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
     EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attributes);
     if (egl_surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT ||
         !eglMakeCurrent(display, egl_surface, egl_surface, context)) {
+        if (context != EGL_NO_CONTEXT) eglDestroyContext(display, context);
+        if (egl_surface != EGL_NO_SURFACE) eglDestroySurface(display, egl_surface);
+        ANativeWindow_release(window);
         return (*env)->NewStringUTF(env, "no current window surface");
     }
     EGLint width = 0, height = 0;

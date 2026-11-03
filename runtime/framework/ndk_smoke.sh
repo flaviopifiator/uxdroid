@@ -135,12 +135,14 @@ EOF
 
 # The compositor fades the desktop in, which shifts colors until it finishes.
 pause 2
-check cpu "$(shoot cpu)"
+shoot cpu >/dev/null
+check cpu "$WORK/cpu.png"
 wait_for "ndk egl frame:"
 expect "^ndk egl frame: EGL 1\.[0-9]+, .+, [0-9]+x[0-9]+, visual 1, corner 204 51 153, swapped$" \
     "EGL did not render and swap"
 pause 0.5
-check egl "$(shoot egl)"
+shoot egl >/dev/null
+check egl "$WORK/egl.png"
 kill -0 "$app" 2>/dev/null || fail "the app exited after its frames"
 
 grep -E "^ndk |looper callback|unhandled|unimplemented native|uxdroid: " "$WORK/out" | cut -c1-240
