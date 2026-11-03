@@ -32,6 +32,10 @@ impl Handler for App {
                 } else {
                     snapshots[0].clone()
                 };
+                // A null snapshot is a main thread that could not answer this time.
+                if next.is_null() {
+                    return Err(Failure::new(protocol::FAILED, "the main thread is busy"));
+                }
                 Ok(next)
             }
             Command::Commit(text) => Ok(json!({"committed": text.chars().count()})),
@@ -49,6 +53,9 @@ struct FakeSeat {
     /// Frames keep coming while true.
     busy: bool,
     frames: Vec<WindowFrame>,
+    /// Which sends, counted from 0, fail without reaching the app.
+    failing: Vec<usize>,
+    sends: AtomicU64,
 }
 
 impl Seat for FakeSeat {
@@ -56,6 +63,10 @@ impl Seat for FakeSeat {
         self.display
     }
     fn send(&self, input: Input) -> Result<(), String> {
+        let index = self.sends.fetch_add(1, Ordering::Relaxed) as usize;
+        if self.failing.contains(&index) {
+            return Err("the compositor's seat is gone".into());
+        }
         self.inputs.lock().unwrap().push(input);
         Ok(())
     }
@@ -476,4 +487,85 @@ fn other_commands_go_to_the_app() {
         json!({"forwarded": "status"})
     );
     assert_eq!(*app.received.lock().unwrap(), vec![Command::Status]);
+}
+
+// Failures on the way
+
+#[test]
+fn a_tap_whose_finger_up_fails_once_still_lifts_the_finger() {
+    let seat = FakeSeat {
+        failing: vec![1],
+        ..screen()
+    };
+    let (agent, _, seat) = make(seat, vec![tree(1, "")]);
+    let tapped = run(&agent, Command::Tap(Place::Point { x: 30, y: 40 }));
+    assert_eq!(tapped.unwrap(), json!({"x": 30, "y": 40}));
+    assert_eq!(*seat.inputs.lock().unwrap(), taps(30, 40));
+}
+
+#[test]
+fn typing_that_fails_part_way_says_how_much_was_typed() {
+    let seat = FakeSeat {
+        // The second character's key down.
+        failing: vec![2, 3, 4],
+        ..screen()
+    };
+    let (agent, _, seat) = make(seat, vec![tree(1, "")]);
+    let typing = Command::Type(Typing {
+        text: "hi".into(),
+        node: None,
+    });
+    let failure = run(&agent, typing).expect_err("the seat failed");
+    assert_eq!(failure.code, protocol::FAILED);
+    assert!(
+        failure.message.contains("after 1 of 2 characters"),
+        "{}",
+        failure.message
+    );
+    assert_eq!(*seat.inputs.lock().unwrap(), key(35, false));
+}
+
+#[test]
+fn wait_outlasts_a_ui_snapshot_that_failed_once() {
+    let (agent, _, _) = make(screen(), vec![Value::Null, tree(2, "Hi there")]);
+    let wait = Command::Wait(Wait {
+        condition: Condition::Text("there".into()),
+        timeout_ms: 5000,
+    });
+    assert_eq!(run(&agent, wait).unwrap()["snapshot"], json!(2));
+    // A failure that lasts is reported when the time runs out.
+    let (agent, _, _) = make(screen(), vec![Value::Null]);
+    let wait = Command::Wait(Wait {
+        condition: Condition::Text("there".into()),
+        timeout_ms: 200,
+    });
+    let failure = run(&agent, wait).expect_err("never answered");
+    assert_eq!(failure.code, protocol::TIMEOUT);
+    assert!(failure.message.contains("busy"), "{}", failure.message);
+}
+
+#[test]
+fn a_screenshot_of_no_size_or_of_an_empty_display_never_panics() {
+    let seat = FakeSeat {
+        display: Some((8, 6)),
+        frames: vec![frame(0, 0, 8, 6, 0xFF11_2233)],
+        ..FakeSeat::default()
+    };
+    let (agent, _, _) = make(seat, vec![tree(1, "")]);
+    let (_, image) = shot(&agent, None, 0).unwrap();
+    assert_eq!((image.width, image.height), (1, 1));
+    let seat = FakeSeat {
+        display: Some((0, 0)),
+        frames: vec![frame(0, 0, 0, 0, 0)],
+        ..FakeSeat::default()
+    };
+    let (agent, _, _) = make(seat, vec![tree(1, "")]);
+    assert_eq!(
+        code(shot(&agent, None, 100).map(|(v, _)| v)),
+        protocol::NO_WINDOW
+    );
+    assert_eq!(
+        code(shot(&agent, Some(0), 100).map(|(v, _)| v)),
+        protocol::NO_WINDOW
+    );
 }

@@ -77,6 +77,8 @@ const FOCUS: Duration = Duration::from_millis(100);
 const POLL: Duration = Duration::from_millis(100);
 /// A display that presented nothing for this long is idle.
 const QUIET: Duration = Duration::from_millis(500);
+/// How long a finger or key up that failed waits before it is sent again.
+const LIFT_RETRY: Duration = Duration::from_millis(20);
 /// The largest `ui` answer passed on, below the protocol's 16 MiB.
 const MAX_UI_ANSWER: usize = 8 << 20;
 /// The largest PNG passed on, as base64.
@@ -279,23 +281,34 @@ impl Agent {
             .map_err(|problem| refusal(protocol::FAILED, &problem))
     }
 
+    /// Sends the up that ends a press, once more if it failed: a finger or key left down would hold
+    /// the app in a gesture the agent never finishes.
+    fn lift(&self, input: Input) -> Result<(), Failure> {
+        self.send(input.clone()).or_else(|_| {
+            std::thread::sleep(LIFT_RETRY);
+            self.send(input)
+        })
+    }
+
     fn tap(&self, place: &Place) -> Result<(i32, i32), Failure> {
         let (x, y) = self.point(place)?;
         self.send(Input::TouchDown { x, y })?;
         std::thread::sleep(TAP);
-        self.send(Input::TouchUp)?;
+        self.lift(Input::TouchUp)?;
         Ok((x, y))
     }
 
     fn press(&self, evdev: u32, shift: bool) -> Result<(), Failure> {
-        for pressed in [true, false] {
-            self.send(Input::Key {
-                evdev,
-                pressed,
-                shift,
-            })?;
-        }
-        Ok(())
+        self.send(Input::Key {
+            evdev,
+            pressed: true,
+            shift,
+        })?;
+        self.lift(Input::Key {
+            evdev,
+            pressed: false,
+            shift,
+        })
     }
 
     fn type_text(&self, text: &str, node: Option<&Place>) -> Result<Value, Failure> {
@@ -303,20 +316,34 @@ impl Agent {
             self.tap(node)?;
             std::thread::sleep(FOCUS);
         }
+        let total = text.chars().count();
         let (mut pressed, mut committed) = (0, 0);
+        // A failure says how much was typed, so the caller can type the rest instead of all again.
+        let stopped = |failure: Failure, done: usize| {
+            Failure::new(
+                &failure.code,
+                &format!(
+                    "typing stopped after {done} of {total} characters: {}",
+                    failure.message
+                ),
+            )
+        };
         for step in plan(&self.seat.charmap(), text) {
             match step {
                 Step::Key { evdev, shift } => {
-                    self.press(evdev, shift)?;
+                    self.press(evdev, shift)
+                        .map_err(|failure| stopped(failure, pressed + committed))?;
                     pressed += 1;
                 }
                 Step::Commit(text) => {
+                    self.app
+                        .handle(Command::Commit(text.clone()))
+                        .map_err(|failure| stopped(failure, pressed + committed))?;
                     committed += text.chars().count();
-                    self.app.handle(Command::Commit(text))?;
                 }
             }
         }
-        Ok(json!({"typed": text.chars().count(), "keys": pressed, "committed": committed}))
+        Ok(json!({"typed": total, "keys": pressed, "committed": committed}))
     }
 
     fn key(&self, name: &str) -> Result<Value, Failure> {
@@ -343,6 +370,9 @@ impl Agent {
         let deadline = started + timeout;
         let mut presented = self.seat.presented();
         let mut quiet_since = started;
+        // A snapshot the app could not take this time, such as while its main thread is busy, is
+        // looked at again until the time runs out.
+        let mut failed: Option<Failure> = None;
         loop {
             match condition {
                 Condition::Text(text) => {
@@ -350,7 +380,16 @@ impl Agent {
                         max_nodes: protocol::MAX_NODES,
                         max_depth: protocol::MAX_DEPTH,
                     };
-                    let answer = self.ui(session, ui)?;
+                    let answer = match self.ui(session, ui) {
+                        Ok(answer) => {
+                            failed = None;
+                            answer
+                        }
+                        Err(failure) => {
+                            failed = Some(failure);
+                            Value::Null
+                        }
+                    };
                     let shows = |node: &&Value| {
                         node.get("visible") == Some(&Value::Bool(true))
                             && ["text", "description", "hint"].iter().any(|key| {
@@ -381,13 +420,14 @@ impl Agent {
                 }
             }
             if Instant::now() >= deadline {
-                return Err(refusal(
-                    protocol::TIMEOUT,
-                    &format!(
-                        "the condition did not hold within {} ms",
-                        timeout.as_millis()
-                    ),
-                ));
+                let mut message = format!(
+                    "the condition did not hold within {} ms",
+                    timeout.as_millis()
+                );
+                if let Some(failure) = failed {
+                    message.push_str(&format!("; the last ui failed: {}", failure.message));
+                }
+                return Err(refusal(protocol::TIMEOUT, &message));
             }
             let poll = if matches!(condition, Condition::Idle) {
                 POLL / 2
@@ -418,10 +458,15 @@ impl Agent {
                 (width, height, compose(&frames, width, height))
             }
         };
-        let longest = width.max(height).max(1) as u32;
-        let scale = longest.div_ceil(shot.max_size).max(1);
+        if width <= 0 || height <= 0 {
+            return Err(no_window());
+        }
+        let longest = width.max(height) as u32;
+        let scale = longest.div_ceil(shot.max_size.max(1)).max(1);
         let image = scaled(&pixels, width as u32, height as u32, scale);
-        let data = png::base64_encode(&png::encode(&image));
+        let encoded = png::encode(&image)
+            .ok_or_else(|| refusal(protocol::FAILED, "the frame does not fill its size"))?;
+        let data = png::base64_encode(&encoded);
         if data.len() > MAX_SHOT_ANSWER {
             return Err(refusal(
                 protocol::FAILED,

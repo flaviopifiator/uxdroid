@@ -39,7 +39,7 @@ impl Handler for App {
             Request::Ui(_) => Ok(json!({"snapshot": 1, "windows": []})),
             Request::Screenshot(_) => Ok(json!({
                 "width": 1, "height": 1, "scale": 1, "windows": 1,
-                "png": png::base64_encode(&png::encode(&png::Image { width: 1, height: 1, rgb: vec![1, 2, 3] })),
+                "png": png::base64_encode(&png::encode(&png::Image { width: 1, height: 1, rgb: vec![1, 2, 3] }).unwrap()),
             })),
             Request::Tap(Place::Point { x, y }) => Ok(json!({"x": x, "y": y})),
             Request::Wait(_) => Err(Failure::new(
