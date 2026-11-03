@@ -38,6 +38,42 @@ pub fn run_install(args: &[OsString]) -> ExitCode {
     }
 }
 
+/// Installs of one package take turns, whichever process and PID namespace they run in: the lock is
+/// on a file of the data directory, released when the returned file closes.
+fn lock_package(data: &Path, package: &str) -> Result<std::fs::File, String> {
+    let locks = data.join("app");
+    std::fs::create_dir_all(&locks)
+        .map_err(|error| format!("cannot write {}: {error}", locks.display()))?;
+    let path = locks.join(format!(".{package}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    file.lock()
+        .map_err(|error| format!("cannot lock {}: {error}", path.display()))?;
+    Ok(file)
+}
+
+/// What an install that died left behind. Only installs hold the package lock, so none is running.
+fn remove_leftovers(app_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(app_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if [".lib-", ".abi-", ".old-lib-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            let path = entry.path();
+            let _ = std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path));
+        }
+    }
+}
+
 fn install(apk_path: &Path, data: &Path) -> Result<String, String> {
     if !data.is_absolute() {
         return Err(format!(
@@ -58,14 +94,15 @@ fn install(apk_path: &Path, data: &Path) -> Result<String, String> {
         ));
     }
 
+    let cannot =
+        |path: &PathBuf, error: std::io::Error| format!("cannot write {}: {error}", path.display());
+    let _lock = lock_package(data, package)?;
     let app_dir = data.join("data").join(package);
     let libraries = app_dir.join("lib");
+    remove_leftovers(&app_dir);
     // Extracted beside the final directory and renamed into place, so a failed install never leaves
     // a mix of old and new libraries.
     let staging = app_dir.join(format!(".lib-{}", std::process::id()));
-    let cannot =
-        |path: &PathBuf, error: std::io::Error| format!("cannot write {}: {error}", path.display());
-    let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|error| cannot(&staging, error))?;
     let result = extract_native_libs(apk_path, abi, &staging)
         .map_err(|error| error.to_string())

@@ -210,6 +210,112 @@ fn a_package_name_cannot_choose_the_directory() {
     assert!(!data.exists());
 }
 
+/// Writes an APK whose archive names one library twice, as a crafted file can: the second entry is
+/// written under a name of the same length, which is then renamed in place.
+fn write_duplicate_entries(path: &Path) {
+    Apk::new()
+        .manifest(&sample_manifest())
+        .file("lib/x86_64/liba.so", b"\x7fELF first")
+        .file("lib/x86_64/libz.so", b"\x7fELF second")
+        .write(path);
+    let mut bytes = std::fs::read(path).unwrap();
+    let (from, to) = (b"lib/x86_64/libz.so", b"lib/x86_64/liba.so");
+    let mut renamed = 0;
+    for start in 0..bytes.len() - from.len() {
+        if &bytes[start..start + from.len()] == from {
+            bytes[start..start + from.len()].copy_from_slice(to);
+            renamed += 1;
+        }
+    }
+    // Once in its local header and once in the central directory.
+    assert_eq!(renamed, 2);
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn an_apk_naming_an_entry_twice_is_refused() {
+    let dir = scratch("duplicate");
+    let apk = dir.join("app.apk");
+    write_duplicate_entries(&apk);
+    let data = dir.join("data");
+
+    let output = install(&apk, &data);
+
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stdout));
+    assert_eq!(
+        text(&output.stderr),
+        "error: not a valid APK archive: it names an entry twice, which Android refuses\n"
+    );
+    assert!(!data.join("data/com.example.app/lib").exists());
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn concurrent_installs_of_one_package_all_succeed_and_leave_one_install() {
+    const INSTALLS: usize = 12;
+    const ROUNDS: usize = 3;
+    let dir = scratch("concurrent");
+    let data = dir.join("data");
+    let apks: Vec<PathBuf> = ["one", "two"]
+        .iter()
+        .map(|name| {
+            let apk = dir.join(format!("{name}.apk"));
+            let mut builder = Apk::new().manifest(&sample_manifest());
+            for index in 0..20 {
+                builder = builder.native_lib("x86_64", &format!("lib{name}{index}.so"));
+            }
+            builder.write(&apk);
+            apk
+        })
+        .collect();
+
+    for _ in 0..ROUNDS {
+        let children: Vec<_> = (0..INSTALLS)
+            .map(|index| {
+                Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+                    .args(["install", apks[index % 2].to_str().unwrap(), "--data"])
+                    .arg(&data)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for child in children {
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+        }
+        let app = data.join("data/com.example.app");
+        assert_eq!(listing(&app), ["abi", "lib"]);
+        let libraries = listing(&app.join("lib"));
+        assert_eq!(libraries.len(), 20, "{libraries:?}");
+        assert!(
+            libraries.iter().all(|name| name.starts_with("libone"))
+                || libraries.iter().all(|name| name.starts_with("libtwo")),
+            "{libraries:?}"
+        );
+    }
+}
+
+#[test]
+fn an_install_removes_what_an_interrupted_one_left() {
+    let dir = scratch("leftovers");
+    let apk = dir.join("app.apk");
+    Apk::new().manifest(&sample_manifest()).write(&apk);
+    let data = dir.join("data");
+    let app = data.join("data/com.example.app");
+    for leftover in [".lib-1", ".old-lib-1"] {
+        std::fs::create_dir_all(app.join(leftover)).unwrap();
+        std::fs::write(app.join(leftover).join("liba.so"), b"\x7fELF").unwrap();
+    }
+    std::fs::write(app.join(".abi-1"), "x86_64\n").unwrap();
+
+    let output = install(&apk, &data);
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(listing(&app), ["abi", "lib"]);
+}
+
 #[test]
 fn a_relative_data_directory_is_refused() {
     let dir = scratch("relative");
