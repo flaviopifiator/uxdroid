@@ -1,8 +1,9 @@
-//! JNI functions behind `dev.uxdroid.runtime.Window` and `android.graphics.Canvas`.
+//! JNI functions behind `dev.uxdroid.runtime.Window` and `android.graphics.Canvas`. As a Rust library,
+//! its `Window` also shows the windows of AOSP's framework (`crates/system`).
 #![cfg(target_os = "linux")]
 
-mod raster;
-mod window;
+pub mod raster;
+pub mod window;
 
 use std::ffi::{CStr, CString};
 

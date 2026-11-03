@@ -8,6 +8,7 @@ import android.app.IActivityTaskManager;
 import android.app.IApplicationThread;
 import android.app.servertransaction.ClientTransaction;
 import android.app.servertransaction.LaunchActivityItem;
+import android.app.servertransaction.ResumeActivityItem;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -33,7 +34,8 @@ import java.io.File;
  * Starts an APK the way Android does: AOSP's ActivityThread.main attaches to the activity manager, which
  * here is a handler in this process. It answers as Android's would, binding the application and then
  * scheduling a transaction that launches the Activity, so the framework itself makes the LoadedApk, the
- * Application, the Activity, its Context and its PhoneWindow.
+ * Application, the Activity, its Context and its PhoneWindow. Without --once the Activity is then
+ * resumed, and its window drawn by the framework's ViewRootImpl into a Wayland window.
  */
 public final class Launcher {
     private Launcher() {}
@@ -53,6 +55,13 @@ public final class Launcher {
         Services.register("package", IPackageManager.class, new PackageManager(app));
         Services.register("display", android.hardware.display.IDisplayManager.class, new DisplayService());
         Services.register("user", android.os.IUserManager.class, new UserManager());
+        Services.register("window", android.view.IWindowManager.class, new WindowService());
+        // A window looks the input method service up; with no keyboard yet, every call is counted.
+        Services.register("input_method", com.android.internal.view.IInputMethodManager.class, null);
+        Services.register("input", android.hardware.input.IInputManager.class, new InputService());
+        // The framework's own switch for devices without GPU rendering: ViewRootImpl then draws in
+        // software, through Surface.lockCanvas, which libuxdroid_system.so shows on Wayland.
+        android.view.ThreadedRenderer.sRendererEnabled = false;
         // Prepares the main Looper, attaches through the "activity" service above, then loops forever.
         ActivityThread.main(new String[0]);
     }
@@ -156,8 +165,15 @@ public final class Launcher {
                     true, null, new Binder(), // forward, no profiler, assist token
                     CLIENT_CONTROLLER, new Binder(), false, null, new Binder(), // not from a bubble, no task fragment
                     new ActivityWindowInfo()));
+            if (once) {
+                // Created only: a report needs no window, so it runs with no compositor.
+                thread.scheduleTransaction(launch);
+                exitWhenLaunched(token);
+                return;
+            }
+            // As ActivityTaskManager does for a launch in front: resume it, which adds its window.
+            launch.addTransactionItem(new ResumeActivityItem(token, true, false));
             thread.scheduleTransaction(launch);
-            if (once) exitWhenLaunched(token);
         }
 
         /**

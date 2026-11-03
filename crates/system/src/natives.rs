@@ -1,6 +1,5 @@
 //! Natives that Android's system provides and AOSP's host library does not.
 
-use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use jni_sys::{JNIEnv, jboolean, jclass, jint, jlong, jobject, jstring};
@@ -303,12 +302,6 @@ unsafe extern "system" fn native_service_manager(env: *mut JNIEnv, _this: jobjec
     unsafe { service_manager(env) }
 }
 
-macro_rules! f {
-    ($function:expr) => {
-        $function as *mut c_void
-    };
-}
-
 /// # Safety
 /// `env` must be the calling thread's JNI environment.
 pub unsafe fn register_all(env: *mut JNIEnv) -> Result<(), String> {
@@ -446,6 +439,9 @@ pub unsafe fn register_all(env: *mut JNIEnv) -> Result<(), String> {
             &service_manager_proxy,
         )?;
         crate::shared_memory::register_natives(env)?;
+        crate::process::register_natives(env)?;
+        crate::surface::register_natives(env)?;
+        crate::vsync::register_natives(env)?;
     }
     Ok(())
 }

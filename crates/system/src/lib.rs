@@ -5,10 +5,22 @@
 //! implements, then `bindSystem` replaces the ones implemented here.
 #![cfg(target_os = "linux")]
 
+/// A native function as the `*mut c_void` that `RegisterNatives` takes.
+macro_rules! f {
+    ($function:expr) => {
+        $function as *mut std::ffi::c_void
+    };
+}
+
 pub mod defaults;
+mod handles;
+mod java;
 mod natives;
+mod process;
 pub mod properties;
 pub mod shared_memory;
+mod surface;
+mod vsync;
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_void};
@@ -230,6 +242,8 @@ unsafe extern "system" fn bind_system(env: *mut JNIEnv, _class: jclass, build_pr
 /// Called by ART when the library loads.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void) -> jint {
+    let _ = surface::LOADED.set(std::time::Instant::now());
+    java::set_vm(vm);
     let mut env: *mut c_void = std::ptr::null_mut();
     // SAFETY: ART passes a valid VM, and this thread is attached.
     unsafe {
