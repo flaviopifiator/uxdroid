@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|network|activity|no activity|launched) " "$WORK/out"
+grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|activity|no activity|launched) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -49,6 +49,16 @@ if awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/
 expect "^network active $online internet $online connected $online total received true own received -1$" \
     "ConnectivityManager or TrafficStats do not report the host's network (default route: $online)"
 grep -q "TrafficStats not initialized" "$WORK/out" && fail "TrafficStats did not find its service"
+
+# 6. Services the corpus stopped on without them: notification channels and posted notifications,
+# alarms that fire their listeners, app ops allowed, dynamic shortcuts kept, and a game mode.
+expect "^notification channel General enabled true active 1$" "notification channels or posting do not work"
+expect "^notification cancelled active 0$" "a cancelled notification stayed active"
+expect "^alarm fired on main thread true$" "a due alarm did not fire its listener on the main thread"
+expect "^alarm next clock true exact true$" "the next alarm clock is not the one set"
+expect "^appops note 0 check 0$" "app ops are not allowed"
+expect "^shortcuts dynamic 1 scan max 15 pin false$" "dynamic shortcuts are not kept"
+expect "^game mode 1$" "the game mode is not standard"
 
 # 4. The app's own startActivity reaches its task: by class and by action, and an intent no activity
 # takes fails with ActivityNotFoundException, as on Android.

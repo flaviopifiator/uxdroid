@@ -143,7 +143,12 @@ The corpus also looked up services nobody served, and an app usually stops on th
 | Service | Behavior |
 |---------|----------|
 | `connectivity` | The host's network, which the process uses directly: the interface of the default route in `/proc/net/route` is the one active network, Ethernet or Wi-Fi, with internet and not metered; with no default route there is none. Network requests are kept but their callbacks are not delivered yet, and the network is never reported as validated, since nothing probes it |
-| `netstats` | `TrafficStats` totals from the host's counters in `/proc/net/dev`, loopback left out; an app's own traffic is not counted apart, so per-uid counters are `UNSUPPORTED` | `runtime/framework/compat_smoke.sh` checks these, and the rest of what the F-Droid corpus below needed, with an app of ours.
+| `netstats` | `TrafficStats` totals from the host's counters in `/proc/net/dev`, loopback left out; an app's own traffic is not counted apart, so per-uid counters are `UNSUPPORTED` |
+| `notification` | Channels, channel groups and posted notifications kept for the process's life, notifications enabled and each posted one printed; showing them on the desktop through the freedesktop notification service is not done yet |
+| `alarm` | Alarms with a listener fire on time from a timer thread, repeating ones again; alarms with a `PendingIntent` are kept, so the next alarm clock is right, but not delivered, since broadcasts are not, which is said once |
+| `appops` | What the app asks for is allowed, as its requested permissions are granted; an operation for another package is refused |
+| `shortcut` | Dynamic shortcuts kept, at most 15 per activity as Android's default; pinning is not supported |
+| `game` | A game by its manifest's category plays in the standard mode, as Android gives a game nobody configured; other apps have none | `runtime/framework/compat_smoke.sh` checks these, and the rest of what the F-Droid corpus below needed, with an app of ours.
 
 Not yet: key repeat, a soft keyboard and the input method service, pointer capture and cursors, drag and drop, more than one seat, sub-windows placed relative to a parent that is not at the display's origin, dim layers behind dialogs, color layers, `setGeometry` and `setDestinationFrame`, a window of its own for a second activity (it is a subsurface of the first one's toplevel, and goes with it), and hardware rendering.
 

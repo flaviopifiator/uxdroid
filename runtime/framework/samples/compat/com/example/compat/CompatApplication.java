@@ -15,6 +15,54 @@ public class CompatApplication extends Application {
                 + " isApplicationUid " + Process.isApplicationUid(Process.myUid()));
         database();
         network();
+        services();
+    }
+
+    /** The services the corpus apps stopped on when they were missing. */
+    private void services() {
+        // AnkiDroid creates its channels in its Application, then posts with them.
+        android.app.NotificationManager notifications = getSystemService(android.app.NotificationManager.class);
+        notifications.createNotificationChannel(new android.app.NotificationChannel("general", "General",
+                android.app.NotificationManager.IMPORTANCE_DEFAULT));
+        notifications.notify(7, new android.app.Notification.Builder(this, "general")
+                .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("Due cards").build());
+        System.out.println("notification channel " + notifications.getNotificationChannel("general").getName()
+                + " enabled " + notifications.areNotificationsEnabled()
+                + " active " + notifications.getActiveNotifications().length);
+        notifications.cancel(7);
+        System.out.println("notification cancelled active " + notifications.getActiveNotifications().length);
+
+        // Loop Habit Tracker schedules its reminders. An alarm already due fires at once.
+        android.app.AlarmManager alarms = getSystemService(android.app.AlarmManager.class);
+        alarms.set(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime() - 1,
+                "compat", () -> System.out.println("alarm fired on main thread "
+                        + (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())), null);
+        android.app.AlarmManager.AlarmClockInfo clock = new android.app.AlarmManager.AlarmClockInfo(
+                System.currentTimeMillis() + 3_600_000, null);
+        alarms.setAlarmClock(clock, null);
+        System.out.println("alarm next clock " + (alarms.getNextAlarmClock() != null
+                && alarms.getNextAlarmClock().getTriggerTime() == clock.getTriggerTime())
+                + " exact " + alarms.canScheduleExactAlarms());
+
+        // Markor checks an operation; on a desktop what the app asks for is allowed.
+        android.app.AppOpsManager ops = getSystemService(android.app.AppOpsManager.class);
+        System.out.println("appops note " + ops.noteOpNoThrow(android.app.AppOpsManager.OPSTR_READ_EXTERNAL_STORAGE,
+                android.os.Process.myUid(), getPackageName())
+                + " check " + ops.unsafeCheckOpNoThrow(android.app.AppOpsManager.OPSTR_READ_EXTERNAL_STORAGE,
+                android.os.Process.myUid(), getPackageName()));
+
+        // Aegis publishes dynamic shortcuts.
+        android.content.pm.ShortcutManager shortcuts = getSystemService(android.content.pm.ShortcutManager.class);
+        shortcuts.setDynamicShortcuts(java.util.List.of(new android.content.pm.ShortcutInfo.Builder(this, "scan")
+                .setShortLabel("Scan").setIntent(new android.content.Intent("com.example.compat.SECOND")).build()));
+        System.out.println("shortcuts dynamic " + shortcuts.getDynamicShortcuts().size()
+                + " " + shortcuts.getDynamicShortcuts().get(0).getId()
+                + " max " + shortcuts.getMaxShortcutCountPerActivity()
+                + " pin " + shortcuts.isRequestPinShortcutSupported());
+
+        // Mindustry's graphics setup asks for its game mode.
+        android.app.GameManager games = getSystemService(android.app.GameManager.class);
+        System.out.println("game mode " + (games == null ? "none" : games.getGameMode()));
     }
 
     /** Glide, in Aegis, holds the ConnectivityManager and watches the default network. */
