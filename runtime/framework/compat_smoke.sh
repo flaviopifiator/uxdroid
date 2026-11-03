@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|activity|no activity|launched) " "$WORK/out"
+grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|activity|no activity|launched) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -59,6 +59,14 @@ expect "^alarm next clock true exact true$" "the next alarm clock is not the one
 expect "^appops note 0 check 0$" "app ops are not allowed"
 expect "^shortcuts dynamic 1 scan max 15 pin false$" "dynamic shortcuts are not kept"
 expect "^game mode 1$" "the game mode is not standard"
+
+# 7. The device is uxdroid, not the Robolectric build the framework comes from, which apps take for a
+# unit test and skip their native code; and the platform has the Khronos GL classes GLSurfaceView
+# hands its renderer.
+expect "^device fingerprint uxdroid/uxdroid/uxdroid:16/[A-Z0-9.]+/1:user/release-keys model uxdroid tags release-keys$" \
+    "Build does not describe uxdroid"
+expect "^khronos javax\.microedition\.khronos\.opengles\.GL10 javax\.microedition\.khronos\.egl\.EGLContext$" \
+    "the javax.microedition.khronos classes are missing"
 
 # 4. The app's own startActivity reaches its task: by class and by action, and an intent no activity
 # takes fails with ActivityNotFoundException, as on Android.

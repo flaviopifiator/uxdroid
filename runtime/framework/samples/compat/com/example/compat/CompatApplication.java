@@ -16,6 +16,21 @@ public class CompatApplication extends Application {
         database();
         network();
         services();
+        device();
+    }
+
+    /** What the app learns of the device: not a Robolectric test, and the GL classes of the platform. */
+    private void device() {
+        System.out.println("device fingerprint " + android.os.Build.FINGERPRINT + " model " + android.os.Build.MODEL
+                + " tags " + android.os.Build.TAGS);
+        String found;
+        try {
+            found = Class.forName("javax.microedition.khronos.opengles.GL10").getName() + " "
+                    + Class.forName("javax.microedition.khronos.egl.EGLContext").getName();
+        } catch (ClassNotFoundException e) {
+            found = "missing " + e.getMessage();
+        }
+        System.out.println("khronos " + found);
     }
 
     /** The services the corpus apps stopped on when they were missing. */

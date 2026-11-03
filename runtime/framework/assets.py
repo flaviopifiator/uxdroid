@@ -64,13 +64,40 @@ def fonts(directory, xml_in, xml_out):
 
 
 def build_prop(prop_in, prop_out):
-    """Describes this machine: an x86_64 host, not the ARM device Robolectric pretends to be."""
+    """Describes this machine: an x86_64 host named uxdroid, not the ARM device Robolectric pretends to be.
+
+    Robolectric names itself in the product, tags and fingerprint, and apps read that as a unit test:
+    AnkiDroid skips loading its native library when Build.FINGERPRINT is "robolectric". The fingerprint
+    keeps Android's form, brand/product/device:release/id/incremental:type/tags, of a user build signed
+    with release keys, as an app expects of a device that is not a debug build.
+    """
+    props = {}
+    with open(prop_in) as f:
+        for line in f:
+            if "=" in line and not line.lstrip().startswith("#"):
+                key, value = line.split("=", 1)
+                props[key.strip()] = value.strip()
+    build_id = props.get("ro.build.id", "unknown")
+    release = props.get("ro.build.version.release", "unknown")
     overrides = {
         "ro.product.cpu.abi": "x86_64",
         "ro.product.cpu.abi2": "",
         "ro.product.cpu.abilist": "x86_64",
         "ro.product.cpu.abilist64": "x86_64",
         "ro.product.cpu.abilist32": "",
+        "ro.product.name": "uxdroid",
+        "ro.product.device": "uxdroid",
+        "ro.product.board": "uxdroid",
+        "ro.product.manufacturer": "uxdroid",
+        "ro.product.brand": "uxdroid",
+        "ro.product.model": "uxdroid",
+        "ro.hardware": "uxdroid",
+        "ro.build.type": "user",
+        "ro.build.tags": "release-keys",
+        "ro.build.version.incremental": "1",
+        "ro.build.display.id": build_id,
+        "ro.build.characteristics": "default",
+        "ro.build.fingerprint": "uxdroid/uxdroid/uxdroid:{}/{}/1:user/release-keys".format(release, build_id),
     }
     lines = []
     with open(prop_in) as f:
