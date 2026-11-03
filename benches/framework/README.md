@@ -65,6 +65,17 @@ docker compose run --rm -T dev bash /work/benches/framework/service.sh
 
 Cold times moved by up to 500 ms between runs of the same build (sample installed: 1242 and 763 ms base, 728 and 759 ms branch), which is the shared disk, not the change. The cost of the calls themselves, from `runtime/framework/agent_smoke.sh` with `RUNS=50` on one connection to the input sample: `ui` 0.66 ms median (11 nodes, 1.8 KB), `screenshot` 2.2 ms (400x700 PNG, 19 KB), `tap` 40 ms (the finger is held 40 ms), and the first `ui` of a connection, which turns accessibility on and waits for the nodes to settle, 303 ms. RustDesk was not measured with the bench scripts; its agent smoke shows its 36-node `ui` working. No competitor offers agent control in this environment, so none was measured.
 
+## Compatibility corpus fixes
+
+2026-11-03, base a8addb1 against the branch with the corpus fixes (application uid, services, PendingIntents, the kept stderr, the Java GL bindings registered at startup), each in its own runtime copy mounted at `/runtime/art`, 15 runs per row, from ext4, warm, medians. The machine was otherwise idle.
+
+| Workload | Base | Branch |
+|----------|------|--------|
+| Framework sample to first frame, installed | 137.5 ms, PSS 128.2 MiB, private dirty 19.1 MiB | 138.0 ms, PSS 128.9 MiB, private dirty 19.2 MiB |
+| RustDesk to first Flutter frame, installed | 211.8 ms, private dirty 80.7 MiB | 212.9 ms, private dirty 81.9 MiB |
+
+RustDesk's PSS read 260.4 MiB on the base and 291.8 MiB on the branch in that run, with the same RSS and private dirty memory; a second run of 5, base and branch back to back, read 291.3 and 291.5 MiB, so the first base figure counted pages shared with another process and is not a difference of the branch. Cold times were within each other's ranges. No competitor was measured.
+
 ## Install-time preparation
 
 2026-11-03, 30 runs per row, from ext4, the same method as below, measured in the `art-prep` runtime copy (its boot image, framework and system odex recompiled at that path, so ART runs with its image). Median, interquartile range in brackets. Memory is from the warm rows. The machine was not idle: other builds and tests ran beside these (load average 2 to 6), so cold times are wider than in the table below, and three runs of the same unchanged row, `FrameworkSmoke` warm, read 74.0, 84.6 and 84.2 ms.

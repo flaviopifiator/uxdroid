@@ -7,7 +7,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_int, c_long, c_void};
-use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
 use crate::loader;
@@ -138,7 +137,7 @@ fn host_symbol(name: &CStr) -> Option<usize> {
 }
 
 pub(crate) fn write_stderr(message: std::fmt::Arguments<'_>) {
-    let _ = std::io::stderr().write_fmt(message);
+    crate::output::write_stderr(message);
 }
 
 pub(crate) fn die(message: std::fmt::Arguments<'_>) -> ! {

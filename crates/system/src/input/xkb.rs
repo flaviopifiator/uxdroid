@@ -55,7 +55,7 @@ fn open_library() -> Option<Library> {
         )
     };
     if handle.is_null() {
-        eprintln!("uxdroid: no libxkbcommon.so.0, so keys type no characters");
+        uxdroid_bridge::report!("uxdroid: no libxkbcommon.so.0, so keys type no characters");
         return None;
     }
     /// A function of the library, as the field's type that receives it.

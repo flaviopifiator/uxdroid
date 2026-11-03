@@ -114,6 +114,7 @@ public final class Boot {
         if (started) {
             throw new IllegalStateException("the framework is already started");
         }
+        keepConsole();
         System.load(systemLibrary);
         // Default bodies can be made once per process, so a start that failed later keeps them.
         if (defaults < 0) {
@@ -144,9 +145,52 @@ public final class Boot {
         System.setProperty("icu.data.path", icuData(root));
         System.load(root + "/lib64/libandroid_runtime.so");
         Natives.bindSystem(root + "/build.prop");
+        useDataDirectory();
         android.graphics.Typeface.loadPreinstalledSystemFontMap();
         started = true;
         return defaults;
+    }
+
+    /**
+     * System.out and System.err keep writing where the process started, as uxdroid's natives and the
+     * log do (crates/bridge/src/output.rs), even after the app points descriptors 1 and 2 elsewhere:
+     * on Android they go to the log, never to the app's own descriptors, and AnkiDroid's backend copies
+     * a pipe it puts over them into the log, which looped every line.
+     */
+    private static void keepConsole() {
+        try {
+            System.setOut(new java.io.PrintStream(new java.io.FileOutputStream(kept(java.io.FileDescriptor.out)), true));
+            System.setErr(new java.io.PrintStream(new java.io.FileOutputStream(kept(java.io.FileDescriptor.err)), true));
+        } catch (android.system.ErrnoException e) {
+            // No console to keep, such as a closed descriptor: the streams stay as they are.
+        }
+    }
+
+    private static java.io.FileDescriptor kept(java.io.FileDescriptor fd) throws android.system.ErrnoException {
+        java.io.FileDescriptor copy = android.system.Os.dup(fd);
+        android.system.Os.fcntlInt(copy, android.system.OsConstants.F_SETFD, android.system.OsConstants.FD_CLOEXEC);
+        return copy;
+    }
+
+    /**
+     * The framework names Android's data partition through Environment.getDataDirectory, which reads
+     * ANDROID_DATA, except SQLite's default page size, the block size of a literal "/data": every
+     * database an app opened failed with "Invalid path: /data". It is taken from ANDROID_DATA instead,
+     * the file system the app's databases live on. A framework scan found no other literal an app
+     * reaches; the rest belong to system_server.
+     */
+    private static void useDataDirectory() {
+        File data = android.os.Environment.getDataDirectory();
+        try {
+            java.lang.reflect.Field pageSize = android.database.sqlite.SQLiteGlobal.class
+                    .getDeclaredField("sDefaultPageSize");
+            pageSize.setAccessible(true);
+            pageSize.setInt(null, new android.os.StatFs(data.getPath()).getBlockSize());
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("cannot give SQLite the page size of " + data, e);
+        } catch (IllegalArgumentException e) {
+            // No data directory, as for a program that only parses: it opens no database.
+        }
     }
 
     private static String icuData(String root) {

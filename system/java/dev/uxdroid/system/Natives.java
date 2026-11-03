@@ -18,4 +18,13 @@ final class Natives {
 
     /** Loads the system properties, then binds this library's own natives over the defaults. */
     static native void bindSystem(String buildProp);
+
+    /** The Android uid of an installed package, one of the application uids, stable for its name. */
+    static native int applicationUid(String packageName);
+
+    /**
+     * From now on the framework sees this process as the package: Binder.getCallingUid and so
+     * Process.myUid answer its application uid. The Linux uid does not change. Returns the uid.
+     */
+    static native int becomeApplication(String packageName);
 }

@@ -187,7 +187,7 @@ fn watch(stream: &Arc<Stream>, pointer: *mut c_void) {
             }
         });
     if let Err(error) = spawned {
-        eprintln!("uxdroid: AAudio: no thread to report a failed device: {error}");
+        uxdroid_bridge::report!("uxdroid: AAudio: no thread to report a failed device: {error}");
     }
 }
 
@@ -475,7 +475,7 @@ pub(crate) unsafe extern "C" fn open_stream(builder: *mut c_void, out: *mut *mut
         Err(error) => return error,
     };
     if settings.direction == INPUT && !may_record() {
-        eprintln!(
+        uxdroid_bridge::report!(
             "uxdroid: AAudio input refused: the app does not request android.permission.RECORD_AUDIO"
         );
         return ERROR_UNAVAILABLE;
@@ -541,7 +541,7 @@ pub(crate) unsafe extern "C" fn open_stream(builder: *mut c_void, out: *mut *mut
             OK
         }
         Err(error) => {
-            eprintln!("uxdroid: AAudio: {error}");
+            uxdroid_bridge::report!("uxdroid: AAudio: {error}");
             drop(STREAMS.remove(pointer));
             ERROR_UNAVAILABLE
         }

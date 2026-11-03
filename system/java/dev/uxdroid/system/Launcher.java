@@ -76,6 +76,8 @@ public final class Launcher {
         }
         if (app == null) app = App.parse(apk, activityName);
         String packageName = app.application.packageName;
+        // Before ActivityThread runs: the framework reads the app's uid once and keeps it.
+        Natives.becomeApplication(packageName);
         if (!claimInstance(packageName)) {
             if (Control.activated()) refuseActivation(packageName);
             forward(packageName, intent);
@@ -104,6 +106,7 @@ public final class Launcher {
         Services.register("mount", android.os.storage.IStorageManager.class, new StorageService(dataRoot()));
         Services.register("device_identifiers", android.os.IDeviceIdentifiersPolicyService.class,
                 new DeviceIdentifiers());
+        AppServices.register(app);
         // The framework's own switch for devices without GPU rendering: ViewRootImpl then draws in
         // software, through Surface.lockCanvas, which libuxdroid_system.so shows on Wayland.
         android.view.ThreadedRenderer.sRendererEnabled = false;
@@ -244,7 +247,8 @@ public final class Launcher {
             application.credentialProtectedDataDir = data.getPath();
             application.deviceProtectedDataDir = data.getPath();
             application.nativeLibraryDir = libraries.getPath();
-            application.uid = android.os.Process.myUid();
+            // An application uid of its own, as Android's installer gives, not the Linux user's.
+            application.uid = Natives.applicationUid(application.packageName);
             if (application.processName == null) application.processName = application.packageName;
         }
 
@@ -352,6 +356,32 @@ public final class Launcher {
             if (once) exitWhenLaunched(stack.top());
         }
 
+        /** PendingIntent.getActivity, getBroadcast and their kind: see {@link IntentSenders}. */
+        public android.content.IIntentSender getIntentSenderWithFeature(int type, String packageName,
+                String featureId, IBinder token, String resultWho, int requestCode, Intent[] intents,
+                String[] resolvedTypes, int flags, Bundle options, int userId) {
+            return IntentSenders.get(type, packageName, requestCode, intents, flags);
+        }
+
+        public void cancelIntentSender(android.content.IIntentSender sender) {
+            IntentSenders.cancel(sender);
+        }
+
+        public int sendIntentSender(IApplicationThread caller, android.content.IIntentSender target,
+                IBinder allowlistToken, int code, Intent intent, String resolvedType,
+                android.content.IIntentReceiver finishedReceiver, String requiredPermission, Bundle options) {
+            return IntentSenders.send(target, intent);
+        }
+
+        public android.app.ActivityManager.PendingIntentInfo getInfoForIntentSender(
+                android.content.IIntentSender sender) {
+            return IntentSenders.info(sender, app.application.uid);
+        }
+
+        public Intent getIntentForIntentSender(android.content.IIntentSender sender) {
+            return IntentSenders.intent(sender);
+        }
+
         /**
          * Providers of the system, such as Settings, live in this process as proxies of IContentProvider.
          * A call nobody handles returns null, which Settings reads as "use the default".
@@ -387,9 +417,20 @@ public final class Launcher {
                     ApplicationInfo.class, CompatibilityInfo.class, ClassLoader.class,
                     boolean.class, boolean.class, boolean.class, boolean.class);
             packageInfo.setAccessible(true);
-            // Base loader, then as the bind asks: no security violation, include code, do not register, no sandbox.
-            loadedApk = packageInfo.invoke(ActivityThread.currentActivityThread(), info, CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO,
-                    Launcher.class.getClassLoader(), false, true, false, false);
+            // A LoadedApk looks the manifest's appComponentFactory up on its base loader as it is made,
+            // which on Android is null and skips it, and again on the app's loader once that exists.
+            // Here the base is the framework's, which cannot hold the app's class, so the factory is
+            // hidden until the app's loader looks it up.
+            String factory = info.appComponentFactory;
+            info.appComponentFactory = null;
+            try {
+                // Base loader, then as the bind asks: no security violation, include code, do not register, no sandbox.
+                loadedApk = packageInfo.invoke(ActivityThread.currentActivityThread(), info,
+                        CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO, Launcher.class.getClassLoader(),
+                        false, true, false, false);
+            } finally {
+                info.appComponentFactory = factory;
+            }
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("cannot give the app the framework's class loader", e);
         }
@@ -434,6 +475,25 @@ public final class Launcher {
     public static final class ActivityTaskManager {
         public IActivityClientController getActivityClientController() {
             return CLIENT_CONTROLLER;
+        }
+
+        /** The app's own Context.startActivity and Activity.startActivity: its task decides. */
+        public int startActivity(IApplicationThread caller, String callingPackage, String callingFeatureId,
+                Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode, int flags,
+                android.app.ProfilerInfo profilerInfo, Bundle options) throws RemoteException {
+            ActivityStack stack = ActivityStack.current;
+            if (stack == null) return android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
+            if (Looper.myLooper() == Looper.getMainLooper()) return stack.startFromApp(intent);
+            // The task runs on the main thread; a start from another thread is queued there.
+            Intent copy = new Intent(intent);
+            new android.os.Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    stack.startFromApp(copy);
+                } catch (RemoteException e) {
+                    throw new IllegalStateException("cannot start " + copy, e);
+                }
+            });
+            return android.app.ActivityManager.START_SUCCESS;
         }
     }
 

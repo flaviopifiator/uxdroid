@@ -22,6 +22,19 @@ mod opensles;
 mod pixels;
 mod window;
 
+/// The EGL, GLES and native window functions, for the framework's Java GL bindings in
+/// `libuxdroid_system.so` (`android.opengl` and `com.google.android.gles_jni`), which are JNI
+/// natives of host code, not app code, and so take these functions directly rather than through a
+/// signature table. That library holds its own copy of this crate's state: a surface made through
+/// the Java API is swapped through it, as an app that uses one API does.
+pub mod host_gl {
+    pub use crate::egl::{
+        choose_config, create_window_surface, destroy_surface, egl_symbol, get_config_attrib,
+        get_display, gles_symbol, swap_buffers,
+    };
+    pub use crate::window::{from_surface as window_from_surface, release as release_window};
+}
+
 use uxdroid_bridge::table::{Export, Table};
 
 macro_rules! function {

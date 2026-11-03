@@ -154,7 +154,9 @@ impl State {
                 self.keymap = Some(keymap);
             }
             None => {
-                eprintln!("uxdroid: the compositor's keymap does not compile; keys type nothing")
+                uxdroid_bridge::report!(
+                    "uxdroid: the compositor's keymap does not compile; keys type nothing"
+                )
             }
         }
     }

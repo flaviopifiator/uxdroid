@@ -217,7 +217,7 @@ unsafe extern "system" fn transaction_finalizer(_env: *mut JNIEnv, _class: jclas
 fn apply(transaction: &mut Transaction<Platform>) {
     for window in transaction.apply() {
         if let Err(Failure::Message(message)) = present_window(&window) {
-            eprintln!("uxdroid: {message}");
+            uxdroid_bridge::report!("uxdroid: {message}");
         }
     }
 }
@@ -272,7 +272,7 @@ fn set(transaction: jlong, control: jlong, change: impl FnOnce() -> Option<Chang
         None => {
             static UNKNOWN: Once = Once::new();
             UNKNOWN.call_once(|| {
-                eprintln!("uxdroid: a SurfaceControl change came with no transaction of ours; applied at once")
+                uxdroid_bridge::report!("uxdroid: a SurfaceControl change came with no transaction of ours; applied at once")
             });
             let mut once = Transaction::default();
             once.set(layer, change);
@@ -977,14 +977,14 @@ unsafe fn act(env: *mut JNIEnv) {
             let args = [jvalue { i: width }, jvalue { i: height }];
             if java::call_static_void(env, class, c"displayResized", c"(II)V", &args).is_err() {
                 crate::clear_exception(env);
-                eprintln!("uxdroid: the window manager failed to resize the display");
+                uxdroid_bridge::report!("uxdroid: the window manager failed to resize the display");
             }
         }
         if requests.close
             && java::call_static_void(env, class, c"displayClosed", c"()V", &[]).is_err()
         {
             crate::clear_exception(env);
-            eprintln!("uxdroid: the window manager failed to close the display");
+            uxdroid_bridge::report!("uxdroid: the window manager failed to close the display");
         }
     }
 }
@@ -996,7 +996,7 @@ unsafe extern "system" fn window_dispatch(
     _watched: jlong,
 ) -> jint {
     if let Err(error) = wayland::dispatch() {
-        eprintln!("uxdroid: the connection to the compositor failed: {error}");
+        uxdroid_bridge::report!("uxdroid: the connection to the compositor failed: {error}");
         return 0;
     }
     route();
@@ -1083,7 +1083,7 @@ unsafe extern "system" fn window_place(
         };
         let (x, y) = placement.surface();
         if let Err(error) = window.place(x, y) {
-            eprintln!("uxdroid: cannot move {}: {error}", layer.name);
+            uxdroid_bridge::report!("uxdroid: cannot move {}: {error}", layer.name);
         }
         window.key()
     };
@@ -1199,7 +1199,7 @@ unsafe fn post(env: *mut JNIEnv, layer: &Arc<Layer>, canvas: jobject) -> Result<
     }
     if !layer.extra.posted.swap(true, Ordering::Relaxed) {
         let since = LOADED.get().map_or(0, |start| start.elapsed().as_millis());
-        eprintln!(
+        uxdroid_bridge::report!(
             "uxdroid: first frame posted on {} {width}x{height}, {since} ms after the framework started",
             layer.name
         );

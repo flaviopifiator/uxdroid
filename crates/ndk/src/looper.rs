@@ -413,7 +413,9 @@ pub unsafe extern "C" fn for_thread() -> *mut c_void {
         }
         Ok(false) => std::ptr::null_mut(),
         Err(Thrown) => {
-            eprintln!("uxdroid: ALooper_forThread could not join this thread's Java Looper");
+            uxdroid_bridge::report!(
+                "uxdroid: ALooper_forThread could not join this thread's Java Looper"
+            );
             std::ptr::null_mut()
         }
     }

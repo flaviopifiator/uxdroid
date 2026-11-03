@@ -2,7 +2,7 @@
 
 Run Android APKs as native Linux processes, with no emulator, no container and no Android system image.
 
-**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Milestone 4, AOSP's own framework below real apps, is in progress: RustDesk's x86_64 build shows its first Flutter screen through `dev.uxdroid.system.Launcher` and takes clicks, touch and typed text from the Wayland seat. See [the architecture](docs/architecture.md) for the design and roadmap.
+**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Milestone 4, AOSP's own framework below real apps, is in progress: RustDesk's x86_64 build shows its first Flutter screen through `dev.uxdroid.system.Launcher` and takes clicks, touch and typed text from the Wayland seat. Of a corpus of five F-Droid apps, Loop Habit Tracker, Markor, Aegis and Mindustry (through `GLSurfaceView`) show their first screens; AnkiDroid shows its deck list under a fatal error dialog, because no WebView provider exists yet. See [the architecture](docs/architecture.md) for the design and roadmap.
 
 ## Quick path
 
@@ -102,6 +102,9 @@ docker compose run --rm -T dev bash /work/runtime/framework/service_smoke.sh
 # damage-only redraws, a dialog and a popup as subsurfaces, frame callbacks pacing an animation, a
 # resize and a close.
 docker compose run --rm -T dev bash /work/runtime/framework/compose_smoke.sh
+# What the F-Droid corpus needed, checked with an app of ours: its own application uid, storage and
+# the system services the corpus asks for.
+docker compose run --rm -T dev bash /work/runtime/framework/compat_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
@@ -111,6 +114,10 @@ UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runt
 # the same on RustDesk's Flutter widgets in the sandbox.
 docker compose run --rm -T dev bash /work/runtime/framework/agent_smoke.sh
 UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_agent_smoke.sh
+# The compatibility corpus, F-Droid builds of Loop Habit Tracker, Markor, Aegis, AnkiDroid and
+# Mindustry (verified against F-Droid's key, untrusted: sandbox only), each to a first screen that is
+# not blank. A missing APK is skipped; CORPUS_APPS picks some; SHOTS=<dir> keeps the screenshots.
+UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/corpus_smoke.sh
 
 # Apps play to the host's PulseAudio or PipeWire server, else ALSA. UXDROID_AUDIO=null plays into
 # silence, and UXDROID_AUDIO=file:<dir> writes each stream's samples to a file.

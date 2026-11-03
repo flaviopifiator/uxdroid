@@ -17,7 +17,9 @@ mod compose;
 pub mod control;
 pub mod default_library;
 pub mod defaults;
+mod gl;
 mod handles;
+pub mod identity;
 pub mod input;
 mod java;
 mod natives;
@@ -126,6 +128,70 @@ unsafe fn register(env: *mut JNIEnv, class: &CStr, methods: &[Method]) -> Result
     Ok(())
 }
 
+/// Registers `methods` on the class named `name` (with dots), loaded through the system class
+/// loader without being initialized, so its static initializer does not run now: it may call one of
+/// these natives, and runs when the app first uses the class.
+///
+/// # Safety
+/// `env` must be the calling thread's JNI environment, and each function must match its signature.
+unsafe fn register_uninitialized(
+    env: *mut JNIEnv,
+    name: &CStr,
+    methods: &[Method],
+) -> Result<(), String> {
+    let table: Vec<JNINativeMethod> = methods
+        .iter()
+        .map(|(method, signature, function)| JNINativeMethod {
+            name: method.as_ptr() as *mut _,
+            signature: signature.as_ptr() as *mut _,
+            fnPtr: *function,
+        })
+        .collect();
+    let failed = |what: &str| format!("{what} {}", name.to_string_lossy());
+    // SAFETY: as above; Class and ClassLoader are in the boot class path, with these methods.
+    unsafe {
+        let jni = &**env;
+        let class_class = (jni.v1_1.FindClass)(env, c"java/lang/Class".as_ptr());
+        let loader_class = (jni.v1_1.FindClass)(env, c"java/lang/ClassLoader".as_ptr());
+        let for_name = (jni.v1_1.GetStaticMethodID)(
+            env,
+            class_class,
+            c"forName".as_ptr(),
+            c"(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;".as_ptr(),
+        );
+        let system_loader = (jni.v1_1.GetStaticMethodID)(
+            env,
+            loader_class,
+            c"getSystemClassLoader".as_ptr(),
+            c"()Ljava/lang/ClassLoader;".as_ptr(),
+        );
+        if for_name.is_null() || system_loader.is_null() {
+            clear_exception(env);
+            return Err(failed("cannot look up"));
+        }
+        let loader =
+            (jni.v1_1.CallStaticObjectMethodA)(env, loader_class, system_loader, std::ptr::null());
+        let arguments = [
+            jni_sys::jvalue {
+                l: (jni.v1_1.NewStringUTF)(env, name.as_ptr()),
+            },
+            jni_sys::jvalue { z: false },
+            jni_sys::jvalue { l: loader },
+        ];
+        let class =
+            (jni.v1_1.CallStaticObjectMethodA)(env, class_class, for_name, arguments.as_ptr());
+        if class.is_null() || (jni.v1_2.ExceptionCheck)(env) {
+            clear_exception(env);
+            return Err(failed("class not found:"));
+        }
+        if (jni.v1_1.RegisterNatives)(env, class, table.as_ptr(), table.len() as jint) != 0 {
+            clear_exception(env);
+            return Err(failed("registering natives failed:"));
+        }
+    }
+    Ok(())
+}
+
 /// `static native int bindDefaults(String list)`: binds a default body to every listed native and
 /// returns how many were bound.
 unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: jstring) -> jint {
@@ -211,7 +277,7 @@ unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: 
     // A class that does not load cannot call its natives either, so this only matters when debugging.
     if !skipped.is_empty() && natives::min_priority() <= natives::DEBUG {
         let names: Vec<_> = skipped.iter().map(|c| c.to_string_lossy()).collect();
-        eprintln!(
+        uxdroid_bridge::report!(
             "uxdroid: no default bodies for {} classes: {}",
             names.len(),
             names.join(" ")
@@ -326,10 +392,35 @@ unsafe extern "system" fn bind_system(env: *mut JNIEnv, _class: jclass, build_pr
         }
     }
     // SAFETY: as above, and every table matches its Java declarations.
-    if let Err(error) = unsafe { natives::register_all(env) } {
+    // SAFETY: as above, and every table matches its Java declarations.
+    if let Err(error) = unsafe { natives::register_all(env).and_then(|()| gl::register(env)) } {
         // SAFETY: as above.
         unsafe { throw(env, c"java/lang/IllegalStateException", &error) };
     }
+}
+
+/// # Safety
+/// `env` must be the calling thread's JNI environment, and `package` a string or null.
+unsafe extern "system" fn application_uid(
+    env: *mut JNIEnv,
+    _class: jclass,
+    package: jstring,
+) -> jint {
+    // SAFETY: as above.
+    let package = unsafe { java_string(env, package) }.unwrap_or_default();
+    identity::application_uid(&package) as jint
+}
+
+/// # Safety
+/// As `application_uid`.
+unsafe extern "system" fn become_application(
+    env: *mut JNIEnv,
+    _class: jclass,
+    package: jstring,
+) -> jint {
+    // SAFETY: as above.
+    let package = unsafe { java_string(env, package) }.unwrap_or_default();
+    identity::become_application(&package) as jint
 }
 
 /// # Safety
@@ -344,7 +435,7 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
         if ((**vm).v1_2.GetEnv)(vm, &mut env, JNI_VERSION_1_6) != JNI_OK {
             return JNI_ERR;
         }
-        let methods: [Method; 5] = [
+        let methods: [Method; 7] = [
             (
                 c"defaultsProblem",
                 c"(Ljava/lang/String;)Ljava/lang/String;",
@@ -370,11 +461,21 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
                 c"(Ljava/lang/String;)V",
                 bind_system as *mut c_void,
             ),
+            (
+                c"applicationUid",
+                c"(Ljava/lang/String;)I",
+                application_uid as *mut c_void,
+            ),
+            (
+                c"becomeApplication",
+                c"(Ljava/lang/String;)I",
+                become_application as *mut c_void,
+            ),
         ];
         match register(env as *mut JNIEnv, c"dev/uxdroid/system/Natives", &methods) {
             Ok(()) => JNI_VERSION_1_6,
             Err(error) => {
-                eprintln!("uxdroid: {error}");
+                uxdroid_bridge::report!("uxdroid: {error}");
                 JNI_ERR
             }
         }

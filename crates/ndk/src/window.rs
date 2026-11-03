@@ -291,6 +291,9 @@ impl Window {
 }
 
 /// `ANativeWindow* ANativeWindow_fromSurface(JNIEnv*, jobject surface)`, with one reference.
+///
+/// # Safety
+/// The arguments must meet the contract of the NDK function of the same name.
 pub unsafe extern "C" fn from_surface(env: *mut JNIEnv, surface: jobject) -> *mut c_void {
     if env.is_null() || surface.is_null() {
         return std::ptr::null_mut();
@@ -335,6 +338,9 @@ pub unsafe extern "C" fn acquire(window: *mut c_void) {
     }
 }
 
+///
+/// # Safety
+/// The arguments must meet the contract of the NDK function of the same name.
 pub unsafe extern "C" fn release(pointer: *mut c_void) {
     let Some(window) = WINDOWS.get(pointer) else {
         return;

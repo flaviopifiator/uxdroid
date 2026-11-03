@@ -235,7 +235,7 @@ unsafe extern "system" fn track_setup(
     let output = match Output::open(Backend::current(), config) {
         Ok(output) => output,
         Err(error) => {
-            eprintln!("uxdroid: AudioTrack: {error}");
+            uxdroid_bridge::report!("uxdroid: AudioTrack: {error}");
             return SETUP_NATIVE_INIT_FAILED;
         }
     };
@@ -595,7 +595,7 @@ fn unimplemented_once(name: &'static CStr) {
     let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
     if !seen.contains(&name) {
         seen.push(name);
-        eprintln!("uxdroid: unimplemented {}", name.to_string_lossy());
+        uxdroid_bridge::report!("uxdroid: unimplemented {}", name.to_string_lossy());
     }
 }
 
@@ -650,7 +650,7 @@ unsafe extern "system" fn record_setup(
 ) -> jint {
     // SAFETY: ART passes a valid environment.
     if !unsafe { may_record(env) } {
-        eprintln!(
+        uxdroid_bridge::report!(
             "uxdroid: AudioRecord refused: the app does not request android.permission.RECORD_AUDIO"
         );
         return SETUP_NATIVE_INIT_FAILED;
@@ -674,7 +674,7 @@ unsafe extern "system" fn record_setup(
     let input = match Input::open(Backend::current(), config) {
         Ok(input) => input,
         Err(error) => {
-            eprintln!("uxdroid: AudioRecord: {error}");
+            uxdroid_bridge::report!("uxdroid: AudioRecord: {error}");
             return SETUP_NATIVE_INIT_FAILED;
         }
     };
