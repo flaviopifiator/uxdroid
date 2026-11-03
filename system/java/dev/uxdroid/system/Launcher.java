@@ -96,9 +96,15 @@ public final class Launcher {
             String path = apk.getAbsolutePath();
             application.sourceDir = path;
             application.publicSourceDir = path;
-            File data = new File(System.getenv("ANDROID_DATA"), "data/" + application.packageName);
+            String root = System.getenv("ANDROID_DATA");
+            if (root == null || !new File(root).isAbsolute()) {
+                throw new IllegalStateException("ANDROID_DATA must be an absolute directory, not " + root);
+            }
+            File data = new File(root, "data/" + application.packageName);
             File libraries = new File(data, "lib");
-            libraries.mkdirs();
+            if (!libraries.isDirectory() && !libraries.mkdirs()) {
+                throw new IllegalStateException("cannot create " + libraries);
+            }
             application.dataDir = data.getPath();
             application.credentialProtectedDataDir = data.getPath();
             application.deviceProtectedDataDir = data.getPath();
