@@ -394,3 +394,89 @@ fn protocol_errors_are_json_rpc_errors() {
     assert_eq!(mcp.call(7, "ping", json!({}))["result"], json!({}));
     assert!(mcp.finish().success());
 }
+
+/// What one connection of a scripted app does with the request it reads.
+#[derive(Clone, Copy)]
+enum Turn {
+    /// Answers it, then closes the connection, as an app closing an idle one.
+    AnswerAndClose,
+    /// Closes without answering, as an app that ended while running it.
+    Drop,
+    /// Answers it and every later request.
+    Answer,
+}
+
+/// An app on a raw socket that holds its instance lock and plays `turns`, one per connection.
+fn scripted(dir: &Path, turns: Vec<Turn>) -> Arc<Mutex<Vec<String>>> {
+    let control = uxdroid_system::control::control_dir_in(&dir.join("run")).unwrap();
+    let lock = uxdroid_system::control::claim_instance(&control.join("com.example.app.lock"))
+        .unwrap()
+        .unwrap();
+    let listener =
+        std::os::unix::net::UnixListener::bind(control.join("com.example.app.sock")).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    std::thread::spawn(move || {
+        let _lock = lock;
+        for turn in turns {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut writer = stream.try_clone().unwrap();
+            for line in BufReader::new(stream).lines() {
+                let Ok(line) = line else { break };
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let command = request["cmd"].as_str().unwrap().to_string();
+                record.lock().unwrap().push(command.clone());
+                if matches!(turn, Turn::Drop) {
+                    break;
+                }
+                let result = match command.as_str() {
+                    "tap" => json!({"x": 3, "y": 4}),
+                    _ => json!({"snapshot": 1, "windows": []}),
+                };
+                let answer = json!({"v": 1, "id": request["id"], "ok": true, "result": result});
+                writeln!(writer, "{answer}").unwrap();
+                if matches!(turn, Turn::AnswerAndClose) {
+                    break;
+                }
+            }
+        }
+    });
+    seen
+}
+
+#[test]
+fn a_connection_the_app_closed_is_opened_again_without_repeating_a_call() {
+    let dir = scratch("reconnect");
+    let seen = scripted(&dir, vec![Turn::AnswerAndClose, Turn::Answer]);
+    let mut mcp = Mcp::start(&dir);
+    let ui = json!({"package": "com.example.app"});
+    assert_eq!(mcp.tool(1, "ui", ui)["isError"], json!(false));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let tap = json!({"package": "com.example.app", "x": 3, "y": 4});
+    let result = mcp.tool(2, "tap", tap);
+    assert_eq!(
+        result["content"][0]["text"],
+        json!("tapped 3,4"),
+        "{result}"
+    );
+    assert_eq!(*seen.lock().unwrap(), ["ui", "tap"]);
+    assert!(mcp.finish().success());
+}
+
+#[test]
+fn a_call_that_may_have_acted_is_not_sent_again_and_a_reading_one_is() {
+    let dir = scratch("no-replay");
+    let seen = scripted(&dir, vec![Turn::Drop, Turn::Drop, Turn::Answer]);
+    let mut mcp = Mcp::start(&dir);
+    let tap = json!({"package": "com.example.app", "x": 3, "y": 4});
+    let result = mcp.tool(1, "tap", tap);
+    assert_eq!(result["isError"], json!(true), "{result}");
+    assert_eq!(*seen.lock().unwrap(), ["tap"], "a tap is never repeated");
+    // A ui snapshot reads only, so it is asked again on a new connection.
+    let result = mcp.tool(2, "ui", json!({"package": "com.example.app"}));
+    assert_eq!(result["isError"], json!(false), "{result}");
+    assert_eq!(*seen.lock().unwrap(), ["tap", "ui", "ui"]);
+    assert!(mcp.finish().success());
+}

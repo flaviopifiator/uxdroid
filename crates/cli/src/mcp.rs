@@ -213,6 +213,31 @@ fn text(text: impl Into<String>) -> Outcome {
     Outcome::Content(vec![json!({"type": "text", "text": text.into()})])
 }
 
+/// Whether `request` only reads the app, so sending it twice changes nothing.
+fn reads_only(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Hello
+            | Request::Status
+            | Request::Ui(_)
+            | Request::Screenshot(_)
+            | Request::Wait(_)
+    )
+}
+
+/// Whether the app closed this idle connection: it is readable, which an idle one never is unless
+/// its end came.
+fn closed(stream: &UnixStream) -> bool {
+    let mut polled = libc::pollfd {
+        fd: std::os::fd::AsRawFd::as_raw_fd(stream),
+        events: libc::POLLIN | libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: one pollfd of an open socket, and no waiting.
+    let ready = unsafe { libc::poll(&mut polled, 1, 0) };
+    ready != 0
+}
+
 struct Server {
     dir: Option<PathBuf>,
     /// One open connection per app, so its session, and accessibility, last between calls.
@@ -226,12 +251,18 @@ impl Server {
             .ok_or_else(|| "no control directory".to_string())
     }
 
-    /// Calls a running app over its kept connection, opened again once if it was closed.
+    /// Calls a running app over its kept connection. One the app closed while idle is opened again
+    /// before the call; a call that fails on the way is sent again only when it only reads, since
+    /// the app may have acted on a tap or typed text before the connection broke.
     fn call(&mut self, app: &Instance, request: &Request) -> Result<Option<Value>, String> {
         let dir = self.dir()?.to_path_buf();
         let key = (app.package.clone(), app.profile.clone());
         let timeout = app::agent_timeout(request);
-        for attempt in 0..2 {
+        let attempts = if reads_only(request) { 2 } else { 1 };
+        for attempt in 1..=attempts {
+            if self.connections.get(&key).is_some_and(closed) {
+                self.connections.remove(&key);
+            }
             if !self.connections.contains_key(&key) {
                 if !served(&dir, &app.package, &app.profile) {
                     return Ok(None);
@@ -254,10 +285,9 @@ impl Server {
                         failure.code.escape_debug()
                     ));
                 }
-                // The app closed an idle connection, or ended: once more on a new one.
                 Err(error) => {
                     self.connections.remove(&key);
-                    if attempt == 1 {
+                    if attempt == attempts {
                         return Err(format!("{}: {error}", app.package));
                     }
                 }

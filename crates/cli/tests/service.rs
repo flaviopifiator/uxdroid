@@ -319,6 +319,16 @@ fn now_runs_systemctl_for_the_user() {
         stderr(&output),
         "error: systemctl --user daemon-reload failed with exit status: 1\n"
     );
+    // What was done before the failure is still told.
+    let units = scratch.units();
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "wrote {units}/uxdroid-com.example.app@default.socket\n\
+             wrote {units}/uxdroid-com.example.app@default.service\n",
+            units = units.display()
+        )
+    );
     assert!(
         scratch
             .units()
@@ -539,6 +549,21 @@ fn bad_input_is_refused() {
             "lots",
         ],
         &["service", "enable", "com.example.app", "--memory-max", "1Q"],
+        // More bytes than 64 bits count, whole or with a suffix.
+        &[
+            "service",
+            "enable",
+            "com.example.app",
+            "--memory-max",
+            "18446744073709551616",
+        ],
+        &[
+            "service",
+            "enable",
+            "com.example.app",
+            "--memory-max",
+            "9999999999999999999T",
+        ],
         &[
             "service",
             "enable",
@@ -659,6 +684,39 @@ fn specifiers_in_paths_are_escaped() {
     let output = scratch.uxdroid(&["service", "status", "com.example.app"]);
     assert!(
         stdout(&output).contains(&format!("\ndata: {raw}\n")),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn enabling_again_without_on_login_stops_the_start_at_login() {
+    let scratch = Scratch::new("login-again");
+    let data = scratch.path("data");
+    scratch.install(&data, &[]);
+    let enable = |extra: &[&str]| {
+        let mut args = vec![
+            "service",
+            "enable",
+            "com.example.app",
+            "--data-dir",
+            data.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        scratch.uxdroid(&args)
+    };
+    assert_eq!(enable(&["--on-login"]).status.code(), Some(0));
+    // What `systemctl --user enable` of the service linked.
+    let units = scratch.units();
+    let link = units.join("default.target.wants/uxdroid-com.example.app@default.service");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(units.join("uxdroid-com.example.app@default.service"), &link)
+        .unwrap();
+    let output = enable(&[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(std::fs::symlink_metadata(&link).is_err(), "still linked");
+    assert!(
+        stdout(&output).contains(&format!("removed {}\n", link.display())),
         "{}",
         stdout(&output)
     );
