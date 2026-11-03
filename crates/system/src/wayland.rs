@@ -508,7 +508,12 @@ impl Drop for Window {
             return;
         };
         let key = self.key();
-        if let Some(at) = display.state.frames.iter().position(|surface| *surface == key) {
+        if let Some(at) = display
+            .state
+            .frames
+            .iter()
+            .position(|surface| *surface == key)
+        {
             display.state.frames.remove(at);
             vsync::frame_dropped();
         }
