@@ -32,11 +32,18 @@ fn callbacks_come_once_per_period_at_the_servers_pace() {
             out.fill(0.1);
             let mut times = seen.lock().unwrap();
             times.push(Instant::now());
-            if times.len() == 100 { Flow::Stop } else { Flow::Continue }
+            if times.len() == 100 {
+                Flow::Stop
+            } else {
+                Flow::Continue
+            }
         })
         .unwrap();
         output.start();
-        assert_eq!(output.wait_while(State::Playing, Duration::from_secs(5)), State::Stopped);
+        assert_eq!(
+            output.wait_while(State::Playing, Duration::from_secs(5)),
+            State::Stopped
+        );
         let latency = output.latency();
         drop(output);
         let times = times.lock().unwrap();
@@ -48,7 +55,10 @@ fn callbacks_come_once_per_period_at_the_servers_pace() {
             period > Duration::from_millis(8) && period < Duration::from_millis(12),
             "{rate} Hz: a callback every {period:?}"
         );
-        assert!(latency < Duration::from_millis(60), "{rate} Hz: latency {latency:?}");
+        assert!(
+            latency < Duration::from_millis(60),
+            "{rate} Hz: latency {latency:?}"
+        );
     }
 }
 
@@ -67,5 +77,8 @@ fn a_recording_arrives_at_the_servers_pace() {
     assert_eq!(input.read(&mut samples, true), 8000);
     let took = started.elapsed();
     // Half a second of sound takes half a second to record.
-    assert!(took > Duration::from_millis(400) && took < Duration::from_millis(800), "{took:?}");
+    assert!(
+        took > Duration::from_millis(400) && took < Duration::from_millis(800),
+        "{took:?}"
+    );
 }
