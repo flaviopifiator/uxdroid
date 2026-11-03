@@ -12,12 +12,14 @@
 //! bytes read as an error, never as memory past the end, and nothing allocates more than the data
 //! already holds. Buffers grow as Android's do, by half of what they need, from 128 bytes.
 
+mod jni;
 
 use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
+pub use jni::register_natives;
 
 /// A `status_t` from `utils/Errors.h`.
 pub type Status = i32;

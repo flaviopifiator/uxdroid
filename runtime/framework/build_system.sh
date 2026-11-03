@@ -44,6 +44,8 @@ done
 mkdir -p "$RUNTIME/samples/framework"
 compile smoke "$RUNTIME/samples/framework/smoke.jar" "PCL[$FRAMEWORK:$RUNTIME/framework/uxdroid-system.jar]" \
     "$ALL:$W/system" /work/runtime/framework/samples/FrameworkSmoke.java
+compile parcel "$RUNTIME/samples/framework/parcel.jar" "PCL[$FRAMEWORK:$RUNTIME/framework/uxdroid-system.jar]" \
+    "$ALL:$W/system" /work/runtime/framework/samples/ParcelSmoke.java
 
 # Sample apps built as the SDK would: resources, assets and manifest by aapt2 against framework-res.apk,
 # code against the framework jar. They know nothing about uxdroid. The NDK sample's native library is
