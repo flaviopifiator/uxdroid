@@ -2,7 +2,7 @@
 
 Run Android APKs as native Linux processes, with no emulator, no container and no Android system image.
 
-**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Milestone 4, AOSP's own framework below real apps, is in progress: RustDesk's x86_64 build shows its first Flutter screen through `dev.uxdroid.system.Launcher` and takes clicks, touch and typed text from the Wayland seat. See [the architecture](docs/architecture.md) for the design and roadmap.
+**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Milestone 4, AOSP's own framework below real apps, is in progress: RustDesk's x86_64 build shows its first Flutter screen through `dev.uxdroid.system.Launcher` and takes clicks, touch and typed text from the Wayland seat. Of a corpus of five F-Droid apps, Loop Habit Tracker, Markor, Aegis and Mindustry (through `GLSurfaceView`) show their first screens; AnkiDroid shows its deck list under a fatal error dialog, because no WebView provider exists yet. See [the architecture](docs/architecture.md) for the design and roadmap.
 
 ## Quick path
 
