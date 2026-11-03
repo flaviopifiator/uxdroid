@@ -157,8 +157,20 @@ fn start(package: &str) -> Result<jint, String> {
     }
     let profile = super::profile_from_env()?;
     let dir = super::control_dir()?;
-    let listener = match server::bind_instance(&dir, package, &profile)? {
+    // Started by systemd through the app's socket unit: its socket is served, not bound again.
+    let bound = match server::activated(&dir, package, &profile)? {
+        Some(listener) => Bound::Listening(listener),
+        None => server::bind_instance(&dir, package, &profile)?,
+    };
+    let listener = match bound {
         Bound::Listening(listener) => listener,
+        Bound::Managed => {
+            return Err(format!(
+                "{} belongs to the app's systemd socket unit; start the app through it, \
+                 with uxdroid app {package} start",
+                super::instance_socket(&dir, package, &profile)?.display()
+            ));
+        }
         Bound::Owned => {
             return Err(format!(
                 "{} is served by another instance of {package}, over another data directory; \
@@ -371,10 +383,30 @@ fn call_running(package: &str, intent: &str, deadline: Instant) -> Result<Value,
     }
 }
 
+/// `static native boolean activated()`: whether a service manager passed this process its control
+/// socket, so that a launch cannot be handed to another process through it.
+unsafe extern "system" fn activated(_env: *mut JNIEnv, _class: jclass) -> jboolean {
+    let read = |name: &str| std::env::var(name).ok();
+    let (pid, fds, names) = (
+        read("LISTEN_PID"),
+        read("LISTEN_FDS"),
+        read("LISTEN_FDNAMES"),
+    );
+    matches!(
+        server::listen_fd(
+            std::process::id(),
+            pid.as_deref(),
+            fds.as_deref(),
+            names.as_deref()
+        ),
+        Ok(Some(_))
+    )
+}
+
 /// # Safety
 /// `env` must be the calling thread's JNI environment.
 pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
-    let methods: [Method; 7] = [
+    let methods: [Method; 8] = [
         (c"claim", c"(Ljava/lang/String;)Z", f!(claim)),
         (c"serve", c"(Ljava/lang/String;)I", f!(serve)),
         (c"take", c"()[Ljava/lang/String;", f!(take)),
@@ -384,6 +416,7 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
             f!(answer),
         ),
         (c"close", c"()V", f!(close)),
+        (c"activated", c"()Z", f!(activated)),
         (
             c"intent",
             c"(Ljava/lang/String;)Ljava/lang/String;",

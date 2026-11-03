@@ -9,6 +9,8 @@
 //! `$XDG_RUNTIME_DIR/uxdroid`, or `/tmp/uxdroid-<uid>` without one. Each connection's peer must be the
 //! same user. The protocol is in `protocol`; `server` serves it and `client` calls it.
 
+#[cfg(test)]
+mod activation_tests;
 pub mod client;
 mod java;
 pub mod protocol;

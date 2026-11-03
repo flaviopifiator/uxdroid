@@ -38,6 +38,9 @@ final class Control implements MessageQueue.OnFileDescriptorEventListener {
     /** The intent as the protocol takes it, checked, or an IllegalArgumentException. */
     static native String intent(String json);
 
+    /** Whether systemd started this process through the app's socket unit and passed it the socket. */
+    static native boolean activated();
+
     /** Hands a launch to the running instance and returns its answer, or throws IllegalStateException. */
     static native String forward(String packageName, String intent, int timeoutMs);
 

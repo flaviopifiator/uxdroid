@@ -77,6 +77,7 @@ public final class Launcher {
         if (app == null) app = App.parse(apk, activityName);
         String packageName = app.application.packageName;
         if (!claimInstance(packageName)) {
+            if (Control.activated()) refuseActivation(packageName);
             forward(packageName, intent);
         }
         App started = app;
@@ -122,6 +123,19 @@ public final class Launcher {
             System.err.println("uxdroid: " + packageName + " runs without its instance lock: " + e.getMessage());
             return true;
         }
+    }
+
+    /**
+     * Exit status of a service start that finds the app already running outside its service; the units
+     * uxdroid service writes do not restart on it. The socket systemd passed is this process's own, so
+     * the launch cannot be handed over through it.
+     */
+    static final int EXIT_RUNNING_OUTSIDE_SERVICE = 75;
+
+    private static void refuseActivation(String packageName) {
+        System.err.println("uxdroid: " + packageName + " is already running over " + dataRoot()
+                + " outside its service; stop it with uxdroid app " + packageName + " stop, then start the service");
+        System.exit(EXIT_RUNNING_OUTSIDE_SERVICE);
     }
 
     /** Another process runs the app over this data directory: it takes this launch, and this one exits. */
