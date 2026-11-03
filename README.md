@@ -91,6 +91,9 @@ docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
 docker compose run --rm -T dev bash /work/runtime/framework/audio_smoke.sh
 # Wayland pointer, touch and keyboard input to an SDK-built APK's Views, through a scripted seat.
 docker compose run --rm -T dev bash /work/runtime/framework/input_smoke.sh
+# Composition through a scripted compositor: an app's own layer changed by one atomic transaction,
+# damage-only redraws, a dialog and a popup as subsurfaces, a resize and a close.
+docker compose run --rm -T dev bash /work/runtime/framework/compose_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli

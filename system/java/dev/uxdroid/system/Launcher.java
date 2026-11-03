@@ -226,6 +226,31 @@ public final class Launcher {
         private final boolean once;
         private final java.util.Map<String, android.content.IContentProvider> providers = new java.util.HashMap<>();
 
+        private static IApplicationThread launched;
+        private static final java.util.List<IBinder> tokens = new java.util.ArrayList<>();
+
+        /**
+         * The display's toplevel was closed, as a desktop closes a task: each activity is paused,
+         * stopped and destroyed as finishing, then the process exits.
+         */
+        static void closeTask() {
+            if (launched == null) System.exit(0);
+            try {
+                for (IBinder token : tokens) {
+                    ClientTransaction destroy = new ClientTransaction(launched);
+                    destroy.addTransactionItem(new android.app.servertransaction.DestroyActivityItem(token, true));
+                    launched.scheduleTransaction(destroy);
+                }
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
+            // Transactions run in order on the main thread, so this runs after the last destroy.
+            new android.os.Handler(Looper.getMainLooper()).post(() -> {
+                System.out.println("uxdroid: the window was closed; activities destroyed");
+                System.exit(0);
+            });
+        }
+
         ActivityManager(App app, boolean once) {
             this.app = app;
             this.once = once;
@@ -266,6 +291,8 @@ public final class Launcher {
             }
             // As ActivityTaskManager does for a launch in front: resume it, which adds its window.
             launch.addTransactionItem(new ResumeActivityItem(token, true, false));
+            launched = thread;
+            tokens.add(token);
             thread.scheduleTransaction(launch);
         }
 
@@ -419,6 +446,12 @@ public final class Launcher {
         config.windowConfiguration.setBounds(bounds);
         config.windowConfiguration.setAppBounds(bounds);
         config.windowConfiguration.setMaxBounds(bounds);
+        int density = config.densityDpi > 0 ? config.densityDpi : DisplayService.DENSITY;
+        config.screenWidthDp = bounds.width() * android.util.DisplayMetrics.DENSITY_DEFAULT / density;
+        config.screenHeightDp = bounds.height() * android.util.DisplayMetrics.DENSITY_DEFAULT / density;
+        config.smallestScreenWidthDp = Math.min(config.screenWidthDp, config.screenHeightDp);
+        config.orientation = bounds.width() > bounds.height()
+                ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
         return config;
     }
 

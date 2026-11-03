@@ -30,7 +30,8 @@ use crate::handles::Handles;
 use crate::input::natives::{Channel, channel_of};
 use crate::java::{self, Field, Pending};
 use crate::scene::{self, Change, Composer, Transaction};
-use crate::wayland::Window;
+use crate::wayland::{self, Window};
+use crate::windows::{Placement, Source, Stack};
 use crate::{Method, java_string, register, throw};
 
 /// Bounds a child layer's Bitmap, which no compositor sizes.
@@ -50,6 +51,10 @@ pub struct Platform {
     input: Mutex<Option<Channel>>,
     /// Transactions merged into the next frame of this layer's buffer queue.
     pending: Mutex<Transaction<Platform>>,
+    /// Where the window manager put a window's own layer on the display, and its flags.
+    placement: Mutex<Option<Placement>>,
+    /// The window manager removed this layer's window.
+    closed: AtomicBool,
 }
 
 type Layer = scene::Layer<Platform>;
@@ -91,12 +96,6 @@ struct Target {
     dirty: Rect,
     /// Whether the next frame must be drawn whole, as the first one is.
     fresh: bool,
-    /// The MessageQueue watching the window's connection and the FileDescriptor it watches, global
-    /// references or null.
-    queue: jobject,
-    descriptor: jobject,
-    /// The id the queue's listener knows the layer by.
-    watched: jlong,
 }
 
 // SAFETY: the window's mapping is plain process memory that only this Target uses, its Wayland
@@ -106,39 +105,26 @@ unsafe impl Send for Target {}
 
 impl Drop for Target {
     fn drop(&mut self) {
-        // The Looper must stop watching the connection before the window closes it.
-        if !self.queue.is_null()
-            && let Some(env) = java::attached_env()
-            // SAFETY: an attached thread's environment.
-            && !unsafe { ((**env).v1_2.ExceptionCheck)(env) }
-        {
-            let args = [jvalue { l: self.descriptor }];
-            // SAFETY: as above, with this Target's own references.
-            let removed = unsafe {
-                java::call_void(
-                    env,
-                    self.queue,
-                    c"removeOnFileDescriptorEventListener",
-                    c"(Ljava/io/FileDescriptor;)V",
-                    &args,
-                )
-            };
-            if removed.is_err() {
-                // SAFETY: as above.
-                unsafe { ((**env).v1_1.ExceptionClear)(env) };
-            }
+        if let Some(window) = &self.window {
+            let changes = locked(&STACK).remove(window.key());
+            locked(&WINDOWS).retain(|(key, _)| *key != window.key());
+            send(changes);
         }
-        drop(WATCHED.remove(self.watched));
-        // SAFETY: these are this Target's own global references or null.
-        unsafe { java::delete_globals(&[self.bitmap, self.colors, self.queue, self.descriptor]) };
+        // SAFETY: these are this Target's own global references.
+        unsafe { java::delete_globals(&[self.bitmap, self.colors]) };
     }
 }
 
 static SURFACE_CONTROLS: Handles<Arc<Layer>> = Handles::new();
 static SURFACES: Handles<Arc<Layer>> = Handles::new();
 static QUEUES: Handles<Arc<Mutex<Option<Arc<Layer>>>>> = Handles::new();
-/// Root layers whose window a Looper watches, by the id its listener holds.
-static WATCHED: Handles<Weak<Layer>> = Handles::new();
+/// The display's windows, for input: where each is, and which layer each surface shows.
+static STACK: Mutex<Stack<u32>> = Mutex::new(Stack::new());
+static WINDOWS: Mutex<Vec<(u32, Weak<Layer>)>> = Mutex::new(Vec::new());
+/// Whether a Looper watches the display's connection.
+static WATCHING: AtomicBool = AtomicBool::new(false);
+/// `dev.uxdroid.system.WindowService`, for what the compositor asks of the display.
+static WINDOW_SERVICE_CLASS: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 /// `dev.uxdroid.system.WindowInput`, found when the natives are registered.
 static WINDOW_INPUT_CLASS: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 /// `MessageQueue.OnFileDescriptorEventListener.EVENT_INPUT`.
@@ -671,71 +657,125 @@ unsafe extern "system" fn surface_height(
     drawn_size(surface).1
 }
 
+/// A Bitmap and the array its pixels cross into Rust through, both global references.
+///
+/// # Safety
+/// `env` must be the calling thread's JNI environment.
+unsafe fn bitmap(
+    env: *mut JNIEnv,
+    width: i32,
+    height: i32,
+) -> Result<(jobject, jintArray), Failure> {
+    // SAFETY: as above.
+    unsafe {
+        let class = java::find_class(env, c"android/graphics/Bitmap")?;
+        let config_class = java::find_class(env, c"android/graphics/Bitmap$Config")?;
+        let argb = java::static_object_field(
+            env,
+            config_class,
+            c"ARGB_8888",
+            c"Landroid/graphics/Bitmap$Config;",
+        )?;
+        let bitmap = java::call_static_object(
+            env,
+            class,
+            c"createBitmap",
+            c"(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;",
+            &[
+                jvalue { i: width },
+                jvalue { i: height },
+                jvalue { l: argb },
+            ],
+        )?;
+        java::delete_local(env, argb);
+        let colors = ((**env).v1_1.NewIntArray)(env, width * height);
+        if colors.is_null() {
+            java::delete_local(env, bitmap);
+            return Err(Failure::Pending);
+        }
+        Ok((java::global(env, bitmap), java::global(env, colors)))
+    }
+}
+
+fn checked(width: i32, height: i32) -> Result<(), Failure> {
+    if !(1..=MAX_CHILD_DIMENSION).contains(&width) || !(1..=MAX_CHILD_DIMENSION).contains(&height) {
+        return Err(Failure::Message(format!("bad layer size {width}x{height}")));
+    }
+    Ok(())
+}
+
 impl Target {
-    /// Opens the window of a window's own layer. The compositor may choose another size, which the
-    /// Bitmap follows. Any other layer gets only the Bitmap, of the size its queue set.
+    /// Opens the window of a window's own layer: the display's toplevel, whose size the compositor
+    /// may choose and the Bitmap follows, or a subsurface where the window manager placed it. Any
+    /// other layer gets only the Bitmap, of the size its queue set.
     ///
     /// # Safety
     /// `env` must be the calling thread's JNI environment.
     unsafe fn open(env: *mut JNIEnv, layer: &Arc<Layer>) -> Result<Target, Failure> {
         let (width, height) = layer.size();
+        let placement = *locked(&layer.extra.placement);
         let window = if layer.owns_window() {
-            Some(
-                Window::open(&layer.name, width, height)
-                    .map_err(|error| Failure::Message(format!("cannot open a window: {error}")))?,
-            )
-        } else {
-            if !(1..=MAX_CHILD_DIMENSION).contains(&width)
-                || !(1..=MAX_CHILD_DIMENSION).contains(&height)
-            {
-                return Err(Failure::Message(format!("bad layer size {width}x{height}")));
+            if layer.extra.closed.load(Ordering::Acquire) {
+                return Err(Failure::Message(format!("{} was removed", layer.name)));
             }
+            let (x, y) = placement.map_or((0, 0), |placement| placement.surface());
+            let window = Window::open(&layer.name, width, height, x, y)
+                .map_err(|error| Failure::Message(format!("cannot open a window: {error}")))?;
+            let key = window.key();
+            locked(&WINDOWS).push((key, Arc::downgrade(layer)));
+            let placement = placement.unwrap_or(Placement {
+                x: 0,
+                y: 0,
+                width: window.width(),
+                height: window.height(),
+                flags: 0,
+                inset_left: 0,
+                inset_top: 0,
+            });
+            let changes = locked(&STACK).place(key, placement);
+            send(changes);
+            Some(window)
+        } else {
+            checked(width, height)?;
             None
         };
         let (width, height) = window
             .as_ref()
             .map_or((width, height), |window| (window.width(), window.height()));
         // SAFETY: as above.
-        unsafe {
-            let class = java::find_class(env, c"android/graphics/Bitmap")?;
-            let config_class = java::find_class(env, c"android/graphics/Bitmap$Config")?;
-            let argb = java::static_object_field(
-                env,
-                config_class,
-                c"ARGB_8888",
-                c"Landroid/graphics/Bitmap$Config;",
-            )?;
-            let bitmap = java::call_static_object(
-                env,
-                class,
-                c"createBitmap",
-                c"(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;",
-                &[
-                    jvalue { i: width },
-                    jvalue { i: height },
-                    jvalue { l: argb },
-                ],
-            )?;
-            java::delete_local(env, argb);
-            let colors = ((**env).v1_1.NewIntArray)(env, width * height);
-            if colors.is_null() {
-                java::delete_local(env, bitmap);
-                return Err(Failure::Pending);
-            }
-            Ok(Target {
-                window,
-                composer: Composer::default(),
-                bitmap: java::global(env, bitmap),
-                colors: java::global(env, colors),
-                width,
-                height,
-                dirty: Rect::sized(width, height),
-                fresh: true,
-                queue: std::ptr::null_mut(),
-                descriptor: std::ptr::null_mut(),
-                watched: 0,
-            })
+        let (bitmap, colors) = unsafe { bitmap(env, width, height)? };
+        Ok(Target {
+            window,
+            composer: Composer::default(),
+            bitmap,
+            colors,
+            width,
+            height,
+            dirty: Rect::sized(width, height),
+            fresh: true,
+        })
+    }
+
+    /// Follows a new size the framework asked for, such as after the display was resized: a new
+    /// Bitmap and window buffer, and a whole frame next.
+    ///
+    /// # Safety
+    /// `env` must be the calling thread's JNI environment.
+    unsafe fn reshape(&mut self, env: *mut JNIEnv, width: i32, height: i32) -> Result<(), Failure> {
+        checked(width, height)?;
+        if let Some(window) = self.window.as_mut() {
+            window
+                .resize(width, height)
+                .map_err(|error| Failure::Message(format!("cannot resize a window: {error}")))?;
         }
+        // SAFETY: as above.
+        let (bitmap, colors) = unsafe { bitmap(env, width, height)? };
+        // SAFETY: the old references are this Target's own.
+        unsafe { java::delete_globals(&[self.bitmap, self.colors]) };
+        (self.bitmap, self.colors) = (bitmap, colors);
+        (self.width, self.height) = (width, height);
+        self.fresh = true;
+        Ok(())
     }
 }
 
@@ -773,14 +813,21 @@ unsafe fn lock(
     let mut target = layer.target();
     if target.is_none() {
         // SAFETY: as above.
-        let mut opened = unsafe { Target::open(env, layer)? };
-        // SAFETY: as above.
-        unsafe { watch(env, layer, &mut opened)? };
+        let opened = unsafe { Target::open(env, layer)? };
+        if opened.window.is_some() {
+            // SAFETY: as above.
+            unsafe { watch(env)? };
+        }
         *target = Some(opened);
     }
     let Some(target) = target.as_mut() else {
         return Err(Failure::Message("no window".into()));
     };
+    let (width, height) = layer.size();
+    if (width, height) != (target.width, target.height) && width > 0 && height > 0 {
+        // SAFETY: as above.
+        unsafe { target.reshape(env, width, height)? };
+    }
     // SAFETY: as above; the Bitmap is mutable and lives as long as the Target.
     unsafe {
         // The Bitmap keeps the last frame, so only the part asked for is redrawn, as Android's
@@ -810,96 +857,163 @@ unsafe fn lock(
     Ok(())
 }
 
-/// Has the Looper of this thread watch a root layer's window, so its input and the compositor's
-/// pings are read while nothing draws.
+/// Has the Looper of this thread watch the display's connection, once for the process, so input
+/// and the compositor's pings are read while nothing draws.
 ///
 /// # Safety
 /// `env` must be the calling thread's JNI environment.
-unsafe fn watch(env: *mut JNIEnv, layer: &Arc<Layer>, target: &mut Target) -> Result<(), Failure> {
-    let Some(window) = target.window.as_ref() else {
+unsafe fn watch(env: *mut JNIEnv) -> Result<(), Failure> {
+    let Some(fd) = wayland::fd() else {
         return Ok(());
     };
+    if WATCHING.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
     let class = WINDOW_INPUT_CLASS.load(Ordering::Acquire) as jclass;
     // SAFETY: as above; the class reference is global and the signatures match.
-    unsafe {
-        let looper = java::find_class(env, c"android/os/Looper")?;
-        let queue =
-            java::call_static_object(env, looper, c"myQueue", c"()Landroid/os/MessageQueue;", &[]);
-        java::delete_local(env, looper);
-        // A thread with no Looper draws, but nothing reads its window between frames.
-        let queue = match queue {
-            Ok(queue) if !queue.is_null() => queue,
-            _ => {
-                crate::clear_exception(env);
-                return Ok(());
-            }
-        };
-        let descriptor_class = java::find_class(env, c"java/io/FileDescriptor")?;
-        let descriptor = java::new_object(env, descriptor_class, c"()V", &[])?;
-        java::delete_local(env, descriptor_class);
-        java::set_field(env, descriptor, c"descriptor", Field::Int(window.fd()))?;
-        target.queue = java::global(env, queue);
-        target.descriptor = java::global(env, descriptor);
-        target.watched = WATCHED.add(Arc::downgrade(layer));
-        let listener = java::new_object(env, class, c"(J)V", &[jvalue { j: target.watched }])?;
-        let args = [
-            jvalue {
-                l: target.descriptor,
-            },
-            jvalue { i: EVENT_INPUT },
-            jvalue { l: listener },
-        ];
-        let added = java::call_void(
-            env,
-            target.queue,
-            c"addOnFileDescriptorEventListener",
-            c"(Ljava/io/FileDescriptor;ILandroid/os/MessageQueue$OnFileDescriptorEventListener;)V",
-            &args,
-        );
-        java::delete_local(env, listener);
-        if added.is_err() {
-            // Not watched: Drop must not remove a listener that was never added.
-            java::delete_globals(&[target.queue]);
-            target.queue = std::ptr::null_mut();
-            added?;
+    let watched = unsafe {
+        (|| -> Result<bool, Pending> {
+            let looper = java::find_class(env, c"android/os/Looper")?;
+            let queue = java::call_static_object(
+                env,
+                looper,
+                c"myQueue",
+                c"()Landroid/os/MessageQueue;",
+                &[],
+            );
+            java::delete_local(env, looper);
+            // A thread with no Looper draws, but nothing reads the display between frames.
+            let queue = match queue {
+                Ok(queue) if !queue.is_null() => queue,
+                _ => {
+                    crate::clear_exception(env);
+                    return Ok(false);
+                }
+            };
+            let descriptor_class = java::find_class(env, c"java/io/FileDescriptor")?;
+            let descriptor = java::new_object(env, descriptor_class, c"()V", &[])?;
+            java::delete_local(env, descriptor_class);
+            java::set_field(env, descriptor, c"descriptor", Field::Int(fd))?;
+            let listener = java::new_object(env, class, c"(J)V", &[jvalue { j: 0 }])?;
+            let args = [
+                jvalue { l: descriptor },
+                jvalue { i: EVENT_INPUT },
+                jvalue { l: listener },
+            ];
+            java::call_void(
+                env,
+                queue,
+                c"addOnFileDescriptorEventListener",
+                c"(Ljava/io/FileDescriptor;ILandroid/os/MessageQueue$OnFileDescriptorEventListener;)V",
+                &args,
+            )?;
+            java::delete_local(env, listener);
+            Ok(true)
+        })()
+    };
+    match watched {
+        Ok(true) => Ok(()),
+        // Another thread with a Looper may watch it later.
+        Ok(false) => {
+            WATCHING.store(false, Ordering::Release);
+            Ok(())
+        }
+        Err(Pending) => {
+            WATCHING.store(false, Ordering::Release);
+            Err(Failure::Pending)
         }
     }
-    Ok(())
 }
 
-/// Sends a root window's new input down its layer's channel.
-fn route(window: &mut Window, layer: &Layer) {
-    let events = window.take_events();
+/// Sends events to the channels of the windows they are for.
+fn send(events: Vec<(u32, crate::input::Event)>) {
+    for (key, event) in events {
+        let layer = locked(&WINDOWS)
+            .iter()
+            .find(|(window, _)| *window == key)
+            .and_then(|(_, layer)| layer.upgrade());
+        if let Some(layer) = layer
+            && let Some(channel) = locked(&layer.extra.input).as_ref()
+        {
+            channel.send(&event);
+        }
+    }
+}
+
+/// Gives the display's new input to the windows Android would give it to.
+fn route() {
+    let events = wayland::take_events();
     if events.is_empty() {
         return;
     }
-    let input = layer.extra.input.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(channel) = input.as_ref() {
-        for event in &events {
-            channel.send(event);
+    let routed: Vec<(u32, crate::input::Event)> = {
+        let mut stack = locked(&STACK);
+        events
+            .into_iter()
+            .flat_map(|(surface, event)| {
+                let source = surface.map_or(Source::Focused, Source::Surface);
+                stack.route(source, event)
+            })
+            .collect()
+    };
+    send(routed);
+}
+
+/// Hands what the compositor asked of the display to the window manager, on a Looper thread.
+///
+/// # Safety
+/// `env` must be the calling thread's JNI environment.
+unsafe fn act(env: *mut JNIEnv) {
+    let requests = wayland::take_requests();
+    let class = WINDOW_SERVICE_CLASS.load(Ordering::Acquire) as jclass;
+    if class.is_null() {
+        return;
+    }
+    // SAFETY: as above; the class reference is global and both methods are static.
+    unsafe {
+        if let Some((width, height)) = requests.resize {
+            let args = [jvalue { i: width }, jvalue { i: height }];
+            if java::call_static_void(env, class, c"displayResized", c"(II)V", &args).is_err() {
+                crate::clear_exception(env);
+                eprintln!("uxdroid: the window manager failed to resize the display");
+            }
+        }
+        if requests.close
+            && java::call_static_void(env, class, c"displayClosed", c"()V", &[]).is_err()
+        {
+            crate::clear_exception(env);
+            eprintln!("uxdroid: the window manager failed to close the display");
         }
     }
 }
 
-/// `WindowInput.dispatch(long)`: the window's connection is readable, on the Looper that drew it.
+/// `WindowInput.dispatch(long)`: the display's connection is readable, on the Looper watching it.
 unsafe extern "system" fn window_dispatch(
-    _env: *mut JNIEnv,
+    env: *mut JNIEnv,
     _class: jclass,
-    watched: jlong,
+    _watched: jlong,
 ) -> jint {
-    let Some(layer) = WATCHED.get(watched).and_then(|layer| layer.upgrade()) else {
-        return 0;
-    };
-    let mut target = layer.target();
-    let Some(window) = target.as_mut().and_then(|target| target.window.as_mut()) else {
-        return 0;
-    };
-    if let Err(error) = window.dispatch() {
-        eprintln!("uxdroid: the connection of {} failed: {error}", layer.name);
+    if let Err(error) = wayland::dispatch() {
+        eprintln!("uxdroid: the connection to the compositor failed: {error}");
         return 0;
     }
-    route(window, &layer);
+    route();
+    // SAFETY: ART passes a valid environment.
+    unsafe { act(env) };
     EVENT_INPUT
+}
+
+/// The layer of a `SurfaceControl` object.
+///
+/// # Safety
+/// `env` must be the calling thread's JNI environment, and `control` a SurfaceControl or null.
+unsafe fn layer_of(env: *mut JNIEnv, control: jobject) -> Option<Arc<Layer>> {
+    if control.is_null() {
+        return None;
+    }
+    // SAFETY: as above.
+    let handle = unsafe { java::long_field(env, control, c"mNativeObject") }.ok()?;
+    SURFACE_CONTROLS.get(handle)
 }
 
 /// `WindowInput.attach(SurfaceControl, InputChannel)`: the window manager gives a window's layer the
@@ -910,19 +1024,69 @@ unsafe extern "system" fn window_attach(
     control: jobject,
     channel: jobject,
 ) {
-    if control.is_null() {
-        return;
-    }
     // SAFETY: ART passes a valid environment, a SurfaceControl and an InputChannel or null.
-    let Ok(handle) = (unsafe { java::long_field(env, control, c"mNativeObject") }) else {
-        return;
-    };
-    let Some(layer) = SURFACE_CONTROLS.get(handle) else {
+    let Some(layer) = (unsafe { layer_of(env, control) }) else {
         return;
     };
     // SAFETY: as above.
     let channel = unsafe { channel_of(env, channel) };
-    *layer.extra.input.lock().unwrap_or_else(|p| p.into_inner()) = channel;
+    *locked(&layer.extra.input) = channel;
+}
+
+/// `WindowInput.close(SurfaceControl)`: the window manager removed the window, whose surface leaves
+/// the display at once.
+unsafe extern "system" fn window_close(env: *mut JNIEnv, _class: jclass, control: jobject) {
+    // SAFETY: ART passes a valid environment and a SurfaceControl or null.
+    let Some(layer) = (unsafe { layer_of(env, control) }) else {
+        return;
+    };
+    layer.extra.closed.store(true, Ordering::Release);
+    let target = layer.target().take();
+    drop(target);
+}
+
+/// `WindowInput.place(SurfaceControl, int, int, int, int, int, int, int)`: where the window manager
+/// put a window's frame on the display, its `LayoutParams` flags, and how far its surface starts
+/// before the frame.
+unsafe extern "system" fn window_place(
+    env: *mut JNIEnv,
+    _class: jclass,
+    control: jobject,
+    x: jint,
+    y: jint,
+    width: jint,
+    height: jint,
+    flags: jint,
+    inset_left: jint,
+    inset_top: jint,
+) {
+    // SAFETY: ART passes a valid environment and a SurfaceControl or null.
+    let Some(layer) = (unsafe { layer_of(env, control) }) else {
+        return;
+    };
+    let placement = Placement {
+        x,
+        y,
+        width,
+        height,
+        flags,
+        inset_left,
+        inset_top,
+    };
+    *locked(&layer.extra.placement) = Some(placement);
+    let key = {
+        let target = layer.target();
+        let Some(window) = target.as_ref().and_then(|target| target.window.as_ref()) else {
+            return;
+        };
+        let (x, y) = placement.surface();
+        if let Err(error) = window.place(x, y) {
+            eprintln!("uxdroid: cannot move {}: {error}", layer.name);
+        }
+        window.key()
+    };
+    let changes = locked(&STACK).place(key, placement);
+    send(changes);
 }
 
 /// Composes what changed in a window from its layers' last frames, and shows it.
@@ -943,7 +1107,7 @@ fn present(target: &mut Target, window_layer: &Arc<Layer>) -> Result<(), Failure
         .present(damage)
         .map_err(|error| Failure::Message(format!("cannot present a frame: {error}")))?;
     // The round trip may have read input, which the Looper will not see as readable.
-    route(window, window_layer);
+    route();
     Ok(())
 }
 
@@ -1211,12 +1375,22 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
         (c"nativeGetWidth", c"(J)I", f!(surface_width)),
         (c"nativeGetHeight", c"(J)I", f!(surface_height)),
     ];
-    let input: [Method; 2] = [
+    let input: [Method; 4] = [
+        (
+            c"close",
+            c"(Landroid/view/SurfaceControl;)V",
+            f!(window_close),
+        ),
         (c"dispatch", c"(J)I", f!(window_dispatch)),
         (
             c"attach",
             c"(Landroid/view/SurfaceControl;Landroid/view/InputChannel;)V",
             f!(window_attach),
+        ),
+        (
+            c"place",
+            c"(Landroid/view/SurfaceControl;IIIIIII)V",
+            f!(window_place),
         ),
     ];
     // SAFETY: each table matches the framework's declarations in Android 16.
@@ -1228,6 +1402,9 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
         let class = java::find_class(env, c"dev/uxdroid/system/WindowInput")
             .map_err(|Pending| "class dev/uxdroid/system/WindowInput not found".to_string())?;
         WINDOW_INPUT_CLASS.store(java::global(env, class).cast(), Ordering::Release);
+        let class = java::find_class(env, c"dev/uxdroid/system/WindowService")
+            .map_err(|Pending| "class dev/uxdroid/system/WindowService not found".to_string())?;
+        WINDOW_SERVICE_CLASS.store(java::global(env, class).cast(), Ordering::Release);
     }
     Ok(())
 }

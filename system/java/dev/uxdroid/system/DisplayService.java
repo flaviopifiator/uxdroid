@@ -5,8 +5,9 @@ import android.view.Display;
 import android.view.DisplayInfo;
 
 /**
- * The handler of IDisplayManager: one display, the default 160 dpi screen of 400 by 700 dp that
- * AppContext.systemResources also describes. The window that shows it comes later.
+ * The handler of IDisplayManager: one display, the app's Wayland toplevel. It starts as the default
+ * 160 dpi screen of 400 by 700 dp that AppContext.systemResources also describes, and takes the size
+ * the compositor gives the toplevel.
  */
 public final class DisplayService {
     static final int WIDTH_DP = 400;
@@ -14,8 +15,17 @@ public final class DisplayService {
     static final int DENSITY = DisplayMetrics.DENSITY_DEFAULT;
     private static final float REFRESH_RATE = 60f;
 
-    static int widthPixels() { return WIDTH_DP * DENSITY / DisplayMetrics.DENSITY_DEFAULT; }
-    static int heightPixels() { return HEIGHT_DP * DENSITY / DisplayMetrics.DENSITY_DEFAULT; }
+    private static volatile int width = WIDTH_DP * DENSITY / DisplayMetrics.DENSITY_DEFAULT;
+    private static volatile int height = HEIGHT_DP * DENSITY / DisplayMetrics.DENSITY_DEFAULT;
+
+    static int widthPixels() { return width; }
+    static int heightPixels() { return height; }
+
+    /** The toplevel's new size, in pixels. */
+    static void resize(int widthPixels, int heightPixels) {
+        width = widthPixels;
+        height = heightPixels;
+    }
 
     public int[] getDisplayIds(boolean includeDisabled) {
         return new int[] {Display.DEFAULT_DISPLAY};

@@ -317,3 +317,24 @@ pub unsafe fn int_field(env: *mut JNIEnv, object: jobject, name: &CStr) -> Resul
         Ok((jni.v1_1.GetIntField)(env, object, id))
     }
 }
+
+/// # Safety
+/// As [`call_static_object`], for a static method returning void.
+pub unsafe fn call_static_void(
+    env: *mut JNIEnv,
+    class: jclass,
+    name: &CStr,
+    signature: &CStr,
+    arguments: &[jvalue],
+) -> Result<(), Pending> {
+    // SAFETY: as above.
+    unsafe {
+        let jni = &**env;
+        let id = (jni.v1_1.GetStaticMethodID)(env, class, name.as_ptr(), signature.as_ptr());
+        if id.is_null() {
+            return Err(Pending);
+        }
+        (jni.v1_1.CallStaticVoidMethodA)(env, class, id, arguments.as_ptr());
+        check(env)
+    }
+}

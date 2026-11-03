@@ -28,6 +28,7 @@ pub mod shared_memory;
 mod surface;
 mod vsync;
 mod wayland;
+mod windows;
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_void};
