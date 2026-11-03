@@ -17,6 +17,7 @@ pub mod defaults;
 mod handles;
 mod java;
 mod natives;
+pub mod parcel;
 mod process;
 pub mod properties;
 pub mod shared_memory;

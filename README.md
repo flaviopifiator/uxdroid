@@ -82,6 +82,8 @@ docker compose run --rm -T dev bash /work/runtime/framework/smoke.sh
 docker compose run --rm -T dev bash /work/runtime/framework/app_smoke.sh
 # The same Activity resumed and drawn by AOSP's ViewRootImpl into a Wayland window.
 docker compose run --rm -T dev bash /work/runtime/framework/window_smoke.sh
+# Bundles, Intents, file descriptors and AIDL calls through android.os.Parcel, whose natives are ours.
+docker compose run --rm -T dev bash /work/runtime/framework/parcel_smoke.sh
 # An NDK-built library using liblog, libandroid, libjnigraphics, EGL, GLES and OpenSL ES.
 docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame. Its code is untrusted: sandbox only.

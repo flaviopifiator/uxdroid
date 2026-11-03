@@ -268,6 +268,10 @@ unsafe extern "system" fn clear_identity(env: *mut JNIEnv, class: jclass) -> jlo
     unsafe { ((calling_uid(env, class) as jlong) << 32) | calling_pid(env, class) as u32 as jlong }
 }
 unsafe extern "system" fn restore_identity(_env: *mut JNIEnv, _class: jclass, _token: jlong) {}
+/// No transaction ever arrives from another process, so no thread is handling one.
+unsafe extern "system" fn handling_transaction(_env: *mut JNIEnv, _class: jclass) -> jboolean {
+    false
+}
 
 /// Services live in this process, written in Java: the service manager is how apps find them.
 ///
@@ -403,13 +407,18 @@ pub unsafe fn register_all(env: *mut JNIEnv) -> Result<(), String> {
         (c"currentThreadTimeMicro", c"()J", f!(thread_us)),
         (c"currentTimeMicro", c"()J", f!(now_us)),
     ];
-    let binder: [Method; 6] = [
+    let binder: [Method; 7] = [
         (c"getNativeBBinderHolder", c"()J", f!(binder_holder)),
         (c"getNativeFinalizer", c"()J", f!(binder_finalizer)),
         (c"getCallingPid", c"()I", f!(calling_pid)),
         (c"getCallingUid", c"()I", f!(calling_uid)),
         (c"clearCallingIdentity", c"()J", f!(clear_identity)),
         (c"restoreCallingIdentity", c"(J)V", f!(restore_identity)),
+        (
+            c"isDirectlyHandlingTransactionNative",
+            c"()Z",
+            f!(handling_transaction),
+        ),
     ];
     let binder_internal: [Method; 1] = [(
         c"getContextObject",
@@ -438,6 +447,7 @@ pub unsafe fn register_all(env: *mut JNIEnv) -> Result<(), String> {
             c"android/os/ServiceManagerProxy",
             &service_manager_proxy,
         )?;
+        crate::parcel::register_natives(env)?;
         crate::shared_memory::register_natives(env)?;
         crate::process::register_natives(env)?;
         crate::surface::register_natives(env)?;
