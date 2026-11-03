@@ -6,11 +6,13 @@ trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $*"; tail -15 "$WORK/out" | cut -c1-220; exit 1; }
 
 cargo build -q --release -p uxdroid-system --manifest-path /work/Cargo.toml || fail "build"
+LIBRARY="$(cargo metadata -q --format-version 1 --no-deps --manifest-path /work/Cargo.toml \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')/release/libuxdroid_system.so"
 source /work/runtime/art/run.sh
 export ANDROID_DATA="$WORK/data"
 mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
 CP="$RUNTIME/framework/framework.jar:$RUNTIME/framework/uxdroid-system.jar:$RUNTIME/samples/framework/smoke.jar"
-"$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" FrameworkSmoke "$RUNTIME" /cache/target/release/libuxdroid_system.so \
+"$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" FrameworkSmoke "$RUNTIME" "$LIBRARY" \
     >"$WORK/out" 2>&1 || fail "exit $?"
 
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
@@ -20,5 +22,9 @@ expect "^text [0-9]{3}" "no text was drawn"
 expect "^string OK$" "framework-res.apk was not read"
 expect "^sdk 36 abi x86_64$" "build.prop did not reach android.os.Build"
 expect "^I FrameworkSmoke: log reaches stderr$" "android.util.Log is not ours"
-grep -q "unimplemented native" "$WORK/out" && grep "unimplemented native" "$WORK/out" | head -5
+# A framework TextView, with its services answered in process.
+expect "^view [0-9]{3}x[0-9]{2} [0-9]{3,}$" "the framework's TextView did not draw"
+expect "^unhandled \{.*IWindowManager\.hasNavigationBar" "service calls are not counted"
+# Every native this program reaches is implemented: a default body called here is a regression.
+if grep -q "unimplemented native" "$WORK/out"; then fail "default bodies were called"; fi
 echo "ok: AOSP's framework drew, wrote text and read its resources on uxdroid's ART"

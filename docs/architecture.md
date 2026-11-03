@@ -80,7 +80,7 @@ Writing the `android.*` API ourselves would never end. A spike ran AOSP's real A
 | Logging, properties, clocks, local `Binder` objects | Our natives |
 | System services | In-process proxies of their AIDL interfaces, with no IPC; unimplemented calls return defaults and are counted |
 
-`crates/system` holds our natives and the default bodies: install time lists every framework native in `framework/natives.txt`, and at startup each gets a 32-byte stub that reports its first call and returns zero. `dev.uxdroid.system.Boot` runs the startup order. The spike measured 28 MiB of private dirty memory per process. Most of the rest was clean framework pages, shared between processes.
+`crates/system` holds our natives and the default bodies: install time lists every framework native in `framework/natives.txt`, and at startup each gets a 32-byte stub that reports its first call and returns zero. `dev.uxdroid.system.Boot` runs the startup order. `dev.uxdroid.system.Services` serves each system service as a proxy of its AIDL interface and reports the first call of every method nobody handles, and `AppContext` extends a `DefaultContext` generated from `android.content.Context` at install time. The spike measured 28 MiB of private dirty memory per process. Most of the rest was clean framework pages, shared between processes.
 
 ### Guest architecture stays inside the native bridge
 

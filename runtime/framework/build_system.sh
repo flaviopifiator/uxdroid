@@ -28,7 +28,10 @@ compile() {
         --oat-file="$oat" > "$W/dex2oat.log" 2>&1 || { tail -20 "$W/dex2oat.log"; exit 1; }
 }
 
-find /work/system/java -name '*.java' > "$W/system-sources"
+mkdir -p "$W/generated"
+"$JDK/bin/javap" -p -cp "$ALL" android.content.Context > "$W/context.txt"
+python3 /work/runtime/framework/default_context.py "$W/context.txt" "$W/generated/DefaultContext.java"
+{ find /work/system/java -name '*.java'; echo "$W/generated/DefaultContext.java"; } > "$W/system-sources"
 compile system "$RUNTIME/framework/uxdroid-system.jar" "PCL[$FRAMEWORK]" "$ALL" @"$W/system-sources"
 
 mkdir -p "$RUNTIME/samples/framework"
