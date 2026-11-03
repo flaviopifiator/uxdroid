@@ -18,10 +18,11 @@ FROM base AS dev
 COPY --from=ndk /opt/android-ndk /opt/android-ndk
 
 # Weston's headless backend gives tests a real Wayland compositor. Mesa serves the EGL and GLES that
-# app native code links against, with llvmpipe where there is no GPU.
+# app native code links against, with llvmpipe where there is no GPU. A private PulseAudio server with
+# null devices lets the audio smoke play through the real protocol with no sound card.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends weston python3-minimal \
-        libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri \
+        libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri pulseaudio pulseaudio-utils \
     && rustup component add clippy rustfmt \
     && mkdir -p /cache \
     && chown 1000:1000 /cache

@@ -74,7 +74,7 @@ The window, audio and GPU stay behind this layer, so a later macOS port does not
 
 ### Android's system libraries are signature tables
 
-App libraries name `liblog.so`, `libandroid.so`, `libjnigraphics.so`, `libEGL.so`, `libGLESv2.so`, `libGLESv3.so` and `libOpenSLES.so` in `DT_NEEDED`. None of them is a file. Each is a table of `uxdroid_bridge::table`: every export with its host address and its signature in a closed vocabulary, such as `i32(i32,ptr,ptr,...)` for `__android_log_print` or `ptr` for an object like `SL_IID_ENGINE`. `liblog`'s table is in the bridge, next to the printf machinery it shares with bionic's libc, and every library sees it, as on Android, where `app_process` links it. The others are in `crates/ndk`, and `crates/nativebridge` hands them to the loader before the first app library loads. A library searches its loaded dependencies first, then the tables it needs, then the shims, and a name its table lacks is reported missing like any other. The EGL and GLES tables are generated from the NDK's headers and stubs by `crates/ndk/generate.sh`.
+App libraries name `liblog.so`, `libandroid.so`, `libjnigraphics.so`, `libEGL.so`, `libGLESv2.so`, `libGLESv3.so`, `libOpenSLES.so` and `libaaudio.so` in `DT_NEEDED`, or open them with `dlopen`, as oboe opens `libaaudio.so`. None of them is a file. Each is a table of `uxdroid_bridge::table`: every export with its host address and its signature in a closed vocabulary, such as `i32(i32,ptr,ptr,...)` for `__android_log_print` or `ptr` for an object like `SL_IID_ENGINE`. `liblog`'s table is in the bridge, next to the printf machinery it shares with bionic's libc, and every library sees it, as on Android, where `app_process` links it. The others are in `crates/ndk`, and `crates/nativebridge` hands them to the loader before the first app library loads. A library searches its loaded dependencies first, then the tables it needs, then the shims, and a name its table lacks is reported missing like any other. The EGL and GLES tables are generated from the NDK's headers and stubs by `crates/ndk/generate.sh`.
 
 | Library | Served by |
 |---------|-----------|
@@ -85,13 +85,14 @@ App libraries name `liblog.so`, `libandroid.so`, `libjnigraphics.so`, `libEGL.so
 | `libjnigraphics` | `Bitmap.getPixels` and `setPixels`, converted to Android's memory layout |
 | `libEGL` | Mesa's surfaceless platform, with llvmpipe when there is no GPU. A window surface is a pbuffer that each swap reads back into its native window. Configs report `EGL_WINDOW_BIT` and Android's visual IDs |
 | `libGLESv2`, `libGLESv3` | Mesa's own functions, at no added cost |
-| `libOpenSLES` | An engine that realizes, with every audio object `SL_RESULT_FEATURE_UNSUPPORTED`. The interface IDs are data, bound on purpose: each is a pointer to a GUID of ours, and apps compare the pointers |
+| `libOpenSLES` | An engine, output mixes, PCM buffer-queue audio players and recorders over `crates/audio` streams. Interface pointers are resolved back to their object and checked as live. Players of URIs and file descriptors, which need a decoder, are refused. The interface IDs are data, bound on purpose: each is a pointer to a GUID of ours, and apps compare the pointers |
+| `libaaudio` | AAudio streams over `crates/audio`: data callbacks on the stream's thread, adapted to the size the app asks for, and blocking reads and writes with timeouts |
 
 Pixels cross into Java as `int` arrays, because AOSP's host graphics library cannot take NIO buffers on ART: it looks up OpenJDK's `FileDescriptor.fd`. A native window frame is therefore copied three times before it reaches Wayland, and an EGL frame once more for the readback. A buffer shared with the Wayland window, and an EGL window on its `wl_surface`, would remove those copies.
 
-A translator needs more than the tables: callbacks into app code, such as `ALooper` callbacks and an app's logger, and host functions handed out as pointers, such as `eglGetProcAddress` results and OpenSL ES method tables, cross the same boundary.
+A translator needs more than the tables: callbacks into app code, such as `ALooper` callbacks and an app's logger, and host functions handed out as pointers, such as `eglGetProcAddress` results and OpenSL ES method tables, cross the same boundary. OpenSL ES's method tables and the audio callbacks, OpenSL ES buffer queues' and AAudio's, already have signatures, in `uxdroid_ndk::opensles_interfaces`.
 
-Not yet: `AChoreographer`, `AHardwareBuffer` and Android image extensions for EGL, audio, and the rest of `libandroid`, such as sensors, input queues and configuration.
+Not yet: `AChoreographer`, `AHardwareBuffer` and Android image extensions for EGL, OpenSL ES players of encoded data and its event callbacks, and the rest of `libandroid`, such as sensors, input queues and configuration.
 
 ### The platform is AOSP's own framework
 
@@ -127,6 +128,28 @@ Real apps ask for more. `content`, `clipboard` and parts of other services are a
 Not yet: input events, resizing a window after it opens, placing dialogs and popups relative to their parent (each window is its own toplevel), and hardware rendering.
 
 The spike measured 28 MiB of private dirty memory per process. Most of the rest was clean framework pages, shared between processes.
+
+### Audio goes to the host's sound server over the PulseAudio protocol
+
+`AudioTrack`, `AudioRecord` and the `AudioSystem` values they read are natives in `crates/system`, so a Java app's sound reaches the server with no `audioserver` and no Binder in between; `IAudioService` gives players ids, full volume and audio focus. Recording, through any API, needs the manifest's `RECORD_AUDIO`: the launcher records the requested permissions in `dev.uxdroid.system.Permissions`, and a desktop has no dialog, so a requested permission counts as granted.
+
+Every Android audio API an app uses becomes one stream of `crates/audio`: interleaved `f32` frames at the app's own rate and channel count, converted from the app's sample format at the API's edge. Each stream has one thread that moves a 10 ms period, as Android's mixer does, between the stream and the device, whose clock paces it. A push stream, such as an `AudioTrack` in streaming mode, buffers what the app writes and plays silence when the buffer runs dry, counting each gap as one underrun. A callback stream, such as AAudio's data callback or an OpenSL ES buffer queue, asks the app for each period on that thread. `AudioTrack.setPlaybackRate` resamples linearly to the stream's rate. Nothing is mixed in the process: each stream is its own client of the server, which mixes and resamples to the hardware.
+
+`UXDROID_AUDIO` chooses the backend:
+
+| Value | Backend |
+|-------|---------|
+| unset | The PulseAudio protocol, else ALSA's `default` device, else silence with a warning; the first that opens is kept for the process |
+| `pulse`, `pulse:<server>` | The PulseAudio protocol only |
+| `alsa`, `alsa:<device>` | ALSA only |
+| `null` | Silence, at the device clock |
+| `file:<dir>` | Each output stream writes `output-<n>-<rate>hz-<channels>ch.f32` into the directory, and input streams read `input.f32` from it, then silence; raw little-endian `f32`, at the device clock. Tests read back every sample |
+
+The PulseAudio protocol was chosen over PipeWire's own because it reaches both servers a Linux desktop runs: PipeWire serves it through `pipewire-pulse`, and older systems run PulseAudio itself. Its client library, `libpulse-simple`, is five functions over a blocking stream, against PipeWire's stream API, which needs the format built as SPA pods from inline header code. The latency an app gets is set explicitly: two periods (20 ms) queued on the server, plus the server's own quantum. PipeWire's native API would save the hop through `pipewire-pulse` and could run the callback on PipeWire's real-time thread; that was not measured, because the test environment has no PipeWire server, and is the first thing to try if the measured latency is not good enough. ALSA is the fallback for hosts without a server: two periods of latency, with its own resampler when the device lacks the rate.
+
+The host's sound libraries are opened with `dlopen` when the first stream opens, never linked, so uxdroid adds no build dependency and starts on hosts without them.
+
+Measured on a private PulseAudio server (`benches/framework/README.md`): callbacks every 10.0 ms, 20.4 ms of latency on the server at 48 kHz, and an AAudio stream's first callback within 15 us of `requestStart`. Not yet: marker and period events of `AudioTrack` and `AudioRecord`, `AudioTrack` loop points, AAudio's error callback, shrinking a buffer below its capacity, volume and focus changes from the host, and input and output device selection.
 
 ### Guest architecture stays inside the native bridge
 

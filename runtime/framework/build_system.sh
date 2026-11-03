@@ -48,8 +48,8 @@ compile parcel "$RUNTIME/samples/framework/parcel.jar" "PCL[$FRAMEWORK:$RUNTIME/
     "$ALL:$W/system" /work/runtime/framework/samples/ParcelSmoke.java
 
 # Sample apps built as the SDK would: resources, assets and manifest by aapt2 against framework-res.apk,
-# code against the framework jar. They know nothing about uxdroid. The NDK sample's native library is
-# built by ndk_smoke.sh in the dev service, which has the NDK.
+# code against the framework jar. They know nothing about uxdroid. The native libraries of the NDK and audio
+# samples are built by their smokes in the dev service, which has the NDK.
 AAPT2=/aosp/prebuilts/sdk/tools/linux/bin/aapt2
 build_app() {
     local app=$1 out=$2 work="$W/$(basename "$1")"
@@ -76,5 +76,6 @@ PY
 }
 build_app /work/runtime/framework/samples/app "$RUNTIME/samples/framework/app.apk"
 build_app /work/runtime/framework/samples/ndk "$RUNTIME/samples/framework/ndk.apk"
+build_app /work/runtime/framework/samples/audio "$RUNTIME/samples/framework/audio.apk"
 ls -la "$RUNTIME/framework/uxdroid-system.jar" "$RUNTIME/samples/framework/smoke.jar" "$RUNTIME/samples/framework/app.apk" \
-    "$RUNTIME/samples/framework/ndk.apk"
+    "$RUNTIME/samples/framework/ndk.apk" "$RUNTIME/samples/framework/audio.apk"

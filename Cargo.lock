@@ -301,6 +301,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uxdroid-audio"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "uxdroid-bridge"
 version = "0.1.0"
 dependencies = [
@@ -331,6 +338,7 @@ version = "0.1.0"
 dependencies = [
  "jni-sys",
  "libc",
+ "uxdroid-audio",
  "uxdroid-bridge",
 ]
 
@@ -351,6 +359,7 @@ version = "0.1.0"
 dependencies = [
  "jni-sys",
  "libc",
+ "uxdroid-audio",
  "uxdroid-platform",
 ]
 

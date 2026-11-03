@@ -86,9 +86,15 @@ docker compose run --rm -T dev bash /work/runtime/framework/window_smoke.sh
 docker compose run --rm -T dev bash /work/runtime/framework/parcel_smoke.sh
 # An NDK-built library using liblog, libandroid, libjnigraphics, EGL, GLES and OpenSL ES.
 docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
+# Sound through AudioTrack, AudioRecord, OpenSL ES and AAudio, checked sample by sample in files, then
+# played through a private PulseAudio server.
+docker compose run --rm -T dev bash /work/runtime/framework/audio_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame. Its code is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
 UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_smoke.sh
+
+# Apps play to the host's PulseAudio or PipeWire server, else ALSA. UXDROID_AUDIO=null plays into
+# silence, and UXDROID_AUDIO=file:<dir> writes each stream's samples to a file.
 
 # Build uxdroid, then run an APK with a Wayland compositor available.
 docker compose run --rm dev cargo build --release -p uxdroid-cli -p uxdroid-nativebridge -p uxdroid-platform
@@ -130,4 +136,4 @@ Run the first four with `docker compose run --rm -T dev bash /work/runtime/art/<
 
 ## Performance
 
-The performance rule in [AGENTS.md](AGENTS.md) applies to every milestone. [benches/loader](benches/loader/README.md) compares load times with other loaders, and [benches/art](benches/art/README.md) compares runtime startup. [benches/framework](benches/framework/README.md) measures startup and memory on AOSP's framework, RustDesk included, against milestone 3's own platform; no competitor could run those workloads here.
+The performance rule in [AGENTS.md](AGENTS.md) applies to every milestone. [benches/loader](benches/loader/README.md) compares load times with other loaders, and [benches/art](benches/art/README.md) compares runtime startup. [benches/framework](benches/framework/README.md) measures startup and memory on AOSP's framework, RustDesk included, against milestone 3's own platform, and the cost and latency of audio; no competitor could run those workloads here.

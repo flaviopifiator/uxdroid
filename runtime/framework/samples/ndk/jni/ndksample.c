@@ -117,8 +117,22 @@ static const char* check_opensl(void) {
     }
     SLObjectItf mix = NULL;
     SLresult result = (*itf)->CreateOutputMix(itf, &mix, 0, NULL, NULL);
+    if (result != SL_RESULT_SUCCESS || (*mix)->Realize(mix, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS) {
+        (*engine)->Destroy(engine);
+        return "no output mix";
+    }
+    (*mix)->Destroy(mix);
+    // This app's manifest does not request RECORD_AUDIO, so a recorder must be refused.
+    SLDataLocator_IODevice device = {SL_DATALOCATOR_IODEVICE, SL_IODEVICE_AUDIOINPUT, SL_DEFAULTDEVICEID_AUDIOINPUT, NULL};
+    SLDataSource mic = {&device, NULL};
+    SLDataLocator_AndroidSimpleBufferQueue queue = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 1};
+    SLDataFormat_PCM pcm = {SL_DATAFORMAT_PCM, 1, SL_SAMPLINGRATE_16, SL_PCMSAMPLEFORMAT_FIXED_16,
+                            SL_PCMSAMPLEFORMAT_FIXED_16, SL_SPEAKER_FRONT_CENTER, SL_BYTEORDER_LITTLEENDIAN};
+    SLDataSink into = {&queue, &pcm};
+    SLObjectItf recorder = NULL;
+    result = (*itf)->CreateAudioRecorder(itf, &recorder, &mic, &into, 0, NULL, NULL);
     (*engine)->Destroy(engine);
-    if (result != SL_RESULT_FEATURE_UNSUPPORTED) return "an output mix did not fail cleanly";
+    if (result != SL_RESULT_PERMISSION_DENIED) return "a recorder without RECORD_AUDIO was not refused";
     if (SL_IID_ENGINE == SL_IID_PLAY || SL_IID_ANDROIDSIMPLEBUFFERQUEUE == NULL) return "bad interface IDs";
     return NULL;
 }

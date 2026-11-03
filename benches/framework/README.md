@@ -68,6 +68,37 @@ Against milestone 3's own platform, to a first frame:
 
 RustDesk, a real Flutter app, reaches its first frame in 250 ms warm and under 1 s cold, with 87.5 MiB private dirty; most of that is the Dart VM, Flutter's engine and the software-composed frame buffers, which this benchmark does not break down.
 
+## Audio
+
+[`audio.sh`](audio.sh) measures what audio costs and how fast it is. It runs in `dev`, needs the runtime built by `build_system.sh` at the path it runs from (a copy under another path loses its boot image), and takes `SOURCE` and `ONLY=framework` to measure an older checkout the same way:
+
+```sh
+docker compose run --rm -T dev bash /work/benches/framework/audio.sh
+```
+
+2026-11-03, 30 runs per row, from ext4, on the machine above while other builds ran (load average about 2.9). The baseline is the commit before audio (1ae8b4e) with the milestone 4 runtime, measured right before, the same way.
+
+| Workload | Cold time | Warm time | Peak RSS | PSS | Private dirty |
+|----------|-----------|-----------|----------|-----|---------------|
+| Framework sample APK to first frame, before audio | 1044 ms (837-1363) | 138.4 ms (137.8-139.4) | 146.8 MiB | 133.1 MiB | 19.5 MiB |
+| Framework sample APK to first frame, with audio | 899 ms (844-1507) | 139.1 ms (137.8-140.0) | 147.0 MiB | 133.3 MiB | 19.5 MiB |
+| Audio sample APK through its AudioTrack tone, `UXDROID_AUDIO=null` | 802 ms (769-1300) | 207.6 ms (204.6-214.0) | 146.3 MiB | 132.1 MiB | 18.7 MiB |
+
+- An app that plays nothing pays nothing measurable: warm time moved 0.7 ms, inside the interquartile range, and memory by 0.2 MiB of RSS. The libraries grew: `libuxdroid_system.so` from 1,039,808 to 1,214,600 bytes and `libuxdroid_nativebridge.so` from 917,000 to 1,136,416, which are clean, shared pages. Cold times are bimodal, as below; the two cold medians differ by less than their spread.
+- This baseline's warm time, 138.4 ms, is above milestone 4's 123.8 ms for the same row and code: the machine was busier. Compare rows of one table, not across tables.
+- The audio sample's marker comes after its 100 ms tone was written to an `AudioTrack`, played and drained, and the track released; warm, it comes 69 ms later than the framework sample's first frame, though the two apps do different work. Its private dirty memory is lower than the framework sample's, since it draws no content view.
+
+Latency and pacing on a private PulseAudio server with null devices (`crates/audio/tests/pulse.rs` and the audio sample, three runs each, all alike):
+
+| Measure | Value |
+|---------|-------|
+| Callback period, 48 kHz and 32 kHz stereo | 10.00 ms and 9.98 ms |
+| Latency the server reports for a playing stream, 48 kHz (32 kHz, resampled) | 20.4 ms (21.6-21.9 ms) |
+| AAudio `requestStart` to the first data callback | 6-13 us |
+| A recording's half second | read in 0.5 s, at the server's pace |
+
+The latency an app sees is the server's plus what it buffered: the sample's `AudioTrack`, of four minimum buffers, holds up to 80 ms at 48 kHz, and an AAudio stream up to four periods, 40 ms; a blocking write keeps them full. Null devices idle in 2 s blocks and wake for a new stream only at the end of one, which hardware devices do not do, so the script keeps a silent stream on each; without it the first sound of a stream came about 2 s late. Not measured: latency on PipeWire, PipeWire's own protocol, ALSA on real hardware, and a round trip from speaker to microphone. No competitor plays audio here either.
+
 ## Limits
 
 - Cold times are bimodal on this machine: most runs are in the low group (for example 963 ms for RustDesk), and a quarter or more take up to about twice as long. The cause was not found; the disk is an SSD and the eviction is the same each run. Compare medians, and read the brackets.
