@@ -89,8 +89,9 @@ public final class WindowService {
             int result = 0;
             if (layer == null) {
                 String title = attrs.getTitle() != null ? attrs.getTitle().toString() : "uxdroid";
+                // A Builder makes hidden layers; the window manager shows a window's own layer.
                 layer = new SurfaceControl.Builder().setName(title).setBufferSize(width, height)
-                        .setFormat(attrs.format).setCallsite("WindowService.relayout").build();
+                        .setFormat(attrs.format).setHidden(false).setCallsite("WindowService.relayout").build();
                 layers.put(key, layer);
                 WindowInput.attach(layer, inputs.get(key));
                 result = WindowManagerGlobal.RELAYOUT_RES_FIRST_TIME | WindowManagerGlobal.RELAYOUT_RES_SURFACE_CHANGED;

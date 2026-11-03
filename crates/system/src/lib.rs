@@ -23,6 +23,7 @@ mod natives;
 pub mod parcel;
 mod process;
 pub mod properties;
+mod scene;
 pub mod shared_memory;
 mod surface;
 mod vsync;

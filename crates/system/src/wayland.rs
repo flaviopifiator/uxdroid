@@ -17,6 +17,7 @@ use wayland_client::protocol::{
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+use crate::compose::Rect;
 use crate::input::charmap::{self, Charmap};
 use crate::input::keys::{self, Modifiers};
 use crate::input::translate::Translator;
@@ -231,9 +232,11 @@ impl Window {
         }
     }
 
-    pub fn present(&mut self) -> Result<(), Box<dyn Error>> {
+    /// Shows the frame, telling the compositor that only `damage` changed.
+    pub fn present(&mut self, damage: Rect) -> Result<(), Box<dyn Error>> {
         self.surface.attach(Some(&self.pixels.buffer), 0, 0);
-        self.surface.damage_buffer(0, 0, self.width, self.height);
+        self.surface
+            .damage_buffer(damage.left, damage.top, damage.width(), damage.height());
         self.surface.commit();
         self.queue.flush()?;
         // A round trip proves the compositor took the frame before the caller goes on.

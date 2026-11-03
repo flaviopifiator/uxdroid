@@ -20,15 +20,16 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Once, OnceLock, Weak};
 use std::time::Instant;
 
 use jni_sys::{JNIEnv, jboolean, jclass, jint, jintArray, jlong, jobject, jstring, jvalue};
 
-use crate::compose::{Placed, compose};
+use crate::compose::Rect;
 use crate::handles::Handles;
 use crate::input::natives::{Channel, channel_of};
 use crate::java::{self, Field, Pending};
+use crate::scene::{self, Change, Composer, Transaction};
 use crate::wayland::Window;
 use crate::{Method, java_string, register, throw};
 
@@ -38,45 +39,58 @@ const MAX_CHILD_DIMENSION: i32 = 16384;
 /// When this library loaded, for the first-frame report.
 pub static LOADED: OnceLock<Instant> = OnceLock::new();
 
-/// What a window shows: a name, a size, its place among other layers, its last frame, and once it
-/// first draws, where it draws.
-pub struct Layer {
-    name: String,
+/// What a layer keeps beside its place in the tree: the size the framework asked for, where it
+/// draws once it first draws, and for a window's own layer, its input.
+#[derive(Default)]
+pub struct Platform {
     size: Mutex<(i32, i32)>,
-    geometry: Mutex<Geometry>,
-    children: Mutex<Vec<Weak<Layer>>>,
-    /// The last frame posted, read by composition. Only ever locked last, so it cannot deadlock.
-    content: Mutex<Content>,
     target: Mutex<Option<Target>>,
     posted: AtomicBool,
-    /// The server end of the window's input channel, for a root layer.
+    /// The server end of the window's input channel, for a window's own layer.
     input: Mutex<Option<Channel>>,
+    /// Transactions merged into the next frame of this layer's buffer queue.
+    pending: Mutex<Transaction<Platform>>,
 }
 
-#[derive(Default)]
-struct Geometry {
-    parent: Option<Arc<Layer>>,
-    x: i32,
-    y: i32,
-    z: i32,
-    hidden: bool,
+type Layer = scene::Layer<Platform>;
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-#[derive(Default)]
-struct Content {
-    pixels: Vec<u32>,
-    width: i32,
-    height: i32,
+impl scene::Layer<Platform> {
+    fn size(&self) -> (i32, i32) {
+        *locked(&self.extra.size)
+    }
+
+    fn set_size(&self, width: i32, height: i32) {
+        *locked(&self.extra.size) = (width, height);
+    }
+
+    fn target(&self) -> MutexGuard<'_, Option<Target>> {
+        locked(&self.extra.target)
+    }
+
+    /// Whether this layer's frames go to a window of its own.
+    fn owns_window(self: &Arc<Self>) -> bool {
+        self.window_layer()
+            .is_some_and(|window| Arc::ptr_eq(&window, self))
+    }
 }
 
-/// Where a layer draws: the Wayland window of a root layer, or nothing for a child, and the Bitmap
-/// the framework draws it into.
+/// Where a layer draws: the Wayland window of a window's own layer, or nothing for a child, and the
+/// Bitmap the framework draws it into.
 struct Target {
     window: Option<Window>,
+    composer: Composer,
     bitmap: jobject,
     colors: jintArray,
     width: i32,
     height: i32,
+    /// The part of the Bitmap the framework redraws for the frame being drawn.
+    dirty: Rect,
+    /// Whether the next frame must be drawn whole, as the first one is.
+    fresh: bool,
     /// The MessageQueue watching the window's connection and the FileDescriptor it watches, global
     /// references or null.
     queue: jobject,
@@ -117,101 +131,6 @@ impl Drop for Target {
         drop(WATCHED.remove(self.watched));
         // SAFETY: these are this Target's own global references or null.
         unsafe { java::delete_globals(&[self.bitmap, self.colors, self.queue, self.descriptor]) };
-    }
-}
-
-impl Layer {
-    fn new(name: String, width: i32, height: i32) -> Arc<Layer> {
-        Arc::new(Layer {
-            name,
-            size: Mutex::new((width, height)),
-            geometry: Mutex::new(Geometry::default()),
-            children: Mutex::new(Vec::new()),
-            content: Mutex::new(Content::default()),
-            target: Mutex::new(None),
-            posted: AtomicBool::new(false),
-            input: Mutex::new(None),
-        })
-    }
-
-    fn geometry(&self) -> MutexGuard<'_, Geometry> {
-        self.geometry.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    fn parent(&self) -> Option<Arc<Layer>> {
-        self.geometry().parent.clone()
-    }
-
-    /// Moves this layer under `parent`, refusing a parent that is the layer or one of its children.
-    fn set_parent(self: &Arc<Layer>, parent: Option<Arc<Layer>>) {
-        let mut ancestor = parent.clone();
-        while let Some(layer) = ancestor {
-            if Arc::ptr_eq(&layer, self) {
-                return;
-            }
-            ancestor = layer.parent();
-        }
-        if let Some(parent) = &parent {
-            let mut children = parent.children.lock().unwrap_or_else(|p| p.into_inner());
-            children.retain(|child| child.strong_count() > 0);
-            children.push(Arc::downgrade(self));
-        }
-        if let Some(old) = std::mem::replace(&mut self.geometry().parent, parent) {
-            let mut children = old.children.lock().unwrap_or_else(|p| p.into_inner());
-            children.retain(|child| !std::ptr::eq(child.as_ptr(), Arc::as_ptr(self)));
-        }
-    }
-
-    fn root(self: &Arc<Layer>) -> Arc<Layer> {
-        let mut layer = self.clone();
-        while let Some(parent) = layer.parent() {
-            layer = parent;
-        }
-        layer
-    }
-
-    /// Every visible descendant with a frame, its position in the root, and whether it goes below.
-    fn descendants(
-        &self,
-        x: i32,
-        y: i32,
-        below: bool,
-        found: &mut Vec<(Arc<Layer>, i32, i32, bool)>,
-    ) {
-        let children: Vec<Arc<Layer>> = self
-            .children
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect();
-        for child in children {
-            let (child_x, child_y, child_below) = {
-                let geometry = child.geometry();
-                if geometry.hidden {
-                    continue;
-                }
-                (
-                    x.saturating_add(geometry.x),
-                    y.saturating_add(geometry.y),
-                    below || geometry.z < 0,
-                )
-            };
-            found.push((child.clone(), child_x, child_y, child_below));
-            child.descendants(child_x, child_y, child_below, found);
-        }
-    }
-
-    fn size(&self) -> (i32, i32) {
-        *self.size.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    fn set_size(&self, width: i32, height: i32) {
-        *self.size.lock().unwrap_or_else(|p| p.into_inner()) = (width, height);
-    }
-
-    fn target(&self) -> MutexGuard<'_, Option<Target>> {
-        self.target.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -268,11 +187,16 @@ unsafe extern "system" fn control_create(
 ) -> jlong {
     // SAFETY: ART passes a valid environment and a string or null.
     let name = unsafe { java_string(env, name) }.unwrap_or_default();
-    let layer = Layer::new(name, width, height);
-    layer.geometry().hidden = flags & CREATE_HIDDEN != 0;
-    if parent != 0 {
-        layer.set_parent(SURFACE_CONTROLS.get(parent));
-    }
+    let parent = (parent != 0)
+        .then(|| SURFACE_CONTROLS.get(parent))
+        .flatten();
+    let layer = Layer::new(
+        name,
+        parent,
+        flags & CREATE_HIDDEN != 0,
+        Platform::default(),
+    );
+    layer.set_size(width, height);
     SURFACE_CONTROLS.add(layer)
 }
 
@@ -282,76 +206,261 @@ unsafe extern "system" fn control_copy(_env: *mut JNIEnv, _class: jclass, contro
         .map_or(0, |layer| SURFACE_CONTROLS.add(layer))
 }
 
-/// The `hidden` flag of `SurfaceControl.Builder`, and of a transaction's `setFlags`.
+/// The `hidden` flag of `SurfaceControl.Builder`.
 const CREATE_HIDDEN: jint = 0x4;
-const SURFACE_HIDDEN: jint = 0x1;
+
+/// Transactions, by the handle `SurfaceControl.Transaction` keeps.
+static TRANSACTIONS: Handles<Arc<Mutex<Transaction<Platform>>>> = Handles::new();
+
+unsafe extern "system" fn transaction_create(_env: *mut JNIEnv, _class: jclass) -> jlong {
+    TRANSACTIONS.add(Arc::default())
+}
+
+/// What `NativeAllocationRegistry` calls, on any thread, when a Transaction is released.
+extern "C" fn transaction_free(transaction: *mut c_void) {
+    drop(TRANSACTIONS.remove(transaction as i64));
+}
+
+unsafe extern "system" fn transaction_finalizer(_env: *mut JNIEnv, _class: jclass) -> jlong {
+    transaction_free as *const () as jlong
+}
+
+/// Shows again every window whose layers a transaction changed.
+fn apply(transaction: &mut Transaction<Platform>) {
+    for window in transaction.apply() {
+        if let Err(Failure::Message(message)) = present_window(&window) {
+            eprintln!("uxdroid: {message}");
+        }
+    }
+}
+
+unsafe extern "system" fn transaction_apply(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    _sync: jboolean,
+    _one_way: jboolean,
+) {
+    if let Some(transaction) = TRANSACTIONS.get(transaction) {
+        // Taken out first, so presenting runs with no transaction locked.
+        let mut changes = std::mem::take(&mut *locked(&transaction));
+        apply(&mut changes);
+    }
+}
+
+unsafe extern "system" fn transaction_merge(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    other: jlong,
+) {
+    let (Some(into), Some(from)) = (TRANSACTIONS.get(transaction), TRANSACTIONS.get(other)) else {
+        return;
+    };
+    if Arc::ptr_eq(&into, &from) {
+        return;
+    }
+    let mut taken = std::mem::take(&mut *locked(&from));
+    locked(&into).merge(&mut taken);
+}
+
+unsafe extern "system" fn transaction_clear(_env: *mut JNIEnv, _class: jclass, transaction: jlong) {
+    if let Some(transaction) = TRANSACTIONS.get(transaction) {
+        locked(&transaction).clear();
+    }
+}
+
+/// Adds a change of `control`'s layer to `transaction`. A handle that is no transaction of ours,
+/// such as one a default body made, applies the change at once, as every change did before.
+fn set(transaction: jlong, control: jlong, change: impl FnOnce() -> Option<Change<Platform>>) {
+    let Some(layer) = SURFACE_CONTROLS.get(control) else {
+        return;
+    };
+    let Some(change) = change() else {
+        return;
+    };
+    match TRANSACTIONS.get(transaction) {
+        Some(transaction) => locked(&transaction).set(layer, change),
+        None => {
+            static UNKNOWN: Once = Once::new();
+            UNKNOWN.call_once(|| {
+                eprintln!("uxdroid: a SurfaceControl change came with no transaction of ours; applied at once")
+            });
+            let mut once = Transaction::default();
+            once.set(layer, change);
+            apply(&mut once);
+        }
+    }
+}
 
 unsafe extern "system" fn control_reparent(
     _env: *mut JNIEnv,
     _class: jclass,
-    _transaction: jlong,
+    transaction: jlong,
     control: jlong,
     parent: jlong,
 ) {
-    if let Some(layer) = SURFACE_CONTROLS.get(control) {
-        layer.set_parent(SURFACE_CONTROLS.get(parent));
-    }
+    set(transaction, control, || {
+        Some(Change::Reparent(SURFACE_CONTROLS.get(parent)))
+    });
 }
 
 unsafe extern "system" fn control_position(
     _env: *mut JNIEnv,
     _class: jclass,
-    _transaction: jlong,
+    transaction: jlong,
     control: jlong,
     x: f32,
     y: f32,
 ) {
-    if let Some(layer) = SURFACE_CONTROLS.get(control) {
-        let mut geometry = layer.geometry();
-        // `as` saturates, and NaN becomes 0.
-        (geometry.x, geometry.y) = (x.round() as i32, y.round() as i32);
-    }
+    set(transaction, control, || {
+        (x.is_finite() && y.is_finite()).then_some(Change::Position(x, y))
+    });
 }
 
 unsafe extern "system" fn control_layer(
     _env: *mut JNIEnv,
     _class: jclass,
-    _transaction: jlong,
+    transaction: jlong,
     control: jlong,
     z: jint,
 ) {
-    if let Some(layer) = SURFACE_CONTROLS.get(control) {
-        layer.geometry().z = z;
-    }
+    set(transaction, control, || Some(Change::Layer(z)));
 }
 
-/// Only the order counts here: a layer placed below another sits below its own parent's pixels.
 unsafe extern "system" fn control_relative_layer(
     _env: *mut JNIEnv,
     _class: jclass,
-    _transaction: jlong,
+    transaction: jlong,
     control: jlong,
-    _relative_to: jlong,
+    relative_to: jlong,
     z: jint,
 ) {
-    if let Some(layer) = SURFACE_CONTROLS.get(control) {
-        layer.geometry().z = z;
-    }
+    set(transaction, control, || {
+        Some(match SURFACE_CONTROLS.get(relative_to) {
+            Some(relative) => Change::RelativeLayer(relative, z),
+            None => Change::Layer(z),
+        })
+    });
 }
 
 unsafe extern "system" fn control_flags(
     _env: *mut JNIEnv,
     _class: jclass,
-    _transaction: jlong,
+    transaction: jlong,
     control: jlong,
     flags: jint,
     mask: jint,
 ) {
-    if mask & SURFACE_HIDDEN != 0
-        && let Some(layer) = SURFACE_CONTROLS.get(control)
-    {
-        layer.geometry().hidden = flags & SURFACE_HIDDEN != 0;
-    }
+    set(transaction, control, || {
+        Some(Change::Flags {
+            flags: flags as u32,
+            mask: mask as u32,
+        })
+    });
+}
+
+unsafe extern "system" fn control_alpha(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    control: jlong,
+    alpha: f32,
+) {
+    set(transaction, control, || {
+        alpha.is_finite().then_some(Change::Alpha(alpha))
+    });
+}
+
+fn finite(values: [f32; 4]) -> Option<[f32; 4]> {
+    values
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(values)
+}
+
+unsafe extern "system" fn control_matrix(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    control: jlong,
+    dsdx: f32,
+    dtdx: f32,
+    dtdy: f32,
+    dsdy: f32,
+) {
+    set(transaction, control, || {
+        finite([dsdx, dtdx, dtdy, dsdy]).map(Change::Matrix)
+    });
+}
+
+unsafe extern "system" fn control_scale(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    control: jlong,
+    x: f32,
+    y: f32,
+) {
+    set(transaction, control, || {
+        finite([x, 0.0, 0.0, y]).map(Change::Matrix)
+    });
+}
+
+unsafe extern "system" fn control_crop(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    control: jlong,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) {
+    set(transaction, control, || {
+        Some(Change::Crop(finite([left, top, right, bottom])))
+    });
+}
+
+unsafe extern "system" fn control_window_crop(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    control: jlong,
+    left: jint,
+    top: jint,
+    right: jint,
+    bottom: jint,
+) {
+    set(transaction, control, || {
+        Some(Change::Crop(Some(
+            [left, top, right, bottom].map(|side| side as f32),
+        )))
+    });
+}
+
+unsafe extern "system" fn control_corner_radius(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    control: jlong,
+    radius: f32,
+) {
+    set(transaction, control, || {
+        radius.is_finite().then_some(Change::CornerRadius(radius))
+    });
+}
+
+unsafe extern "system" fn control_buffer_transform(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    transaction: jlong,
+    control: jlong,
+    transform: jint,
+) {
+    set(transaction, control, || {
+        Some(Change::BufferTransform(transform as u32))
+    });
 }
 
 /// What `NativeAllocationRegistry` calls, on any thread, when a SurfaceControl is released.
@@ -436,6 +545,37 @@ unsafe extern "system" fn queue_same_control(
     match (queue_layer(queue), SURFACE_CONTROLS.get(control)) {
         (Some(current), Some(other)) => Arc::ptr_eq(&current, &other),
         _ => false,
+    }
+}
+
+/// `mergeWithNextTransaction`: the changes wait for the queue's next frame, as SurfaceView's
+/// position does for its window's. A queue with no layer yet applies them at once.
+unsafe extern "system" fn queue_merge_with_next(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    queue: jlong,
+    transaction: jlong,
+    _frame: jlong,
+) {
+    let Some(transaction) = TRANSACTIONS.get(transaction) else {
+        return;
+    };
+    let mut taken = std::mem::take(&mut *locked(&transaction));
+    match queue_layer(queue) {
+        Some(layer) => locked(&layer.extra.pending).merge(&mut taken),
+        None => apply(&mut taken),
+    }
+}
+
+unsafe extern "system" fn queue_apply_pending(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    queue: jlong,
+    _frame: jlong,
+) {
+    if let Some(layer) = queue_layer(queue) {
+        let mut pending = std::mem::take(&mut *locked(&layer.extra.pending));
+        apply(&mut pending);
     }
 }
 
@@ -532,25 +672,25 @@ unsafe extern "system" fn surface_height(
 }
 
 impl Target {
-    /// Opens the window of a root layer. The compositor may choose another size, which the Bitmap
-    /// follows. A child layer gets only the Bitmap, of the size its queue set.
+    /// Opens the window of a window's own layer. The compositor may choose another size, which the
+    /// Bitmap follows. Any other layer gets only the Bitmap, of the size its queue set.
     ///
     /// # Safety
     /// `env` must be the calling thread's JNI environment.
-    unsafe fn open(env: *mut JNIEnv, layer: &Layer) -> Result<Target, Failure> {
+    unsafe fn open(env: *mut JNIEnv, layer: &Arc<Layer>) -> Result<Target, Failure> {
         let (width, height) = layer.size();
-        let window = if layer.parent().is_some() {
+        let window = if layer.owns_window() {
+            Some(
+                Window::open(&layer.name, width, height)
+                    .map_err(|error| Failure::Message(format!("cannot open a window: {error}")))?,
+            )
+        } else {
             if !(1..=MAX_CHILD_DIMENSION).contains(&width)
                 || !(1..=MAX_CHILD_DIMENSION).contains(&height)
             {
                 return Err(Failure::Message(format!("bad layer size {width}x{height}")));
             }
             None
-        } else {
-            Some(
-                Window::open(&layer.name, width, height)
-                    .map_err(|error| Failure::Message(format!("cannot open a window: {error}")))?,
-            )
         };
         let (width, height) = window
             .as_ref()
@@ -584,16 +724,42 @@ impl Target {
             }
             Ok(Target {
                 window,
+                composer: Composer::default(),
                 bitmap: java::global(env, bitmap),
                 colors: java::global(env, colors),
                 width,
                 height,
+                dirty: Rect::sized(width, height),
+                fresh: true,
                 queue: std::ptr::null_mut(),
                 descriptor: std::ptr::null_mut(),
                 watched: 0,
             })
         }
     }
+}
+
+/// The part of a frame the framework asks to redraw: `dirty` within the Bitmap, or all of it when
+/// `dirty` is null or empty, or the Bitmap has no frame yet.
+///
+/// # Safety
+/// `env` must be the calling thread's JNI environment, and `dirty` a Rect or null.
+unsafe fn requested(env: *mut JNIEnv, dirty: jobject, target: &Target) -> Result<Rect, Pending> {
+    let all = Rect::sized(target.width, target.height);
+    if dirty.is_null() || target.fresh {
+        return Ok(all);
+    }
+    // SAFETY: as above.
+    let rect = unsafe {
+        Rect::new(
+            java::int_field(env, dirty, c"left")?,
+            java::int_field(env, dirty, c"top")?,
+            java::int_field(env, dirty, c"right")?,
+            java::int_field(env, dirty, c"bottom")?,
+        )
+    };
+    let rect = rect.intersect(&all);
+    Ok(if rect.is_empty() { all } else { rect })
 }
 
 /// # Safety
@@ -612,11 +778,14 @@ unsafe fn lock(
         unsafe { watch(env, layer, &mut opened)? };
         *target = Some(opened);
     }
-    let Some(target) = target.as_ref() else {
+    let Some(target) = target.as_mut() else {
         return Err(Failure::Message("no window".into()));
     };
     // SAFETY: as above; the Bitmap is mutable and lives as long as the Target.
     unsafe {
+        // The Bitmap keeps the last frame, so only the part asked for is redrawn, as Android's
+        // Surface does with its back buffer: the Canvas is clipped to it.
+        target.dirty = requested(env, dirty, target)?;
         java::call_void(
             env,
             canvas,
@@ -624,11 +793,19 @@ unsafe fn lock(
             c"(Landroid/graphics/Bitmap;)V",
             &[jvalue { l: target.bitmap }],
         )?;
-        // The Bitmap keeps the last frame, but posting copies all of it, so every frame redraws all.
+        let Rect {
+            left,
+            top,
+            right,
+            bottom,
+        } = target.dirty;
+        let sides = [left, top, right, bottom].map(|i| jvalue { i });
         if !dirty.is_null() {
-            let args = [0, 0, target.width, target.height].map(|i| jvalue { i });
-            java::call_void(env, dirty, c"set", c"(IIII)V", &args)?;
+            java::call_void(env, dirty, c"set", c"(IIII)V", &sides)?;
         }
+        let id = java::method(env, canvas, c"clipRect", c"(IIII)Z")?;
+        ((**env).v1_1.CallBooleanMethodA)(env, canvas, id, sides.as_ptr());
+        java::check(env)?;
     }
     Ok(())
 }
@@ -696,7 +873,7 @@ fn route(window: &mut Window, layer: &Layer) {
     if events.is_empty() {
         return;
     }
-    let input = layer.input.lock().unwrap_or_else(|p| p.into_inner());
+    let input = layer.extra.input.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(channel) = input.as_ref() {
         for event in &events {
             channel.send(event);
@@ -745,67 +922,38 @@ unsafe extern "system" fn window_attach(
     };
     // SAFETY: as above.
     let channel = unsafe { channel_of(env, channel) };
-    *layer.input.lock().unwrap_or_else(|p| p.into_inner()) = channel;
+    *layer.extra.input.lock().unwrap_or_else(|p| p.into_inner()) = channel;
 }
 
-fn placed(content: &Content, x: i32, y: i32) -> Placed<'_> {
-    Placed {
-        pixels: &content.pixels,
-        width: content.width,
-        height: content.height,
-        x,
-        y,
-    }
-}
-
-/// Composes the root layer's window from its own last frame and its children's, and shows it.
-fn present(target: &mut Target, root: &Layer) -> Result<(), Failure> {
-    let Some(window) = target.window.as_mut() else {
+/// Composes what changed in a window from its layers' last frames, and shows it.
+fn present(target: &mut Target, window_layer: &Arc<Layer>) -> Result<(), Failure> {
+    let Target {
+        window, composer, ..
+    } = target;
+    let Some(window) = window.as_mut() else {
         return Ok(());
     };
-    let mut found = Vec::new();
-    root.descendants(0, 0, false, &mut found);
-    let contents: Vec<(MutexGuard<'_, Content>, i32, i32, bool)> = found
-        .iter()
-        .map(|(layer, x, y, below)| {
-            (
-                layer.content.lock().unwrap_or_else(|p| p.into_inner()),
-                *x,
-                *y,
-                *below,
-            )
-        })
-        .collect();
-    let below: Vec<Placed<'_>> = contents
-        .iter()
-        .filter(|(_, _, _, below)| *below)
-        .map(|(content, x, y, _)| placed(content, *x, *y))
-        .collect();
-    let above: Vec<Placed<'_>> = contents
-        .iter()
-        .filter(|(_, _, _, below)| !*below)
-        .map(|(content, x, y, _)| placed(content, *x, *y))
-        .collect();
-    {
-        let own = root.content.lock().unwrap_or_else(|p| p.into_inner());
-        let frame = window.frame();
-        let (width, height) = (frame.width, frame.height);
-        compose(
-            frame.pixels,
-            width,
-            height,
-            &placed(&own, 0, 0),
-            &below,
-            &above,
-        );
+    let frame = window.frame();
+    let (width, height) = (frame.width, frame.height);
+    let damage = composer.compose(window_layer, frame.pixels, width, height);
+    if damage.is_empty() {
+        return Ok(());
     }
-    drop(contents);
     window
-        .present()
+        .present(damage)
         .map_err(|error| Failure::Message(format!("cannot present a frame: {error}")))?;
     // The round trip may have read input, which the Looper will not see as readable.
-    route(window, root);
+    route(window, window_layer);
     Ok(())
+}
+
+/// Shows again a window whose layers changed, from whichever thread changed them.
+fn present_window(window_layer: &Arc<Layer>) -> Result<(), Failure> {
+    let mut target = window_layer.target();
+    match target.as_mut() {
+        Some(target) => present(target, window_layer),
+        None => Ok(()),
+    }
 }
 
 /// # Safety
@@ -816,28 +964,40 @@ unsafe fn post(env: *mut JNIEnv, layer: &Arc<Layer>, canvas: jobject) -> Result<
         return Err(Failure::Message(format!("{} was never locked", layer.name)));
     };
     let (width, height) = (target.width, target.height);
-    // SAFETY: as above. The content holds `width * height` pixels, the same as the array.
+    let dirty = target.dirty;
+    // SAFETY: as above. The array and the content hold `width * height` pixels, row after row, and
+    // both keep the last frame, so only the dirty rows and columns are copied into each.
     unsafe {
+        let start = dirty.top * width + dirty.left;
         let args = [
             jvalue { l: target.colors },
-            jvalue { i: 0 },
+            jvalue { i: start },
             jvalue { i: width },
-            jvalue { i: 0 },
-            jvalue { i: 0 },
-            jvalue { i: width },
-            jvalue { i: height },
+            jvalue { i: dirty.left },
+            jvalue { i: dirty.top },
+            jvalue { i: dirty.width() },
+            jvalue { i: dirty.height() },
         ];
         java::call_void(env, target.bitmap, c"getPixels", c"([IIIIIII)V", &args)?;
-        let mut content = layer.content.lock().unwrap_or_else(|p| p.into_inner());
-        content.pixels.resize((width * height) as usize, 0);
-        (content.width, content.height) = (width, height);
+        let mut content = layer.content();
+        if (content.width, content.height) != (width, height) {
+            content.pixels = vec![0; (width * height) as usize];
+            (content.width, content.height) = (width, height);
+        }
+        let end = (dirty.bottom - 1) * width + dirty.right;
         ((**env).v1_1.GetIntArrayRegion)(
             env,
             target.colors,
-            0,
-            width * height,
-            content.pixels.as_mut_ptr().cast::<jint>(),
+            start,
+            end - start,
+            content
+                .pixels
+                .as_mut_ptr()
+                .add(start as usize)
+                .cast::<jint>(),
         );
+        content.damage = content.damage.union(&dirty);
+        drop(content);
         java::call_void(
             env,
             canvas,
@@ -848,20 +1008,29 @@ unsafe fn post(env: *mut JNIEnv, layer: &Arc<Layer>, canvas: jobject) -> Result<
             }],
         )?;
     }
+    target.fresh = false;
+    // Changes merged into this frame show with it.
+    let mut pending = std::mem::take(&mut *locked(&layer.extra.pending));
+    let windows = pending.apply();
     if target.window.is_some() {
         present(target, layer)?;
-    } else {
-        // A child shows through its root's window, which may belong to another thread right now.
-        drop(guard);
-        let root = layer.root();
-        if !Arc::ptr_eq(&root, layer) {
-            let mut root_target = root.target();
-            if let Some(root_target) = root_target.as_mut() {
-                present(root_target, &root)?;
-            }
-        }
     }
-    if !layer.posted.swap(true, Ordering::Relaxed) {
+    drop(guard);
+    // A child shows through its window, which may belong to another thread right now.
+    let mut others: Vec<Arc<Layer>> = windows
+        .into_iter()
+        .filter(|window| !Arc::ptr_eq(window, layer))
+        .collect();
+    if let Some(window) = layer.window_layer()
+        && !Arc::ptr_eq(&window, layer)
+        && !others.iter().any(|other| Arc::ptr_eq(other, &window))
+    {
+        others.push(window);
+    }
+    for window in others {
+        present_window(&window)?;
+    }
+    if !layer.extra.posted.swap(true, Ordering::Relaxed) {
         let since = LOADED.get().map_or(0, |start| start.elapsed().as_millis());
         eprintln!(
             "uxdroid: first frame posted on {} {width}x{height}, {since} ms after the framework started",
@@ -930,7 +1099,7 @@ unsafe extern "system" fn surface_unlock_and_post(
 /// # Safety
 /// `env` must be the calling thread's JNI environment.
 pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
-    let control: [Method; 10] = [
+    let control: [Method; 22] = [
         (
             c"nativeCreate",
             c"(Landroid/view/SurfaceSession;Ljava/lang/String;IIIIJLandroid/os/Parcel;)J",
@@ -948,6 +1117,15 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
             c"(JII)V",
             f!(control_buffer_size),
         ),
+        (c"nativeCreateTransaction", c"()J", f!(transaction_create)),
+        (
+            c"nativeGetNativeTransactionFinalizer",
+            c"()J",
+            f!(transaction_finalizer),
+        ),
+        (c"nativeApplyTransaction", c"(JZZ)V", f!(transaction_apply)),
+        (c"nativeMergeTransaction", c"(JJ)V", f!(transaction_merge)),
+        (c"nativeClearTransaction", c"(J)V", f!(transaction_clear)),
         (c"nativeReparent", c"(JJJ)V", f!(control_reparent)),
         (c"nativeSetPosition", c"(JJFF)V", f!(control_position)),
         (c"nativeSetLayer", c"(JJI)V", f!(control_layer)),
@@ -957,8 +1135,37 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
             f!(control_relative_layer),
         ),
         (c"nativeSetFlags", c"(JJII)V", f!(control_flags)),
+        (c"nativeSetAlpha", c"(JJF)V", f!(control_alpha)),
+        (c"nativeSetMatrix", c"(JJFFFF)V", f!(control_matrix)),
+        (c"nativeSetScale", c"(JJFF)V", f!(control_scale)),
+        (c"nativeSetCrop", c"(JJFFFF)V", f!(control_crop)),
+        (
+            c"nativeSetWindowCrop",
+            c"(JJIIII)V",
+            f!(control_window_crop),
+        ),
+        (
+            c"nativeSetCornerRadius",
+            c"(JJF)V",
+            f!(control_corner_radius),
+        ),
+        (
+            c"nativeSetBufferTransform",
+            c"(JJI)V",
+            f!(control_buffer_transform),
+        ),
     ];
-    let queue: [Method; 5] = [
+    let queue: [Method; 7] = [
+        (
+            c"nativeMergeWithNextTransaction",
+            c"(JJJ)V",
+            f!(queue_merge_with_next),
+        ),
+        (
+            c"nativeApplyPendingTransactions",
+            c"(JJ)V",
+            f!(queue_apply_pending),
+        ),
         (c"nativeCreate", c"(Ljava/lang/String;Z)J", f!(queue_create)),
         (c"nativeDestroy", c"(J)V", f!(queue_destroy)),
         (
