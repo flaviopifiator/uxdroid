@@ -11,6 +11,7 @@ use std::process::{Command, ExitCode};
 
 use uxdroid_apk::{ExecutionPath, extract_native_libs, fingerprint, host_abi, inspect};
 
+use crate::install::valid_package;
 use crate::{EXIT_FAILURE, EXIT_USAGE, RUN_USAGE, fail};
 
 /// The boot class path, in the order the boot image was compiled with.
@@ -81,15 +82,6 @@ fn boot_class_path(runtime: &Path) -> String {
         })
         .collect();
     jars.join(":")
-}
-
-/// App ids become directory names, so only their documented characters are accepted.
-fn valid_package(package: &str) -> bool {
-    !package.is_empty()
-        && !package.starts_with('.')
-        && package
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'_')
 }
 
 fn runtime_environment(command: &mut Command, runtime: &Path, data: &Path, library_path: &str) {

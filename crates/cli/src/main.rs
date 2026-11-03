@@ -8,9 +8,11 @@ use uxdroid_apk::{Apk, host_abi, inspect};
 const INSPECT_USAGE: &str = "usage: uxdroid inspect <apk>";
 const LOAD_USAGE: &str = "usage: uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]";
 const RUN_USAGE: &str = "usage: uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]";
+const INSTALL_USAGE: &str = "usage: uxdroid install <apk> --data <dir>";
 const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
                      uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n       \
-                     uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]";
+                     uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]\n       \
+                     uxdroid install <apk> --data <dir>";
 const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 
@@ -21,9 +23,12 @@ fn main() -> ExitCode {
         Some((command, rest)) if command == "inspect" => run_inspect(rest),
         Some((command, rest)) if command == "load" => native::run_load(rest),
         Some((command, rest)) if command == "run" => run_command(rest),
+        Some((command, rest)) if command == "install" => install::run_install(rest),
         _ => fail(USAGE, EXIT_USAGE),
     }
 }
+
+mod install;
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 mod run;
