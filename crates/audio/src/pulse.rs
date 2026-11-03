@@ -45,6 +45,7 @@ type Transfer = unsafe extern "C" fn(*mut c_void, *const c_void, usize, *mut c_i
 type Read = unsafe extern "C" fn(*mut c_void, *mut c_void, usize, *mut c_int) -> c_int;
 type Latency = unsafe extern "C" fn(*mut c_void, *mut c_int) -> u64;
 type Free = unsafe extern "C" fn(*mut c_void);
+type Flush = unsafe extern "C" fn(*mut c_void, *mut c_int) -> c_int;
 type StrError = unsafe extern "C" fn(c_int) -> *const c_char;
 
 struct Library {
@@ -53,6 +54,7 @@ struct Library {
     read: Read,
     latency: Latency,
     free: Free,
+    flush: Flush,
     strerror: StrError,
 }
 
@@ -70,6 +72,7 @@ fn library() -> Result<&'static Library, Error> {
                     read: crate::dl::function(simple, c"pa_simple_read")?,
                     latency: crate::dl::function(simple, c"pa_simple_get_latency")?,
                     free: crate::dl::function(simple, c"pa_simple_free")?,
+                    flush: crate::dl::function(simple, c"pa_simple_flush")?,
                     strerror: crate::dl::function(pulse, c"pa_strerror")?,
                 })
             }
@@ -189,6 +192,14 @@ impl Sink for Stream {
 }
 
 impl Capture for Stream {
+    /// The server records from the moment the stream connects; what it kept before the app started
+    /// recording is stale, so it is dropped.
+    fn resume(&mut self) {
+        let mut error = 0;
+        // SAFETY: a live handle.
+        unsafe { (self.library.flush)(self.handle, &mut error) };
+    }
+
     fn read(&mut self, samples: &mut [f32]) -> Result<(), String> {
         let mut error = 0;
         // SAFETY: the slice is valid and writable for its length in bytes.
