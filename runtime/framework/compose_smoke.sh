@@ -3,7 +3,8 @@
 # SDK-built APK that knows nothing about uxdroid: a layer of the app's own moved, scaled, cropped,
 # faded and rounded by one transaction that shows nothing until it is applied, and then all at once;
 # only damaged pixels sent to the compositor; a dialog and a popup as subsurfaces that take their own
-# input; a resize of the toplevel laying the window out again; and a close destroying the activity.
+# input; frame callbacks pacing an animation; a resize of the toplevel laying the window out again;
+# and a close destroying the activity.
 # Runs in the dev service; the APK is ours, built by build_system.sh.
 set -u -o pipefail
 WORK=$(mktemp -d)
@@ -11,7 +12,7 @@ trap 'rm -rf "$WORK"' EXIT
 fail() {
     echo "FAIL: $*"
     tail -"${TAIL:-25}" "$WORK/out" | cut -c1-220
-    tail -12 "$WORK/compositor" | cut -c1-160
+    tail -"${CTAIL:-12}" "$WORK/compositor" | cut -c1-160
     exit 1
 }
 
@@ -135,6 +136,31 @@ C=1 wait_for "subsurface [0-9]+ commit 160x80 at 50,500" "the popup's subsurface
 send "click $PX $PY"
 wait_for "^compose: popup clicked$" "a click on the popup's button"
 echo "ok: a popup is a subsurface at 50,500 and its button takes a click at $PX,$PY"
+
+# Frames per second the compositor received, over two seconds.
+rate() {
+    local first last
+    pause 0.5
+    first=$(grep -c -E "\] commit [0-9]+ " "$WORK/compositor")
+    pause 2
+    last=$(grep -c -E "\] commit [0-9]+ " "$WORK/compositor")
+    echo $(( (last - first) / 2 ))
+}
+send "key 49"
+wait_for "^compose: animating$" "an animation"
+send "frames 30"
+RATE=$(rate)
+[ "$RATE" -ge 24 ] && [ "$RATE" -le 34 ] || fail "an animation drew $RATE frames per second with frame callbacks at 30 Hz"
+echo "ok: frame callbacks at 30 Hz pace Choreographer: $RATE frames per second"
+send "frames 0"
+RATE=$(rate)
+[ "$RATE" -ge 45 ] && [ "$RATE" -le 62 ] || fail "an animation drew $RATE frames per second with immediate frame callbacks"
+echo "ok: an eager compositor gets no more than the display's 60 Hz: $RATE frames per second"
+send "frames stop"
+RATE=$(rate)
+[ "$RATE" -ge 10 ] && [ "$RATE" -le 25 ] || fail "an animation drew $RATE frames per second with no frame callbacks"
+echo "ok: with no frame callbacks, as for a hidden window, the app does not stall: $RATE frames per second"
+send "frames 0"
 
 send "resize 600 500"
 wait_for "^compose: window 600x500$" "a layout at the new size"

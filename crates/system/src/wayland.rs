@@ -16,8 +16,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-    wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
+    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
+    wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -28,6 +28,7 @@ use crate::input::keys::{self, Modifiers};
 use crate::input::translate::Translator;
 use crate::input::xkb::Keymap;
 use crate::input::{self, Event};
+use crate::vsync;
 
 const BYTES_PER_PIXEL: i32 = 4;
 const MAX_DIMENSION: i32 = 16384;
@@ -59,6 +60,8 @@ struct State {
     scroll: (f32, f32),
     discrete: bool,
     events: Vec<(Target, Event)>,
+    /// Surfaces waiting for a frame callback.
+    frames: Vec<u32>,
 }
 
 impl State {
@@ -424,9 +427,16 @@ impl Window {
         }
     }
 
-    /// Shows the frame, telling the compositor that only `damage` changed.
+    /// Shows the frame, telling the compositor that only `damage` changed, and asks for a frame
+    /// callback, which paces the app's vsync.
     pub fn present(&mut self, damage: Rect) -> Result<(), Box<dyn Error>> {
         with_display(|display| {
+            let key = self.key();
+            if !display.state.frames.contains(&key) {
+                self.surface.frame(&display.queue.handle(), key);
+                display.state.frames.push(key);
+                vsync::frame_requested();
+            }
             self.surface.attach(Some(&self.pixels.buffer), 0, 0);
             self.surface
                 .damage_buffer(damage.left, damage.top, damage.width(), damage.height());
@@ -442,6 +452,17 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         let mut display = display();
+        let key = self.key();
+        if let Some(display) = display.as_mut()
+            && let Some(at) = display
+                .state
+                .frames
+                .iter()
+                .position(|surface| *surface == key)
+        {
+            display.state.frames.remove(at);
+            vsync::frame_dropped();
+        }
         match &self.role {
             Role::Toplevel(xdg_surface, toplevel) => {
                 toplevel.destroy();
@@ -770,6 +791,24 @@ impl Dispatch<wl_touch::WlTouch, ()> for State {
         state
             .events
             .extend(events.into_iter().map(|event| (surface, event)));
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, u32> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        surface: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event
+            && let Some(at) = state.frames.iter().position(|key| key == surface)
+        {
+            state.frames.remove(at);
+            vsync::frame_done();
+        }
     }
 }
 

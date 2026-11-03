@@ -18,6 +18,8 @@ per line:
     shot PATH           write the window's last frame as a binary PPM
     resize W H          configure the toplevel to W by H
     close               ask the toplevel to close
+    frames HZ           answer frame callbacks at HZ after each commit; 0 (the default) at once,
+                        `stop` never, as for a hidden window
 
 It prints `[compositor] commit N WxH damage X,Y,W,H` for each frame of the toplevel,
 `[compositor] subsurface S commit WxH at X,Y damage X,Y,W,H` for each of a subsurface, `subsurface S
@@ -84,6 +86,9 @@ contents = {}  # surface -> (pixels, width, height)
 subsurfaces = []  # [subsurface, surface, x, y], bottom first
 pointer_on = None  # the surface the pointer is in
 size_wanted = (0, 0)
+callbacks = {}  # surface -> frame callbacks asked for before its next commit
+due = []  # (time, callback) frame callbacks to answer
+pace = 0.0  # frame callback rate; 0 answers at once, None never
 waiting = []  # (sent time, command, hash when sent)
 focused = False
 wm_base = None
@@ -242,6 +247,11 @@ def run(command):
         configure(window[0], focused)
         log("sent resize", rest)
         return
+    elif name == "frames":
+        global pace
+        pace = None if rest == "stop" else float(rest)
+        log("frames", rest)
+        return
     elif name == "close":
         send(window[0], 1)
         log("sent close")
@@ -334,6 +344,11 @@ def commit(surface):
         set_focus(True)
 
 
+def done(callback):
+    send(callback, 0, struct.pack("<I", ms()))
+    send(1, 1, struct.pack("<I", callback))
+
+
 def handle(object_id, opcode, body):
     global window, seat_version, wm_base
     kind = objects.get(object_id, "?")
@@ -410,11 +425,16 @@ def handle(object_id, opcode, body):
         elif opcode == 1:
             surfaces[object_id] = word(0)
         elif opcode == 3:
-            callback = word(0)
-            send(callback, 0, struct.pack("<I", ms()))
-            send(1, 1, struct.pack("<I", callback))
+            callbacks.setdefault(object_id, []).append(word(0))
         elif opcode == 6:
             commit(object_id)
+            # Frame callbacks are answered once the commit is shown: at once, or on the next tick.
+            for callback in callbacks.pop(object_id, []):
+                if pace == 0:
+                    done(callback)
+                elif pace:
+                    period = 1.0 / pace
+                    due.append(((time.monotonic() // period + 1) * period, callback))
     elif kind == "xdg_wm_base":
         if opcode == 2:
             xdg = word(0)
@@ -449,7 +469,15 @@ def handle(object_id, opcode, body):
 
 
 while True:
-    readable, _, _ = select.select([connection, fifo], [], [])
+    timeout = max(0.0, min(when for when, _ in due) - time.monotonic()) if due else None
+    readable, _, _ = select.select([connection, fifo], [], [], timeout)
+    now = time.monotonic()
+    for entry in [entry for entry in due if entry[0] <= now]:
+        due.remove(entry)
+        try:
+            done(entry[1])
+        except OSError:
+            sys.exit(0)
     if fifo in readable:
         commands += os.read(fifo, 4096)
         while b"\n" in commands:

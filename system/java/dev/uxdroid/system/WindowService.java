@@ -35,6 +35,22 @@ public final class WindowService {
         return session;
     }
 
+    /**
+     * Animations run at their own speed. A default of 0 would read as animations turned off, which
+     * makes every ValueAnimator jump to its end after one frame.
+     */
+    public float getCurrentAnimatorScale() {
+        return 1f;
+    }
+
+    public float getAnimationScale(int which) {
+        return 1f;
+    }
+
+    public float[] getAnimationScales() {
+        return new float[] {1f, 1f, 1f};
+    }
+
     /** The display's bounds: windows fill it, with no system bars and no cutout. */
     static Rect displayBounds() {
         return new Rect(0, 0, DisplayService.widthPixels(), DisplayService.heightPixels());

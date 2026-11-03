@@ -6,14 +6,18 @@
 //! tick of a 60 Hz clock on `CLOCK_MONOTONIC`, the clock of `System.nanoTime`, and the tick calls
 //! the receiver's `dispatchVsync` on its Looper thread, as Android's native receiver does.
 //!
-//! A timer rather than Wayland frame callbacks: Choreographer runs before any window exists, and a
-//! compositor stops sending frame callbacks for hidden windows, which would stall the app's
-//! animations and lifecycle work along with its drawing.
+//! The timer follows the compositor: each frame a window presents asks for a Wayland frame
+//! callback, and while one is pending, a scheduled vsync waits for it and fires when it comes, so
+//! the app draws at the pace the compositor shows frames, but never faster than the 60 Hz the
+//! display reports. The 60 Hz clock alone paces the app before any window exists, and a vsync that
+//! waits for a callback fires anyway after three frames, since a compositor stops sending them for
+//! hidden windows and the app's animations and lifecycle work must not stall. The NDK's
+//! `AChoreographer` reaches the same clock through [`clock`].
 
 use std::ffi::c_void;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use jni_sys::{JNIEnv, jclass, jint, jlong, jobject, jvalue};
 
@@ -30,6 +34,178 @@ const EVENT_INPUT: jint = 1;
 /// The tick at or after which a vsync scheduled at `now` fires.
 pub fn next_tick(now: i64) -> i64 {
     (now / FRAME_INTERVAL_NANOS + 1) * FRAME_INTERVAL_NANOS
+}
+
+/// How long a vsync waits for the compositor's frame callback before it fires anyway: a hidden
+/// window gets none, and its app must not stall.
+pub const FALLBACK_NANOS: i64 = 3 * FRAME_INTERVAL_NANOS;
+
+/// When a vsync scheduled at `now` fires, `last` being the last vsync delivered: on the next tick
+/// of the 60 Hz clock, or when a window waits for the compositor's frame callback, at that
+/// callback, with this deadline in case it never comes. Never sooner than one period after `last`.
+pub fn deadline(now: i64, last: i64, waiting_for_frame: bool) -> i64 {
+    if waiting_for_frame {
+        on_frame(now, last) + FALLBACK_NANOS
+    } else {
+        next_tick(now).max(last.saturating_add(FRAME_INTERVAL_NANOS))
+    }
+}
+
+/// When a vsync waiting for a frame callback fires once the callback came at `now`: at once, but
+/// never sooner after the last vsync than the refresh period the display reports.
+pub fn on_frame(now: i64, last: i64) -> i64 {
+    now.max(last.saturating_add(FRAME_INTERVAL_NANOS))
+}
+
+/// Windows that asked the compositor for a frame callback and have not had it yet.
+static FRAMES_PENDING: AtomicUsize = AtomicUsize::new(0);
+/// When the last vsync was delivered, to any receiver.
+static LAST_VSYNC: AtomicI64 = AtomicI64::new(0);
+/// An armed vsync timer, whether it waits for the compositor's frame, and where it reports its
+/// tick, which its owner keeps alive until it disarms the timer.
+struct Armed {
+    fd: RawFd,
+    tick: *const AtomicI64,
+    waiting: bool,
+}
+
+// SAFETY: the tick is an atomic its owner keeps alive while the entry exists; it is only read and
+// written under ARMED's lock.
+unsafe impl Send for Armed {}
+
+static ARMED: Mutex<Vec<Armed>> = Mutex::new(Vec::new());
+
+fn armed() -> std::sync::MutexGuard<'static, Vec<Armed>> {
+    ARMED.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn set_timer(fd: RawFd, when: i64) -> std::io::Result<()> {
+    let when = libc::itimerspec {
+        it_interval: libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        it_value: libc::timespec {
+            tv_sec: when / 1_000_000_000,
+            tv_nsec: when % 1_000_000_000,
+        },
+    };
+    // SAFETY: `when` is a valid itimerspec; an fd that is no timer fails with an error.
+    let status =
+        unsafe { libc::timerfd_settime(fd, libc::TFD_TIMER_ABSTIME, &when, std::ptr::null_mut()) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Arms the timer `fd` for the next vsync and stores in `tick` the time it will report: the
+/// compositor's next frame callback when a window waits for one, else the 60 Hz clock. `tick` must
+/// live until the timer fires or [`disarm`] is called.
+pub fn arm(fd: RawFd, tick: &AtomicI64) -> std::io::Result<()> {
+    let now = monotonic_nanos();
+    let mut armed = armed();
+    let waiting = FRAMES_PENDING.load(Ordering::Acquire) > 0;
+    let when = deadline(now, LAST_VSYNC.load(Ordering::Acquire), waiting);
+    tick.store(when, Ordering::Release);
+    armed.retain(|entry| entry.fd != fd);
+    armed.push(Armed { fd, tick, waiting });
+    set_timer(fd, when)
+}
+
+/// Forgets the timer `fd`: it fired, or it is about to close.
+pub fn disarm(fd: RawFd) {
+    armed().retain(|entry| entry.fd != fd);
+}
+
+/// A window asked the compositor for a frame callback. Vsyncs already armed on the 60 Hz clock,
+/// such as the one an animation asked for before the frame was drawn, wait for it instead.
+pub fn frame_requested() {
+    FRAMES_PENDING.fetch_add(1, Ordering::AcqRel);
+    let now = monotonic_nanos();
+    let when = deadline(now, LAST_VSYNC.load(Ordering::Acquire), true);
+    for entry in armed().iter_mut().filter(|entry| !entry.waiting) {
+        // SAFETY: the owner keeps the tick alive until it disarms, which waits for this lock.
+        let tick = unsafe { &*entry.tick };
+        // One that is already due fires as it is.
+        if tick.load(Ordering::Acquire) <= now {
+            continue;
+        }
+        entry.waiting = true;
+        tick.store(when, Ordering::Release);
+        if let Err(error) = set_timer(entry.fd, when) {
+            eprintln!("uxdroid: cannot move a vsync timer: {error}");
+        }
+    }
+}
+
+/// A window's frame callback will never come: its surface is gone.
+pub fn frame_dropped() {
+    let _ = FRAMES_PENDING.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+}
+
+/// The compositor answered a window's frame callback: every vsync waiting for one fires now.
+pub fn frame_done() {
+    frame_dropped();
+    let now = monotonic_nanos();
+    let when = on_frame(now, LAST_VSYNC.load(Ordering::Acquire));
+    for entry in armed().iter_mut().filter(|entry| entry.waiting) {
+        entry.waiting = false;
+        // SAFETY: the owner keeps the tick alive until it disarms, which waits for this lock.
+        unsafe { (*entry.tick).store(when, Ordering::Release) };
+        if let Err(error) = set_timer(entry.fd, when) {
+            eprintln!("uxdroid: cannot fire a vsync timer: {error}");
+        }
+    }
+}
+
+/// A vsync was delivered at `tick`.
+pub fn delivered(tick: i64) {
+    LAST_VSYNC.fetch_max(tick, Ordering::AcqRel);
+}
+
+/// The frame clock as the NDK's `AChoreographer`, in another library, reaches it: by the address
+/// `VsyncListener.clock()` returns. These are host functions between uxdroid's own libraries, not
+/// exports to app code.
+#[repr(C)]
+pub struct Clock {
+    pub version: u32,
+    /// [`arm`]: 0, or an errno.
+    pub arm: unsafe extern "C" fn(fd: i32, tick: *const AtomicI64) -> i32,
+    pub disarm: extern "C" fn(fd: i32),
+    pub delivered: extern "C" fn(tick: i64),
+}
+
+unsafe extern "C" fn clock_arm(fd: i32, tick: *const AtomicI64) -> i32 {
+    if tick.is_null() {
+        return libc::EINVAL;
+    }
+    // SAFETY: the caller keeps `tick` alive until it disarms the timer, as `Clock` documents.
+    match arm(fd, unsafe { &*tick }) {
+        Ok(()) => 0,
+        Err(error) => error.raw_os_error().unwrap_or(libc::EIO),
+    }
+}
+
+extern "C" fn clock_disarm(fd: i32) {
+    disarm(fd);
+}
+
+extern "C" fn clock_delivered(tick: i64) {
+    delivered(tick);
+}
+
+static CLOCK: Clock = Clock {
+    version: 1,
+    arm: clock_arm,
+    disarm: clock_disarm,
+    delivered: clock_delivered,
+};
+
+/// `VsyncListener.clock()`.
+unsafe extern "system" fn native_clock(_env: *mut JNIEnv, _class: jclass) -> jlong {
+    &CLOCK as *const Clock as jlong
 }
 
 struct Receiver {
@@ -52,6 +228,7 @@ unsafe impl Sync for Receiver {}
 
 impl Drop for Receiver {
     fn drop(&mut self) {
+        disarm(self.timer.as_raw_fd());
         // The Looper must stop watching the fd before it closes. With an exception pending, the
         // listener was never added, and JNI allows no calls but deleting references.
         if let Some(env) = java::attached_env()
@@ -208,31 +385,9 @@ unsafe extern "system" fn native_schedule(env: *mut JNIEnv, _class: jclass, rece
     if receiver.armed.swap(true, Ordering::AcqRel) {
         return;
     }
-    let tick = next_tick(monotonic_nanos());
-    receiver.tick.store(tick, Ordering::Release);
-    let when = libc::itimerspec {
-        it_interval: libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        },
-        it_value: libc::timespec {
-            tv_sec: tick / 1_000_000_000,
-            tv_nsec: tick % 1_000_000_000,
-        },
-    };
-    // SAFETY: the timer is this receiver's own fd, and `when` is a valid itimerspec.
-    let status = unsafe {
-        libc::timerfd_settime(
-            receiver.timer.as_raw_fd(),
-            libc::TFD_TIMER_ABSTIME,
-            &when,
-            std::ptr::null_mut(),
-        )
-    };
-    if status != 0 {
+    if let Err(error) = arm(receiver.timer.as_raw_fd(), &receiver.tick) {
         receiver.armed.store(false, Ordering::Release);
-        let error = std::io::Error::last_os_error();
-        // SAFETY: as above.
+        // SAFETY: ART passes a valid environment.
         unsafe {
             throw(
                 env,
@@ -297,7 +452,9 @@ unsafe fn dispatch(env: *mut JNIEnv, receiver: &Receiver) -> Result<jint, Pendin
         return Ok(EVENT_INPUT);
     }
     receiver.armed.store(false, Ordering::Release);
+    disarm(receiver.timer.as_raw_fd());
     let tick = receiver.tick.load(Ordering::Acquire);
+    delivered(tick);
     let frame = receiver.frame.fetch_add(1, Ordering::AcqRel) + 1;
     // SAFETY: as above; both are WeakReferences.
     unsafe {
@@ -380,7 +537,10 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
             f!(native_latest),
         ),
     ];
-    let listener: [Method; 1] = [(c"dispatch", c"(J)I", f!(listener_dispatch))];
+    let listener: [Method; 2] = [
+        (c"dispatch", c"(J)I", f!(listener_dispatch)),
+        (c"clock", c"()J", f!(native_clock)),
+    ];
     // SAFETY: each table matches its Java declarations.
     unsafe {
         register(env, c"android/view/DisplayEventReceiver", &receiver)?;
@@ -395,6 +555,34 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vsync_waits_for_the_compositor_frame_with_a_deadline() {
+        let now = 10 * FRAME_INTERVAL_NANOS + 5;
+        // No window waits for a frame: the 60 Hz clock.
+        assert_eq!(deadline(now, 0, false), next_tick(now));
+        // Back on the clock after a frame callback fired off it: never sooner than one period.
+        let last = next_tick(now) - FRAME_INTERVAL_NANOS / 4;
+        assert_eq!(deadline(now, last, false), last + FRAME_INTERVAL_NANOS);
+        // A frame is pending: the callback will fire it; this is only the deadline.
+        assert_eq!(deadline(now, 0, true), now + FALLBACK_NANOS);
+        // Never earlier than the reported rate allows after the last vsync.
+        let last = now - 1;
+        assert_eq!(
+            deadline(now, last, true),
+            last + FRAME_INTERVAL_NANOS + FALLBACK_NANOS
+        );
+    }
+
+    #[test]
+    fn a_frame_callback_fires_the_vsync_at_once_within_the_reported_rate() {
+        let last = 100 * FRAME_INTERVAL_NANOS;
+        // The compositor's frame came late (30 Hz): at once.
+        let late = last + 2 * FRAME_INTERVAL_NANOS;
+        assert_eq!(on_frame(late, last), late);
+        // It came early (a fast or eager compositor): not before 60 Hz allows.
+        assert_eq!(on_frame(last + 1000, last), last + FRAME_INTERVAL_NANOS);
+    }
 
     #[test]
     fn vsync_fires_on_the_next_60_hz_tick() {

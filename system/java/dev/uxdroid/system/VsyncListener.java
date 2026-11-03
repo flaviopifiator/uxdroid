@@ -22,4 +22,10 @@ final class VsyncListener implements MessageQueue.OnFileDescriptorEventListener 
 
     /** Returns the events to keep watching, or 0 once the receiver is gone. */
     private static native int dispatch(long receiver);
+
+    /**
+     * The address of the frame clock in libuxdroid_system.so, which the NDK's AChoreographer, in
+     * another library, follows too: the compositor's frame callbacks, else a 60 Hz clock.
+     */
+    static native long clock();
 }

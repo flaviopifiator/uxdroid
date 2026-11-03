@@ -1,5 +1,6 @@
 package com.example.compose;
 
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Canvas;
@@ -20,7 +21,8 @@ import android.widget.TextView;
 
 /**
  * A plain SDK Activity that composes: a layer of its own over its window, moved, scaled, cropped,
- * faded and rounded by one transaction; a dialog; a popup. It knows nothing about uxdroid. Each
+ * faded and rounded by one transaction; a dialog; a popup; an endless animation. It knows nothing
+ * about uxdroid. Each
  * press of N goes one step further, and it prints what it did, so a scripted compositor can check
  * the screen between steps.
  */
@@ -132,6 +134,16 @@ public class ComposeActivity extends Activity {
                     button.getLocationOnScreen(at);
                     System.out.println("compose: popup at " + (at[0] + 80) + " " + (at[1] + 40));
                 });
+                break;
+            }
+            case 6: {
+                // Endless: each frame moves the label, so the frame rate is the vsync rate.
+                ValueAnimator animator = ValueAnimator.ofFloat(0, 100);
+                animator.setDuration(1000);
+                animator.setRepeatCount(ValueAnimator.INFINITE);
+                animator.addUpdateListener(a -> label.setTranslationX((Float) a.getAnimatedValue()));
+                animator.start();
+                System.out.println("compose: animating");
                 break;
             }
             default:
