@@ -871,12 +871,26 @@ unsafe extern "C" fn enqueue(interface: *const c_void, buffer: *const c_void, si
     SUCCESS
 }
 
+/// Empties the queue and counts from its first buffer again, as Android's `Clear` does.
 unsafe extern "C" fn clear(interface: *const c_void) -> Result {
     let Some(fifo) = fifo_of(interface) else {
         return PARAMETER_INVALID;
     };
-    lock(&fifo.queue).buffers.clear();
+    let mut queue = lock(&fifo.queue);
+    queue.buffers.clear();
+    queue.completed = 0;
     SUCCESS
+}
+
+/// Whether the queue's player or recorder is stopped; `None` for an unknown interface.
+fn queue_stopped(interface: *const c_void) -> Option<bool> {
+    owner::<Player>(interface, offset_of!(Player, queue))
+        .map(|player| player.play_state.load(Ordering::Acquire) == PLAYSTATE_STOPPED)
+        .or_else(|| {
+            owner::<Recorder>(interface, offset_of!(Recorder, queue)).map(|recorder| {
+                recorder.record_state.load(Ordering::Acquire) == RECORDSTATE_STOPPED
+            })
+        })
 }
 
 unsafe extern "C" fn queue_state(interface: *const c_void, state: *mut [u32; 2]) -> Result {
@@ -900,6 +914,10 @@ unsafe extern "C" fn queue_register(
     let Some(fifo) = fifo_of(interface) else {
         return PARAMETER_INVALID;
     };
+    // As Android: the device thread calls the callback, so it changes only while stopped.
+    if queue_stopped(interface) != Some(true) {
+        return PRECONDITIONS_VIOLATED;
+    }
     lock(&fifo.queue).callback = callback.map(|callback| (callback, context as usize));
     SUCCESS
 }
@@ -2432,6 +2450,76 @@ mod tests {
         }
         .gains();
         assert_eq!(left_only, (1.0, 0.0));
+    }
+
+    #[test]
+    fn a_queue_callback_changes_only_while_stopped_and_clear_restarts_the_index() {
+        let (object, engine) = engine();
+        let mix = output_mix(engine);
+        let queue_locator = [LOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2];
+        let player = player(
+            engine,
+            mix,
+            &queue_locator,
+            STEREO_16.as_ptr(),
+            &[ids::SL_IID_BUFFERQUEUE.0],
+        )
+        .unwrap();
+        realize(player);
+        let play = interface::<PlayMethods>(player, &ids::SL_IID_PLAY);
+        let queue = interface::<QueueMethods>(player, &ids::SL_IID_BUFFERQUEUE);
+        let played = Mutex::new(Played {
+            buffers: Vec::new(),
+            at: Vec::new(),
+        });
+        let buffer = [0x1234i16; 160];
+        // SAFETY: live interfaces; the buffer and the record outlive the player.
+        unsafe {
+            let q = &**queue;
+            let context = (&raw const played).cast_mut().cast();
+            assert_eq!(
+                (q.register_callback)(queue.cast(), Some(on_played), context),
+                SUCCESS
+            );
+            assert_eq!(
+                (q.enqueue)(queue.cast(), buffer.as_ptr().cast(), 320),
+                SUCCESS
+            );
+            assert_eq!(
+                ((**play).set_play_state)(play.cast(), PLAYSTATE_PLAYING),
+                SUCCESS
+            );
+            // As Android: the callback the device thread calls changes only while stopped.
+            assert_eq!(
+                (q.register_callback)(queue.cast(), None, std::ptr::null_mut()),
+                PRECONDITIONS_VIOLATED
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while lock(&played).buffers.is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                ((**play).set_play_state)(play.cast(), PLAYSTATE_STOPPED),
+                SUCCESS
+            );
+            assert_eq!(
+                (q.register_callback)(queue.cast(), None, std::ptr::null_mut()),
+                SUCCESS
+            );
+            let mut state = [9u32; 2];
+            assert_eq!((q.get_state)(queue.cast(), &mut state), SUCCESS);
+            assert_eq!(state, [0, 1]);
+            assert_eq!((q.clear)(queue.cast()), SUCCESS);
+            assert_eq!((q.get_state)(queue.cast(), &mut state), SUCCESS);
+            assert_eq!(
+                state,
+                [0, 0],
+                "a cleared queue counts from its first buffer again"
+            );
+        }
+        destroy(player);
+        destroy(mix);
+        destroy(object);
     }
 
     #[test]
