@@ -104,9 +104,10 @@ Each milestone removes the largest remaining risk first.
 | 1 | Bionic loader in Rust | An NDK-built x86_64 `.so` runs under glibc |
 | 2 | ART boots on the host | A DEX `main()` runs as compiled code |
 | 3 | Launcher and first `Activity` | An APK opens a Wayland window |
-| 4 | `arm64-v8a` translation | ARM-only native apps run on x86_64 |
-| 5 | Google Play | See below |
-| 6 | macOS | Once the product is complete and optimized on Linux. iOS is out of scope. |
+| 4 | AOSP's framework | A real app, RustDesk's `x86_64` build, opens its screen |
+| 5 | `arm64-v8a` translation | ARM-only native apps run on x86_64 |
+| 6 | Google Play | See below |
+| 7 | macOS | Once the product is complete and optimized on Linux. iOS is out of scope. |
 
 ## Known limit: Google Play
 
