@@ -50,6 +50,7 @@ public final class Launcher {
         Boot.start(args[first], args[first + 1]);
         Services.register("permissionmgr", android.permission.IPermissionManager.class, new PermissionManager());
         App app = App.parse(new File(args[first + 2]), args.length - first == 4 ? args[first + 3] : null);
+        Permissions.declare(app.parsed.requestedPermissions);
         Services.register("activity", IActivityManager.class, new ActivityManager(app, once));
         Services.register("activity_task", IActivityTaskManager.class, new ActivityTaskManager());
         Services.register("package", IPackageManager.class, new PackageManager(app));
@@ -64,6 +65,7 @@ public final class Launcher {
         Services.register("content", android.content.IContentService.class, null);
         // Flutter's platform plugin holds the ClipboardManager, which needs the service to exist.
         Services.register("clipboard", android.content.IClipboard.class, null);
+        Services.register("audio", android.media.IAudioService.class, new AudioService());
         Services.register("mount", android.os.storage.IStorageManager.class, new StorageService(dataRoot()));
         Services.register("device_identifiers", android.os.IDeviceIdentifiersPolicyService.class,
                 new DeviceIdentifiers());
