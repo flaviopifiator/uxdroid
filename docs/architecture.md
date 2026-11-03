@@ -225,7 +225,7 @@ Every Android audio API an app uses becomes one stream of `crates/audio`: interl
 
 | Value | Backend |
 |-------|---------|
-| unset | The PulseAudio protocol, else ALSA's `default` device, else silence with a warning; the first that opens is kept for the process |
+| unset | The PulseAudio protocol, else ALSA's `default` device, else silence with a warning; the first server or device that opens is kept for the process, while silence is tried again at the next stream |
 | `pulse`, `pulse:<server>` | The PulseAudio protocol only |
 | `alsa`, `alsa:<device>` | ALSA only |
 | `null` | Silence, at the device clock |
