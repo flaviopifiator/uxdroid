@@ -338,6 +338,7 @@ version = "0.1.0"
 dependencies = [
  "jni-sys",
  "libc",
+ "uxdroid-audio",
  "uxdroid-bridge",
 ]
 
@@ -358,6 +359,7 @@ version = "0.1.0"
 dependencies = [
  "jni-sys",
  "libc",
+ "uxdroid-audio",
  "uxdroid-platform",
 ]
 

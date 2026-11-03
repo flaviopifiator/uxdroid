@@ -8,6 +8,7 @@
 //! `liblog` lives in the bridge itself, next to the printf machinery it shares with bionic's libc.
 #![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 
+mod aaudio;
 mod assets;
 mod bitmap;
 mod egl;
@@ -149,7 +150,7 @@ pub static LIBJNIGRAPHICS: Table = Table {
 };
 
 /// Every table this crate serves.
-pub fn tables() -> [&'static Table; 6] {
+pub fn tables() -> [&'static Table; 7] {
     [
         &LIBANDROID,
         &LIBJNIGRAPHICS,
@@ -157,6 +158,7 @@ pub fn tables() -> [&'static Table; 6] {
         &gles_table::GLESV2,
         &gles_table::GLESV3,
         &opensles::TABLE,
+        &aaudio::TABLE,
     ]
 }
 

@@ -282,6 +282,9 @@ impl Jni {
                 Some(b'I') => jvalue {
                     i: (table.v1_1.CallStaticIntMethodA)(self.0, class, id, args),
                 },
+                Some(b'Z') => jvalue {
+                    z: (table.v1_1.CallStaticBooleanMethodA)(self.0, class, id, args),
+                },
                 Some(b'L' | b'[') => jvalue {
                     l: (table.v1_1.CallStaticObjectMethodA)(self.0, class, id, args),
                 },
