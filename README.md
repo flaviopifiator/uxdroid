@@ -94,6 +94,9 @@ docker compose run --rm -T dev bash /work/runtime/framework/input_smoke.sh
 # One process per app: uxdroid app starts it, a second launch goes to it, and intents, status, list
 # and stop reach it through its control socket.
 docker compose run --rm -T dev bash /work/runtime/framework/control_smoke.sh
+# Apps as systemd user services, with socket_unit.py playing systemd: started on demand through the
+# control socket, again after stop, once per profile, and with a socket passed at once.
+docker compose run --rm -T dev bash /work/runtime/framework/service_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
@@ -175,7 +178,9 @@ stopped com.example.app (process 4242, 2 activities finished)
 | `intent` | Sends an intent to the running app, which must name an activity, an action or data |
 | `status` | The process, its data directory, and its activities from bottom to top, `resumed` or `paused` |
 | `stop` | Finishes every activity, and returns once the process has exited |
-| `list` | Each running app: package, process and data directory |
+| `list` | Each running app: package, followed by `@<profile>` for a profile other than `default`, process and data directory |
+
+`status`, `intent`, `stop` and `list` open a socket only while an instance holds its ownership lock, `<instance>.lock` beside it, so they never start an app whose socket a systemd socket unit holds (see `uxdroid service` below); `start` connects anyway, and that connection is what starts such an app.
 
 The outcome of an intent is `launched`, `new_intent` (the activity's `onNewIntent`) or `brought_forward`, by the activity's launch mode and the intent's flags, as on Android; see [the architecture](docs/architecture.md). A launch of an app that is already running, through `uxdroid app` or the launcher itself, starts no second process.
 
@@ -185,10 +190,67 @@ The outcome of an intent is `launched`, `new_intent` (the activity's `onNewInten
 | `--action <action>`, `--data <uri>` | The intent's action and data |
 | `--extra <key>=<value>` | A string extra. Can repeat |
 | `--flags <n>` | `Intent.setFlags`, decimal or `0x` hexadecimal, such as `0x24000000` for `CLEAR_TOP` and `SINGLE_TOP` |
-| `--data-dir <dir>` | `start` only: the absolute data directory given to `uxdroid install`. Otherwise `$XDG_DATA_HOME/uxdroid/data` |
+| `--profile <name>` | The profile, an instance of the app over its own data directory with its own control socket. Named as a package is, by letters, digits, `.` and `_`. Otherwise `default` |
+| `--data-dir <dir>` | `start` only: the absolute data directory given to `uxdroid install`. Otherwise the profile's: `$XDG_DATA_HOME/uxdroid/data` for `default`, `$XDG_DATA_HOME/uxdroid/profiles/<name>` for any other |
 | `--runtime <dir>` | `start` only: the runtime, found otherwise as for `uxdroid install` |
 
 Exit codes: `0` success, also for `stop` of an app that is not running; `1` the command failed or the app refused it, with its reason; `2` wrong usage; `3` for `status` and `intent`, the app is not running, printed as `<package> is not running`.
+
+Profiles run one package several times at once, each over its own data directory, as separate users of one phone would. The default profile keeps the names above; profile `work` of `com.example.app` has the socket `com.example.app@work.sock` and the log `com.example.app@work.log`, and the launcher learns its profile from `UXDROID_PROFILE`. Install into a profile by naming its directory:
+
+```sh
+uxdroid install app.apk --data ~/.local/share/uxdroid/profiles/work
+uxdroid app com.example.app start --profile work
+uxdroid app com.example.app status --profile work
+```
+
+Two profiles must not share a data directory: the second finds the instance lock taken and hands its launch to the first one's socket, which is not its own, so it waits 30 s and fails.
+
+### Run an app as a systemd user service
+
+`uxdroid service` makes an installed app, one profile of it, a systemd user service that starts on demand: a socket unit holds its control socket, and the first connection to it, such as `uxdroid app <package> start`, starts the app. It restarts on failure, logs to the journal, and runs inside the memory and CPU limits given here.
+
+```sh
+uxdroid install app.apk --data ~/.local/share/uxdroid/data
+uxdroid service enable com.example.app
+systemctl --user daemon-reload && systemctl --user enable --now uxdroid-com.example.app@default.socket
+uxdroid app com.example.app start
+journalctl --user -u uxdroid-com.example.app@default.service
+```
+
+`enable` writes two units into `$XDG_CONFIG_HOME/systemd/user` (`~/.config/systemd/user`) and prints the `systemctl --user` command that activates them; with `--now` it runs that command itself. Nothing else runs `systemctl`.
+
+| Command | Does |
+|---------|------|
+| `enable <package>` | Writes `uxdroid-<package>@<profile>.socket` and `.service` for an installed app, replacing earlier ones it wrote |
+| `disable <package>` | Removes them and the links `systemctl --user enable` made, then prints how to stop what still runs; with `--now`, runs `systemctl --user disable --now` first and `daemon-reload` after |
+| `status <package>` | The units, the socket, the data directory, whether it starts at login, and the running process if any. It never connects to a socket no instance serves, which would start the app |
+| `run <package>` | The units' command: runs the app in the foreground, this process becoming the launcher, so the socket systemd passes reaches it. Without systemd it runs as `uxdroid app start` would, attached |
+
+| Option | Meaning |
+|--------|---------|
+| `--profile <name>` | The profile, as for `uxdroid app`. Otherwise `default` |
+| `--data-dir <dir>` | `enable`, `run`: the data directory the app was installed into. Otherwise the profile's |
+| `--runtime <dir>` | `enable`, `run`: the runtime, found otherwise as for `uxdroid install` |
+| `--memory-max <size>`, `--memory-high <size>` | `enable`: the cgroup's `MemoryMax=` and `MemoryHigh=`, in bytes with an optional `K`, `M`, `G` or `T`, a percentage, or `infinity`. Otherwise unlimited |
+| `--cpu-weight <n>` | `enable`: `CPUWeight=`, 1 to 10000. Otherwise 100 |
+| `--on-login` | `enable`: also start the app when the user logs in (`WantedBy=default.target`), not only on demand |
+| `--now` | `enable`, `disable`: run `systemctl --user` instead of printing it |
+
+The units are written per package and profile rather than from one template, because what differs between apps is most of the unit: the data directory, the network the manifest asks for, the limits and the start at login. Their names keep systemd's template syntax, with the profile as instance, so `systemctl --user list-units 'uxdroid-*'` lists them. The socket unit listens on `%t/uxdroid/<package>.sock` (`<package>@<profile>.sock` for another profile) with mode 0600 in a directory of mode 0700, the same socket `uxdroid app` uses. The service:
+
+| Setting | Why |
+|---------|-----|
+| `ExecStart=<uxdroid> service run <package> --profile ... --data-dir ... --runtime ...` | Absolute paths, resolved at `enable`; `%` and `$` in them are escaped, and paths with spaces, quotes, backslashes or control characters are refused |
+| `Environment=` `UXDROID_PROFILE`, `UXDROID_RUNTIME`, `ANDROID_DATA` | `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and the sound server come from the user manager's environment, which desktop sessions fill; no secret is written |
+| `Restart=on-failure`, `RestartSec=2`, at most 5 starts in 60 s, `RestartPreventExitStatus=75` | 75 is a start that finds the app already running over the same data directory outside the service |
+| `StandardOutput=journal`, `StandardError=journal`, `SyslogIdentifier=uxdroid-<package>@<profile>` | The app's log is the journal |
+| `NoNewPrivileges`, `ProtectSystem=strict` with `ReadWritePaths=<data> %t/uxdroid`, `PrivateTmp`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `SystemCallArchitectures=native`, `UMask=0077` | Hardening that leaves Wayland and the sound server reachable: they are Unix sockets, which a read-only file system does not block. `MemoryDenyWriteExecute` is not set, because ART's JIT writes code |
+| `RestrictAddressFamilies=AF_UNIX AF_NETLINK`, plus `AF_INET AF_INET6` when the manifest names `android.permission.INTERNET` | The network only for apps that ask for it |
+
+On a user manager, `ProtectSystem`, `PrivateTmp` and the other namespace settings need unprivileged user namespaces; where the host restricts them, as Ubuntu does through AppArmor, systemd may run the service without those namespaces. Check what applies with `systemd-analyze --user security uxdroid-<package>@<profile>.service`.
+
+Exit codes: `0` success, also for `disable` of a profile with no service; `1` the command failed, such as an app that is not installed or a unit of that name that `uxdroid service` did not write, which is never touched; `2` wrong usage; `3` for `status`, the profile has no service, printed as `<package> has no service for profile <profile>`. `run` exits with the app's status.
 
 ## Tests
 

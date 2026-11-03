@@ -13,6 +13,7 @@ const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
                      uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n       \
                      uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]\n       \
                      uxdroid install <apk> --data <dir>\n       \
+                     uxdroid service enable|disable|status|run <package> [<options>]\n       \
                      uxdroid app <package> status|start|intent|stop [<options>]\n       \
                      uxdroid app list";
 const EXIT_FAILURE: u8 = 1;
@@ -27,6 +28,7 @@ fn main() -> ExitCode {
         Some((command, rest)) if command == "run" => run_command(rest),
         Some((command, rest)) if command == "install" => install::run_install(rest),
         Some((command, rest)) if command == "app" => app_command(rest),
+        Some((command, rest)) if command == "service" => service_command(rest),
         _ => fail(USAGE, EXIT_USAGE),
     }
 }
@@ -35,10 +37,22 @@ fn main() -> ExitCode {
 mod app;
 mod install;
 mod runtime;
+#[cfg(target_os = "linux")]
+mod service;
 
 #[cfg(target_os = "linux")]
 fn app_command(args: &[OsString]) -> ExitCode {
     app::run_app(args)
+}
+
+#[cfg(target_os = "linux")]
+fn service_command(args: &[OsString]) -> ExitCode {
+    service::run_service(args)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn service_command(_args: &[OsString]) -> ExitCode {
+    fail("error: uxdroid service needs a Linux host", EXIT_FAILURE)
 }
 
 #[cfg(not(target_os = "linux"))]

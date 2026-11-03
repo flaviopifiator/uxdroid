@@ -155,13 +155,27 @@ fn start(package: &str) -> Result<jint, String> {
     if control.is_some() {
         return Err("the control socket is already served".into());
     }
+    let profile = super::profile_from_env()?;
     let dir = super::control_dir()?;
-    let listener = match server::bind(&dir, package)? {
+    // Started by systemd through the app's socket unit: its socket is served, not bound again.
+    let bound = match server::activated(&dir, package, &profile)? {
+        Some(listener) => Bound::Listening(listener),
+        None => server::bind_instance(&dir, package, &profile)?,
+    };
+    let listener = match bound {
         Bound::Listening(listener) => listener,
+        Bound::Managed => {
+            return Err(format!(
+                "{} belongs to the app's systemd socket unit; start the app through it, \
+                 with uxdroid app {package} start",
+                super::instance_socket(&dir, package, &profile)?.display()
+            ));
+        }
         Bound::Owned => {
             return Err(format!(
-                "{} is served by another instance of {package}, over another data directory",
-                super::socket_path(&dir, package)?.display()
+                "{} is served by another instance of {package}, over another data directory; \
+                 give each data directory its own profile",
+                super::instance_socket(&dir, package, &profile)?.display()
             ));
         }
     };
@@ -348,7 +362,8 @@ fn call_running(package: &str, intent: &str, deadline: Instant) -> Result<Value,
     let intent = serde_json::from_str::<Value>(intent)
         .map_err(|error| error.to_string())
         .and_then(|value| Intent::from_json(&value).map_err(|failure| failure.message))?;
-    let path = super::socket_path(&super::control_dir()?, package)?;
+    let profile = super::profile_from_env()?;
+    let path = super::instance_socket(&super::control_dir()?, package, &profile)?;
     let stream = loop {
         match client::connect(&path) {
             Ok(stream) => break stream,
@@ -368,10 +383,30 @@ fn call_running(package: &str, intent: &str, deadline: Instant) -> Result<Value,
     }
 }
 
+/// `static native boolean activated()`: whether a service manager passed this process its control
+/// socket, so that a launch cannot be handed to another process through it.
+unsafe extern "system" fn activated(_env: *mut JNIEnv, _class: jclass) -> jboolean {
+    let read = |name: &str| std::env::var(name).ok();
+    let (pid, fds, names) = (
+        read("LISTEN_PID"),
+        read("LISTEN_FDS"),
+        read("LISTEN_FDNAMES"),
+    );
+    matches!(
+        server::listen_fd(
+            std::process::id(),
+            pid.as_deref(),
+            fds.as_deref(),
+            names.as_deref()
+        ),
+        Ok(Some(_))
+    )
+}
+
 /// # Safety
 /// `env` must be the calling thread's JNI environment.
 pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
-    let methods: [Method; 7] = [
+    let methods: [Method; 8] = [
         (c"claim", c"(Ljava/lang/String;)Z", f!(claim)),
         (c"serve", c"(Ljava/lang/String;)I", f!(serve)),
         (c"take", c"()[Ljava/lang/String;", f!(take)),
@@ -381,6 +416,7 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
             f!(answer),
         ),
         (c"close", c"()V", f!(close)),
+        (c"activated", c"()Z", f!(activated)),
         (
             c"intent",
             c"(Ljava/lang/String;)Ljava/lang/String;",

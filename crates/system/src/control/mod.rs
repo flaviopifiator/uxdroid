@@ -9,6 +9,8 @@
 //! `$XDG_RUNTIME_DIR/uxdroid`, or `/tmp/uxdroid-<uid>` without one. Each connection's peer must be the
 //! same user. The protocol is in `protocol`; `server` serves it and `client` calls it.
 
+#[cfg(test)]
+mod activation_tests;
 pub mod client;
 mod java;
 pub mod protocol;
@@ -76,11 +78,56 @@ fn private_dir(dir: &Path) -> Result<PathBuf, String> {
     Ok(dir.to_path_buf())
 }
 
+/// The profile an app runs as when none is named. Its socket and lock keep the package's own name.
+pub const DEFAULT_PROFILE: &str = "default";
+
+/// The variable through which a launcher learns the profile it runs as; unset is the default.
+pub const PROFILE_VARIABLE: &str = "UXDROID_PROFILE";
+
+/// Profiles become file and unit names, so they follow the rule of package names.
+pub fn valid_profile(profile: &str) -> bool {
+    valid_package(profile)
+}
+
+/// The name of one instance of a package: the package for the default profile, else
+/// `<package>@<profile>`. `@` is in neither name, so the two parts never blur.
+pub fn instance_name(package: &str, profile: &str) -> String {
+    if profile == DEFAULT_PROFILE {
+        package.to_string()
+    } else {
+        format!("{package}@{profile}")
+    }
+}
+
+/// The profile named by `UXDROID_PROFILE`, or the default when it is unset or empty.
+pub fn profile_from_env() -> Result<String, String> {
+    match std::env::var(PROFILE_VARIABLE) {
+        Ok(profile) if profile.is_empty() => Ok(DEFAULT_PROFILE.into()),
+        Ok(profile) if valid_profile(&profile) => Ok(profile),
+        Ok(profile) => Err(format!(
+            "{PROFILE_VARIABLE}={} is not a profile name",
+            profile.escape_debug()
+        )),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_PROFILE.into()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("{PROFILE_VARIABLE} is not a profile name"))
+        }
+    }
+}
+
 pub fn socket_path(dir: &Path, package: &str) -> Result<PathBuf, String> {
+    instance_socket(dir, package, DEFAULT_PROFILE)
+}
+
+/// `<dir>/<instance>.sock` for one profile of a package.
+pub fn instance_socket(dir: &Path, package: &str, profile: &str) -> Result<PathBuf, String> {
     if !valid_package(package) {
         return Err(format!("{} is not a package name", package.escape_debug()));
     }
-    let path = dir.join(format!("{package}.sock"));
+    if !valid_profile(profile) {
+        return Err(format!("{} is not a profile name", profile.escape_debug()));
+    }
+    let path = dir.join(format!("{}.sock", instance_name(package, profile)));
     if path.as_os_str().len() > MAX_SOCKET_PATH {
         return Err(format!(
             "{} is longer than a socket address can be",
@@ -88,6 +135,28 @@ pub fn socket_path(dir: &Path, package: &str) -> Result<PathBuf, String> {
         ));
     }
     Ok(path)
+}
+
+/// Whether an instance serves its socket in `dir`: whether a process holds its ownership lock, found
+/// without connecting, since a connection to a socket unit's socket would start the app. The lock is
+/// taken shared for an instant; a starting app retries its own claim for longer than that.
+pub fn served(dir: &Path, package: &str, profile: &str) -> bool {
+    if !valid_package(package) || !valid_profile(profile) {
+        return false;
+    }
+    let lock = dir.join(format!("{}.lock", instance_name(package, profile)));
+    let Ok(file) = File::open(&lock) else {
+        return false;
+    };
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        // Unknown: asking the socket is the only way to tell.
+        Err(std::fs::TryLockError::Error(_)) => true,
+    }
 }
 
 /// The instance lock of `package` over the data directory `data`.
