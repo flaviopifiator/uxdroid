@@ -84,7 +84,8 @@ docker compose run --rm -T dev bash /work/runtime/framework/app_smoke.sh
 docker compose run --rm -T dev bash /work/runtime/framework/window_smoke.sh
 # Bundles, Intents, file descriptors and AIDL calls through android.os.Parcel, whose natives are ours.
 docker compose run --rm -T dev bash /work/runtime/framework/parcel_smoke.sh
-# An NDK-built library using liblog, libandroid, libjnigraphics, EGL, GLES and OpenSL ES.
+# An NDK-built library using liblog, libandroid (with AChoreographer), libjnigraphics, EGL, GLES and
+# OpenSL ES.
 docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
 # Sound through AudioTrack, AudioRecord, OpenSL ES and AAudio, checked sample by sample in files, then
 # played through a private PulseAudio server.
@@ -97,6 +98,10 @@ docker compose run --rm -T dev bash /work/runtime/framework/control_smoke.sh
 # Apps as systemd user services, with socket_unit.py playing systemd: started on demand through the
 # control socket, again after stop, once per profile, and with a socket passed at once.
 docker compose run --rm -T dev bash /work/runtime/framework/service_smoke.sh
+# Composition through a scripted compositor: an app's own layer changed by one atomic transaction,
+# damage-only redraws, a dialog and a popup as subsurfaces, frame callbacks pacing an animation, a
+# resize and a close.
+docker compose run --rm -T dev bash /work/runtime/framework/compose_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli

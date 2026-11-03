@@ -1,27 +1,34 @@
-//! A Wayland toplevel for a framework window: shared-memory pixels, as milestone 3's window in
-//! `crates/platform`, plus the seat, whose pointer, keyboard and touch events become the window's
-//! input, and reading without blocking, so the Looper can watch the connection while the window is
-//! idle and answer the compositor's pings.
+//! The Wayland side of an app's windows: one connection per process, whose one toplevel is the
+//! display. The first window is the toplevel's surface; later ones, such as dialogs, popups and
+//! menus, are subsurfaces of it, placed where the window manager put them, so the compositor
+//! composes them and their frames stay apart. Pixels are shared memory, as milestone 3's window in
+//! `crates/platform`. The seat's pointer, keyboard and touch events become input, tagged with the
+//! surface they came from, and the connection is read without blocking, so the Looper can watch it
+//! while the windows are idle and answer the compositor's pings. A configure with a new size and a
+//! close are kept for the window manager to act on.
 
 use std::error::Error;
 use std::ffi::c_void;
 use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::FileExt;
+use std::sync::{Mutex, MutexGuard};
 
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-    wl_surface, wl_touch,
+    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
+    wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
 };
-use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum, delegate_noop};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+use crate::compose::Rect;
 use crate::input::charmap::{self, Charmap};
 use crate::input::keys::{self, Modifiers};
 use crate::input::translate::Translator;
 use crate::input::xkb::Keymap;
 use crate::input::{self, Event};
+use crate::vsync;
 
 const BYTES_PER_PIXEL: i32 = 4;
 const MAX_DIMENSION: i32 = 16384;
@@ -30,12 +37,18 @@ const MAX_KEYMAP: u32 = 4 << 20;
 /// `xdg_toplevel.state.activated`.
 const ACTIVATED: u32 = 4;
 
+/// Where an input event goes: the surface it came from, or the focused window.
+pub type Target = Option<u32>;
+
 #[derive(Default)]
 struct State {
     configure_serial: Option<u32>,
     requested_size: Option<(i32, i32)>,
     closed: bool,
     activated: bool,
+    /// The surface under the pointer, and under each touch point.
+    pointer_surface: Option<u32>,
+    touch_surfaces: Vec<(i32, u32)>,
     seat: Translator,
     /// The compositor's keymap, compiled when the first modifiers or key arrive.
     keymap_text: Option<String>,
@@ -46,7 +59,9 @@ struct State {
     /// Pending scroll of the current pointer frame, in wheel steps.
     scroll: (f32, f32),
     discrete: bool,
-    events: Vec<Event>,
+    events: Vec<(Target, Event)>,
+    /// Surfaces waiting for a frame callback.
+    frames: Vec<u32>,
 }
 
 impl State {
@@ -91,15 +106,138 @@ impl Drop for Pixels {
     }
 }
 
-pub struct Window {
+/// The process's connection to the compositor and its one toplevel, which is the display.
+struct Display {
     connection: Connection,
     queue: EventQueue<State>,
     state: State,
-    surface: wl_surface::WlSurface,
-    _xdg_surface: xdg_surface::XdgSurface,
-    _toplevel: xdg_toplevel::XdgToplevel,
+    compositor: wl_compositor::WlCompositor,
+    subcompositor: Option<wl_subcompositor::WlSubcompositor>,
+    shm: wl_shm::WlShm,
+    shell: xdg_wm_base::XdgWmBase,
     _seat: Option<wl_seat::WlSeat>,
-    _shm: wl_shm::WlShm,
+    toplevel: Option<wl_surface::WlSurface>,
+    /// The toplevel's size, once a window has it.
+    size: (i32, i32),
+}
+
+/// What the compositor asked of the display that the window manager must act on.
+#[derive(Debug, Default, PartialEq)]
+pub struct Requests {
+    /// The toplevel's new size.
+    pub resize: Option<(i32, i32)>,
+    pub close: bool,
+}
+
+static DISPLAY: Mutex<Option<Display>> = Mutex::new(None);
+
+fn display() -> MutexGuard<'static, Option<Display>> {
+    DISPLAY.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+impl Display {
+    fn connect() -> Result<Display, Box<dyn Error>> {
+        let connection = Connection::connect_to_env()?;
+        let (globals, queue): (GlobalList, EventQueue<State>) = registry_queue_init(&connection)?;
+        let handle = queue.handle();
+        let compositor = globals.bind(&handle, 4..=6, ())?;
+        let subcompositor = globals.bind(&handle, 1..=1, ()).ok();
+        let shm = globals.bind(&handle, 1..=1, ())?;
+        let shell = globals.bind(&handle, 1..=6, ())?;
+        // A compositor without a seat shows the windows all the same, with no input.
+        let seat = globals.bind(&handle, 1..=7, ()).ok();
+        Ok(Display {
+            connection,
+            queue,
+            state: State::default(),
+            compositor,
+            subcompositor,
+            shm,
+            shell,
+            _seat: seat,
+            toplevel: None,
+            size: (0, 0),
+        })
+    }
+}
+
+/// Runs `f` on the display, connecting to the compositor the first time.
+fn with_display<T>(
+    f: impl FnOnce(&mut Display) -> Result<T, Box<dyn Error>>,
+) -> Result<T, Box<dyn Error>> {
+    let mut display = display();
+    if display.is_none() {
+        *display = Some(Display::connect()?);
+    }
+    match display.as_mut() {
+        Some(display) => f(display),
+        None => Err("no display".into()),
+    }
+}
+
+/// The connection's descriptor, readable when the compositor sent something; none before the first
+/// window.
+pub fn fd() -> Option<RawFd> {
+    display()
+        .as_ref()
+        .map(|display| display.connection.backend().poll_fd().as_raw_fd())
+}
+
+/// Reads and handles whatever the compositor sent, without blocking.
+pub fn dispatch() -> Result<(), Box<dyn Error>> {
+    let mut display = display();
+    let Some(display) = display.as_mut() else {
+        return Ok(());
+    };
+    display.queue.dispatch_pending(&mut display.state)?;
+    if let Some(guard) = display.queue.prepare_read() {
+        match guard.read() {
+            Ok(_) => {}
+            Err(wayland_client::backend::WaylandError::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    display.queue.dispatch_pending(&mut display.state)?;
+    display.queue.flush()?;
+    Ok(())
+}
+
+/// Input that arrived since the last call, in order, with the surface each came from.
+pub fn take_events() -> Vec<(Target, Event)> {
+    display()
+        .as_mut()
+        .map(|display| std::mem::take(&mut display.state.events))
+        .unwrap_or_default()
+}
+
+/// A new size or a close the compositor asked for since the last call.
+pub fn take_requests() -> Requests {
+    let mut display = display();
+    let Some(display) = display.as_mut() else {
+        return Requests::default();
+    };
+    let mut requests = Requests::default();
+    if let Some(size) = display.state.requested_size.take()
+        && display.toplevel.is_some()
+        && size != display.size
+    {
+        display.size = size;
+        requests.resize = Some(size);
+    }
+    requests.close = std::mem::take(&mut display.state.closed);
+    requests
+}
+
+enum Role {
+    Toplevel(xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel),
+    Sub(wl_subsurface::WlSubsurface),
+}
+
+/// One window: a surface with its frame's pixels.
+pub struct Window {
+    surface: wl_surface::WlSurface,
+    role: Role,
     pixels: Pixels,
     width: i32,
     height: i32,
@@ -169,43 +307,67 @@ fn allocate(
 }
 
 impl Window {
-    pub fn open(title: &str, width: i32, height: i32) -> Result<Window, Box<dyn Error>> {
-        let connection = Connection::connect_to_env()?;
-        let (globals, mut queue): (GlobalList, EventQueue<State>) =
-            registry_queue_init(&connection)?;
-        let handle = queue.handle();
-        let compositor: wl_compositor::WlCompositor = globals.bind(&handle, 4..=6, ())?;
-        let shm: wl_shm::WlShm = globals.bind(&handle, 1..=1, ())?;
-        let shell: xdg_wm_base::XdgWmBase = globals.bind(&handle, 1..=6, ())?;
-        // A compositor without a seat shows the window all the same, with no input.
-        let seat: Option<wl_seat::WlSeat> = globals.bind(&handle, 1..=7, ()).ok();
-
-        let surface = compositor.create_surface(&handle, ());
-        let xdg_surface = shell.get_xdg_surface(&surface, &handle, ());
-        let toplevel = xdg_surface.get_toplevel(&handle, ());
-        toplevel.set_title(title.to_string());
-        toplevel.set_app_id(title.to_string());
-        surface.commit();
-
-        let mut state = State::default();
-        while state.configure_serial.is_none() && !state.closed {
-            queue.blocking_dispatch(&mut state)?;
-        }
-        let (width, height) = state.requested_size.take().unwrap_or((width, height));
-        let pixels = allocate(&shm, &handle, width, height)?;
-        Ok(Window {
-            connection,
-            queue,
-            state,
-            surface,
-            _xdg_surface: xdg_surface,
-            _toplevel: toplevel,
-            _seat: seat,
-            _shm: shm,
-            pixels,
-            width,
-            height,
+    /// Opens the display's toplevel, or when it is open, a subsurface of it at `(x, y)` on the
+    /// display. Either has exactly this size; a size the compositor asks for comes as a request.
+    pub fn open(
+        title: &str,
+        width: i32,
+        height: i32,
+        x: i32,
+        y: i32,
+    ) -> Result<Window, Box<dyn Error>> {
+        with_display(|display| {
+            let handle = display.queue.handle();
+            let surface = display.compositor.create_surface(&handle, ());
+            if let (Some(parent), Some(subcompositor)) = (&display.toplevel, &display.subcompositor)
+            {
+                checked_size(width, height)?;
+                let subsurface = subcompositor.get_subsurface(&surface, parent, &handle, ());
+                // Each window shows its frames when it posts them, not when the display does.
+                subsurface.set_desync();
+                subsurface.set_position(x, y);
+                parent.commit();
+                let pixels = allocate(&display.shm, &handle, width, height)?;
+                return Ok(Window {
+                    surface,
+                    role: Role::Sub(subsurface),
+                    pixels,
+                    width,
+                    height,
+                });
+            }
+            if display.toplevel.is_some() {
+                return Err("the compositor has no wl_subcompositor for a second window".into());
+            }
+            let xdg_surface = display.shell.get_xdg_surface(&surface, &handle, ());
+            let toplevel = xdg_surface.get_toplevel(&handle, ());
+            toplevel.set_title(title.to_string());
+            toplevel.set_app_id(title.to_string());
+            surface.commit();
+            let state = &mut display.state;
+            state.configure_serial = None;
+            while state.configure_serial.is_none() && !state.closed {
+                display.queue.blocking_dispatch(state)?;
+            }
+            // The first frame has the size the app asked for. A size the compositor chose stays
+            // requested, so the window manager lays the windows out again for it.
+            checked_size(width, height)?;
+            let pixels = allocate(&display.shm, &handle, width, height)?;
+            display.toplevel = Some(surface.clone());
+            display.size = (width, height);
+            Ok(Window {
+                surface,
+                role: Role::Toplevel(xdg_surface, toplevel),
+                pixels,
+                width,
+                height,
+            })
         })
+    }
+
+    /// The id input events name this window's surface by.
+    pub fn key(&self) -> u32 {
+        self.surface.id().protocol_id()
     }
 
     pub fn width(&self) -> i32 {
@@ -214,6 +376,40 @@ impl Window {
 
     pub fn height(&self) -> i32 {
         self.height
+    }
+
+    /// Takes a new buffer of another size; the next frame fills it.
+    pub fn resize(&mut self, width: i32, height: i32) -> Result<(), Box<dyn Error>> {
+        if (width, height) == (self.width, self.height) {
+            return Ok(());
+        }
+        let pixels = with_display(|display| {
+            let handle = display.queue.handle();
+            let pixels = allocate(&display.shm, &handle, width, height)?;
+            if matches!(self.role, Role::Toplevel(..)) {
+                display.size = (width, height);
+            }
+            Ok(pixels)
+        })?;
+        self.pixels = pixels;
+        (self.width, self.height) = (width, height);
+        Ok(())
+    }
+
+    /// Moves a subsurface to `(x, y)` on the display. The toplevel does not move.
+    pub fn place(&self, x: i32, y: i32) -> Result<(), Box<dyn Error>> {
+        if let Role::Sub(subsurface) = &self.role {
+            with_display(|display| {
+                subsurface.set_position(x, y);
+                // A subsurface's position applies with its parent's next commit.
+                if let Some(parent) = &display.toplevel {
+                    parent.commit();
+                }
+                display.queue.flush()?;
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     pub fn frame(&mut self) -> Frame<'_> {
@@ -231,40 +427,56 @@ impl Window {
         }
     }
 
-    pub fn present(&mut self) -> Result<(), Box<dyn Error>> {
-        self.surface.attach(Some(&self.pixels.buffer), 0, 0);
-        self.surface.damage_buffer(0, 0, self.width, self.height);
-        self.surface.commit();
-        self.queue.flush()?;
-        // A round trip proves the compositor took the frame before the caller goes on.
-        self.queue.roundtrip(&mut self.state)?;
-        Ok(())
-    }
-
-    /// The connection's descriptor, readable when the compositor sent something.
-    pub fn fd(&self) -> RawFd {
-        self.connection.backend().poll_fd().as_raw_fd()
-    }
-
-    /// Reads and handles whatever the compositor sent, without blocking.
-    pub fn dispatch(&mut self) -> Result<(), Box<dyn Error>> {
-        self.queue.dispatch_pending(&mut self.state)?;
-        if let Some(guard) = self.queue.prepare_read() {
-            match guard.read() {
-                Ok(_) => {}
-                Err(wayland_client::backend::WaylandError::Io(error))
-                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error.into()),
+    /// Shows the frame, telling the compositor that only `damage` changed, and asks for a frame
+    /// callback, which paces the app's vsync.
+    pub fn present(&mut self, damage: Rect) -> Result<(), Box<dyn Error>> {
+        with_display(|display| {
+            let key = self.key();
+            if !display.state.frames.contains(&key) {
+                self.surface.frame(&display.queue.handle(), key);
+                display.state.frames.push(key);
+                vsync::frame_requested();
             }
-        }
-        self.queue.dispatch_pending(&mut self.state)?;
-        self.queue.flush()?;
-        Ok(())
+            self.surface.attach(Some(&self.pixels.buffer), 0, 0);
+            self.surface
+                .damage_buffer(damage.left, damage.top, damage.width(), damage.height());
+            self.surface.commit();
+            display.queue.flush()?;
+            // A round trip proves the compositor took the frame before the caller goes on.
+            display.queue.roundtrip(&mut display.state)?;
+            Ok(())
+        })
     }
+}
 
-    /// Input that arrived since the last call, in order.
-    pub fn take_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.state.events)
+impl Drop for Window {
+    fn drop(&mut self) {
+        let mut display = display();
+        let key = self.key();
+        if let Some(display) = display.as_mut()
+            && let Some(at) = display
+                .state
+                .frames
+                .iter()
+                .position(|surface| *surface == key)
+        {
+            display.state.frames.remove(at);
+            vsync::frame_dropped();
+        }
+        match &self.role {
+            Role::Toplevel(xdg_surface, toplevel) => {
+                toplevel.destroy();
+                xdg_surface.destroy();
+                if let Some(display) = display.as_mut() {
+                    display.toplevel = None;
+                }
+            }
+            Role::Sub(subsurface) => subsurface.destroy(),
+        }
+        self.surface.destroy();
+        if let Some(display) = display.as_mut() {
+            let _ = display.queue.flush();
+        }
     }
 }
 
@@ -342,9 +554,11 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                     state.activated = activated;
                     if !activated {
                         let released = state.seat.keyboard_leave(input::now());
-                        state.events.extend(released);
+                        state
+                            .events
+                            .extend(released.into_iter().map(|event| (None, event)));
                     }
-                    state.events.push(Event::Focus(activated));
+                    state.events.push((None, Event::Focus(activated)));
                 }
             }
             xdg_toplevel::Event::Close => state.closed = true,
@@ -390,15 +604,25 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         let now = input::now();
+        // Events before a leave belong to the surface it leaves.
+        let mut surface = state.pointer_surface;
         let events = match event {
             wl_pointer::Event::Enter {
+                surface: entered,
                 surface_x,
                 surface_y,
                 ..
-            } => state
-                .seat
-                .pointer_enter(surface_x as f32, surface_y as f32, now),
-            wl_pointer::Event::Leave { .. } => state.seat.pointer_leave(now),
+            } => {
+                surface = Some(entered.id().protocol_id());
+                state.pointer_surface = surface;
+                state
+                    .seat
+                    .pointer_enter(surface_x as f32, surface_y as f32, now)
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer_surface = None;
+                state.seat.pointer_leave(now)
+            }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
@@ -437,7 +661,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             }
             _ => Vec::new(),
         };
-        state.events.extend(events);
+        state
+            .events
+            .extend(events.into_iter().map(|event| (surface, event)));
     }
 }
 
@@ -478,7 +704,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
             }
             wl_keyboard::Event::Leave { .. } => {
                 let released = state.seat.keyboard_leave(now);
-                state.events.extend(released);
+                state
+                    .events
+                    .extend(released.into_iter().map(|event| (None, event)));
             }
             wl_keyboard::Event::Modifiers {
                 mods_depressed,
@@ -504,7 +732,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                     pressed == WEnum::Value(wl_keyboard::KeyState::Pressed),
                     now,
                 );
-                state.events.extend(events);
+                state
+                    .events
+                    .extend(events.into_iter().map(|event| (None, event)));
             }
             _ => {}
         }
@@ -521,20 +751,64 @@ impl Dispatch<wl_touch::WlTouch, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         let now = input::now();
-        let events = match event {
-            wl_touch::Event::Down { id, x, y, .. } => {
-                state.seat.touch_down(id, x as f32, y as f32, now)
+        // A touch belongs to the surface it went down on; a frame, to the first touch's surface.
+        let surface_of = |state: &State, id: Option<i32>| {
+            state
+                .touch_surfaces
+                .iter()
+                .find(|(touch, _)| id.is_none_or(|id| *touch == id))
+                .map(|(_, surface)| *surface)
+        };
+        let (surface, events) = match event {
+            wl_touch::Event::Down {
+                id, surface, x, y, ..
+            } => {
+                state.touch_surfaces.retain(|(touch, _)| *touch != id);
+                state.touch_surfaces.push((id, surface.id().protocol_id()));
+                (
+                    surface_of(state, Some(id)),
+                    state.seat.touch_down(id, x as f32, y as f32, now),
+                )
             }
-            wl_touch::Event::Up { id, .. } => state.seat.touch_up(id, now),
+            wl_touch::Event::Up { id, .. } => {
+                let surface = surface_of(state, Some(id));
+                let events = state.seat.touch_up(id, now);
+                state.touch_surfaces.retain(|(touch, _)| *touch != id);
+                (surface, events)
+            }
             wl_touch::Event::Motion { id, x, y, .. } => {
                 state.seat.touch_motion(id, x as f32, y as f32);
-                Vec::new()
+                (None, Vec::new())
             }
-            wl_touch::Event::Frame => state.seat.touch_frame(now),
-            wl_touch::Event::Cancel => state.seat.touch_cancel(now),
-            _ => Vec::new(),
+            wl_touch::Event::Frame => (surface_of(state, None), state.seat.touch_frame(now)),
+            wl_touch::Event::Cancel => {
+                let surface = surface_of(state, None);
+                state.touch_surfaces.clear();
+                (surface, state.seat.touch_cancel(now))
+            }
+            _ => (None, Vec::new()),
         };
-        state.events.extend(events);
+        state
+            .events
+            .extend(events.into_iter().map(|event| (surface, event)));
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, u32> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        surface: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event
+            && let Some(at) = state.frames.iter().position(|key| key == surface)
+        {
+            state.frames.remove(at);
+            vsync::frame_done();
+        }
     }
 }
 
@@ -543,3 +817,5 @@ delegate_noop!(State: ignore wl_surface::WlSurface);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_buffer::WlBuffer);
+delegate_noop!(State: ignore wl_subcompositor::WlSubcompositor);
+delegate_noop!(State: ignore wl_subsurface::WlSubsurface);

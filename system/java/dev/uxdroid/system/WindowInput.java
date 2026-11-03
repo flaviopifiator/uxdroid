@@ -27,4 +27,15 @@ final class WindowInput implements MessageQueue.OnFileDescriptorEventListener {
 
     /** Sends the input of the layer's window to the server end of its channel; null detaches it. */
     static native void attach(SurfaceControl layer, InputChannel server);
+
+    /**
+     * Where the window manager put the frame of the layer's window on the display, its LayoutParams
+     * flags, which decide where touches and keys go, and how far its surface starts before the frame
+     * (its surface insets). A window after the first is a subsurface placed there.
+     */
+    static native void place(SurfaceControl layer, int x, int y, int width, int height, int flags,
+            int insetLeft, int insetTop);
+
+    /** The window was removed: its surface leaves the display now, not when the layer is collected. */
+    static native void close(SurfaceControl layer);
 }

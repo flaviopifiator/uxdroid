@@ -34,7 +34,7 @@ pub fn attached_env() -> Option<*mut JNIEnv> {
 
 /// # Safety
 /// `env` must be the calling thread's JNI environment.
-unsafe fn check(env: *mut JNIEnv) -> Result<(), Pending> {
+pub unsafe fn check(env: *mut JNIEnv) -> Result<(), Pending> {
     // SAFETY: as above.
     if unsafe { ((**env).v1_2.ExceptionCheck)(env) } {
         Err(Pending)
@@ -57,7 +57,7 @@ pub unsafe fn find_class(env: *mut JNIEnv, name: &CStr) -> Result<jclass, Pendin
 
 /// # Safety
 /// `env` must be the calling thread's JNI environment, and `object` a live non-null reference.
-unsafe fn method(
+pub unsafe fn method(
     env: *mut JNIEnv,
     object: jobject,
     name: &CStr,
@@ -299,5 +299,42 @@ pub unsafe fn long_field(env: *mut JNIEnv, object: jobject, name: &CStr) -> Resu
             return Err(Pending);
         }
         Ok((jni.v1_1.GetLongField)(env, object, id))
+    }
+}
+
+/// # Safety
+/// `env` must be the calling thread's JNI environment, and `object` a live non-null reference.
+pub unsafe fn int_field(env: *mut JNIEnv, object: jobject, name: &CStr) -> Result<jint, Pending> {
+    // SAFETY: as above.
+    unsafe {
+        let jni = &**env;
+        let class = (jni.v1_1.GetObjectClass)(env, object);
+        let id = (jni.v1_1.GetFieldID)(env, class, name.as_ptr(), c"I".as_ptr());
+        (jni.v1_1.DeleteLocalRef)(env, class);
+        if id.is_null() {
+            return Err(Pending);
+        }
+        Ok((jni.v1_1.GetIntField)(env, object, id))
+    }
+}
+
+/// # Safety
+/// As [`call_static_object`], for a static method returning void.
+pub unsafe fn call_static_void(
+    env: *mut JNIEnv,
+    class: jclass,
+    name: &CStr,
+    signature: &CStr,
+    arguments: &[jvalue],
+) -> Result<(), Pending> {
+    // SAFETY: as above.
+    unsafe {
+        let jni = &**env;
+        let id = (jni.v1_1.GetStaticMethodID)(env, class, name.as_ptr(), signature.as_ptr());
+        if id.is_null() {
+            return Err(Pending);
+        }
+        (jni.v1_1.CallStaticVoidMethodA)(env, class, id, arguments.as_ptr());
+        check(env)
     }
 }

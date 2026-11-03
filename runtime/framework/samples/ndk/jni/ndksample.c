@@ -6,10 +6,13 @@
 #include <SLES/OpenSLES_Android.h>
 #include <android/asset_manager_jni.h>
 #include <android/bitmap.h>
+#include <android/choreographer.h>
 #include <android/log.h>
 #include <android/looper.h>
 #include <android/native_window_jni.h>
+#include <dlfcn.h>
 #include <jni.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -147,6 +150,87 @@ static const char* check_looper(void) {
     return NULL;
 }
 
+// AChoreographer, as Flutter's engine uses it: a chain of frame callbacks, each posting the next, on
+// the main thread and on a thread of its own with an ALooper; that thread also asks for a vsync
+// callback, through dlsym as for functions newer than the app's minimum SDK, and the refresh rate.
+#define FRAMES 30
+
+struct chain {
+    const char* name;
+    int count;
+    int64_t first, last, shortest, longest;
+};
+
+static struct chain main_chain = {"main", 0, 0, 0, INT64_MAX, 0};
+static struct chain thread_chain = {"looper", 0, 0, 0, INT64_MAX, 0};
+
+static void on_frame(int64_t time, void* data) {
+    struct chain* chain = data;
+    if (chain->count > 0) {
+        int64_t interval = time - chain->last;
+        if (interval < chain->shortest) chain->shortest = interval;
+        if (interval > chain->longest) chain->longest = interval;
+    } else {
+        chain->first = time;
+    }
+    chain->last = time;
+    if (++chain->count < FRAMES) {
+        AChoreographer_postFrameCallback64(AChoreographer_getInstance(), on_frame, chain);
+    } else {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "choreographer %s: %d frames in %lld ms, intervals %lld to %lld us",
+                            chain->name, chain->count, (long long)((chain->last - chain->first) / 1000000),
+                            (long long)(chain->shortest / 1000), (long long)(chain->longest / 1000));
+    }
+}
+
+typedef void (*vsync_callback)(const void* data, void* user);
+static int64_t (*frame_time_of)(const void*);
+static size_t (*timelines_of)(const void*);
+static int64_t (*deadline_of)(const void*, size_t);
+
+static void on_vsync(const void* data, void* user) {
+    (void)user;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "choreographer vsync: %zu timeline, deadline %lld us after its frame",
+                        timelines_of(data), (long long)((deadline_of(data, 0) - frame_time_of(data)) / 1000));
+    AChoreographer_postFrameCallback64(AChoreographer_getInstance(), on_frame, &thread_chain);
+}
+
+static void on_refresh(int64_t period, void* user) {
+    (void)user;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "choreographer refresh period %lld ns", (long long)period);
+}
+
+static void* choreographer_thread(void* unused) {
+    (void)unused;
+    ALooper_prepare(0);
+    AChoreographer* choreographer = AChoreographer_getInstance();
+    void* android = dlopen("libandroid.so", RTLD_NOW);
+    void (*post_vsync)(AChoreographer*, vsync_callback, void*) =
+        android ? dlsym(android, "AChoreographer_postVsyncCallback") : NULL;
+    frame_time_of = android ? dlsym(android, "AChoreographerFrameCallbackData_getFrameTimeNanos") : NULL;
+    timelines_of = android ? dlsym(android, "AChoreographerFrameCallbackData_getFrameTimelinesLength") : NULL;
+    deadline_of = android ? dlsym(android, "AChoreographerFrameCallbackData_getFrameTimelineDeadlineNanos") : NULL;
+    if (!choreographer || !post_vsync || !frame_time_of || !timelines_of || !deadline_of) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "choreographer thread: missing %s", choreographer ? "dlsym" : "instance");
+        return NULL;
+    }
+    AChoreographer_registerRefreshRateCallback(choreographer, on_refresh, NULL);
+    post_vsync(choreographer, on_vsync, NULL);
+    while (thread_chain.count < FRAMES) ALooper_pollOnce(100, NULL, NULL, NULL);
+    AChoreographer_unregisterRefreshRateCallback(choreographer, on_refresh, NULL);
+    return NULL;
+}
+
+static const char* check_choreographer(void) {
+    AChoreographer* choreographer = AChoreographer_getInstance();
+    if (choreographer == NULL) return "the main thread has no choreographer";
+    AChoreographer_postFrameCallback64(choreographer, on_frame, &main_chain);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, choreographer_thread, NULL) != 0) return "no choreographer thread";
+    pthread_detach(thread);
+    return NULL;
+}
+
 JNIEXPORT jstring JNICALL Java_com_example_ndk_NdkActivity_check(JNIEnv* env, jclass class, jobject assets,
                                                                   jobject bitmap) {
     __android_log_print(ANDROID_LOG_INFO, TAG, "liblog print %d", 42);
@@ -157,7 +241,8 @@ JNIEXPORT jstring JNICALL Java_com_example_ndk_NdkActivity_check(JNIEnv* env, jc
     if (!failure) failure = check_bitmap(env, bitmap);
     if (!failure) failure = check_opensl();
     if (!failure) failure = check_looper();
-    return (*env)->NewStringUTF(env, failure ? failure : "assets bitmap opensl looper ok");
+    if (!failure) failure = check_choreographer();
+    return (*env)->NewStringUTF(env, failure ? failure : "assets bitmap opensl looper choreographer ok");
 }
 
 JNIEXPORT jstring JNICALL Java_com_example_ndk_NdkActivity_drawCpu(JNIEnv* env, jclass class, jobject surface,

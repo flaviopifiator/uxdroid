@@ -300,6 +300,20 @@ public final class Launcher {
         private final boolean launcherIntent;
         private final java.util.Map<String, android.content.IContentProvider> providers = new java.util.HashMap<>();
 
+        /**
+         * The display's toplevel was closed, as a desktop closes a task: every activity is destroyed as
+         * finishing, then the process exits, the same path as uxdroid app stop.
+         */
+        static void closeTask() {
+            ActivityStack stack = ActivityStack.current;
+            if (stack == null) System.exit(0);
+            try {
+                stack.stop();
+            } catch (RemoteException | org.json.JSONException e) {
+                throw new IllegalStateException("cannot close the task", e);
+            }
+        }
+
         /** @param launcherIntent the launch names at most an activity, so it gets the launcher's intent */
         ActivityManager(App app, boolean once, org.json.JSONObject intent, boolean launcherIntent) {
             this.app = app;
@@ -500,6 +514,12 @@ public final class Launcher {
         config.windowConfiguration.setBounds(bounds);
         config.windowConfiguration.setAppBounds(bounds);
         config.windowConfiguration.setMaxBounds(bounds);
+        int density = config.densityDpi > 0 ? config.densityDpi : DisplayService.DENSITY;
+        config.screenWidthDp = bounds.width() * android.util.DisplayMetrics.DENSITY_DEFAULT / density;
+        config.screenHeightDp = bounds.height() * android.util.DisplayMetrics.DENSITY_DEFAULT / density;
+        config.smallestScreenWidthDp = Math.min(config.screenWidthDp, config.screenHeightDp);
+        config.orientation = bounds.width() > bounds.height()
+                ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
         return config;
     }
 

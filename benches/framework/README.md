@@ -177,6 +177,34 @@ Input added nothing measurable to startup or memory. Against the base commit, bo
 
 Activation costs about 2 ms to `onResume`, of which uxdroid's own part is the `uxdroid service run` step before the launcher, 0.6 ms (1.03 against 0.40 ms for running `/bin/true` with and without it, medians of 200); the rest is the stand-in manager, a Python process that forks, where systemd would. The first frame waits for a tick of the 60 Hz vsync clock, so it moves in steps of 16.7 ms with the phase of the start, and the medians differ by that and not by work; the minimums, 116.2 and 118.5 ms, overlap. The command answers 8 ms sooner through the socket, because a direct start polls for the new socket every 50 ms while a connection to the socket unit waits in its backlog. Not measured: systemd itself, which the containers lack, memory (the same launcher runs either way), and a start at login.
 
+## Composition and frame pacing
+
+[`frames.sh`](frames.sh) measures what a frame costs the app: the CPU time of all its threads (summed from `/proc/<pid>/task/*/schedstat`) per frame the scripted compositor received, over 60 keys that each redraw part of the window, a and backspace in a text field, five fresh processes per row. Run it as `input.sh` (`APP=rustdesk` in `sandbox`).
+
+2026-11-03, branch `feat/compat-compose` against its base (b387338), both mounted at `/runtime/art` from their own runtime copy and measured back to back, other writers' builds running on the machine. Median (range):
+
+| Workload | Base | Branch |
+|----------|------|--------|
+| Input sample, CPU per frame (60 frames per run) | 4.12 ms (4.07-4.72) | 3.25 ms (3.24-3.34) |
+| RustDesk 1.5.1, CPU per frame (101-102 frames per run) | 10.30 ms (10.10-10.30) | 10.29 ms (10.11-10.69) |
+
+- The sample's frame costs 21% less CPU: the framework redraws only the dirty field, which posting copies alone, and composition redraws and reports only that damage, where every frame used to copy and compose the whole 400x700 window.
+- RustDesk did not change: Flutter posts its whole `SurfaceView` frame through `ANativeWindow`, which composition must redraw whole either way, so its cost is the copies of that frame, not composition.
+
+Startup, memory and input latency, same pair, back to back (`run.sh` with `RUNS=20`, `rustdesk.sh` with `RUNS=10`, `input.sh` with 30 events), warm medians:
+
+| Workload | Base | Branch |
+|----------|------|--------|
+| Framework sample APK to first frame, installed | 123.3 ms, 19.1 MiB private dirty | 123.8 ms, 19.1 MiB |
+| Milestone 3 platform to first frame | 17.7 ms, 5.0 MiB | 17.9 ms, 5.0 MiB |
+| RustDesk to its first Flutter frame, installed | 212.7 ms, 80.8 MiB private dirty, 301.7 MiB peak RSS | 212.4 ms, 81.2 MiB, 304.2 MiB |
+| Sample click / key latency | 28.4 / 13.6 ms | 29.3 / 12.0 ms |
+| RustDesk click / key latency | 16.1 / 14.8 ms | 16.6 / 14.5 ms |
+
+Every difference is inside the other row's interquartile range, so composition, subsurfaces and frame pacing cost nothing measurable at startup or in latency. RustDesk's Flutter engine now paces its frames by `AChoreographer`, which it did not find before, with no change in latency. Cold rows were run but not compared here; the machine was loaded.
+
+Frame pacing itself is checked, not benchmarked, by `runtime/framework/compose_smoke.sh`: with the compositor's frame callbacks at 30 Hz an endless animation drew 30 frames per second (60 before this branch), with immediate callbacks 60, never more, and with none, as for a hidden window, 15.
+
 ## Limits
 
 - The install-time preparation rows were measured with other workloads running on the machine; their warm rows are tight, their cold rows are not.
@@ -202,4 +230,4 @@ No competitor runs these workloads here, so **no claim of being faster or smalle
 | Android emulator | No `/dev/kvm` on this machine; without KVM an x86_64 system image runs under full software emulation, which is no fair comparison | No |
 | A real Android device | None available | |
 
-Also not measured: frame rate or time after the first frame, input latency on a real compositor or against any competitor, memory over time, GPU rendering, and RustDesk with its data on tmpfs (only on disk).
+Also not measured: frame rate on a real compositor, frame time of GPU-drawn apps, input latency on a real compositor or against any competitor, memory over time, GPU rendering, and RustDesk with its data on tmpfs (only on disk).
