@@ -14,6 +14,26 @@ public class CompatApplication extends Application {
                 + " applicationInfo.uid " + getApplicationInfo().uid + " userId " + Process.myUserHandle()
                 + " isApplicationUid " + Process.isApplicationUid(Process.myUid()));
         database();
+        network();
+    }
+
+    /** Glide, in Aegis, holds the ConnectivityManager and watches the default network. */
+    private void network() {
+        android.net.ConnectivityManager connectivity = getSystemService(android.net.ConnectivityManager.class);
+        if (connectivity == null) {
+            System.out.println("network no ConnectivityManager");
+            return;
+        }
+        android.net.Network active = connectivity.getActiveNetwork();
+        android.net.NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(active);
+        android.net.NetworkInfo info = connectivity.getActiveNetworkInfo();
+        connectivity.registerDefaultNetworkCallback(new android.net.ConnectivityManager.NetworkCallback());
+        System.out.println("network active " + (active != null)
+                + " internet " + (capabilities != null
+                        && capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET))
+                + " connected " + (info != null && info.isConnected())
+                + " total received " + (android.net.TrafficStats.getTotalRxBytes() >= 0)
+                + " own received " + android.net.TrafficStats.getUidRxBytes(android.os.Process.myUid()));
     }
 
     /** Loop Habit Tracker opens its database while its Application is created. */

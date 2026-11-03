@@ -37,7 +37,7 @@ compile system "$RUNTIME/framework/uxdroid-system.jar" "PCL[$FRAMEWORK]" "$ALL" 
 # Libraries the framework loads by name only to register natives, which already have default bodies.
 # Each is an empty library, so System.loadLibrary finds it.
 CLANG=/aosp/$(ls -d prebuilts/clang/host/linux-x86/clang-r* | sort -V | tail -1)/bin/clang
-for library in stats_jni framework-connectivity-tiramisu-jni media_jni; do
+for library in stats_jni framework-connectivity-jni framework-connectivity-tiramisu-jni media_jni; do
     "$CLANG" -shared -nostdlib -o "$RUNTIME/lib64/lib$library.so" -x c /dev/null
 done
 

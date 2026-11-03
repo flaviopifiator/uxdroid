@@ -106,6 +106,7 @@ public final class Launcher {
         Services.register("mount", android.os.storage.IStorageManager.class, new StorageService(dataRoot()));
         Services.register("device_identifiers", android.os.IDeviceIdentifiersPolicyService.class,
                 new DeviceIdentifiers());
+        AppServices.register(app);
         // The framework's own switch for devices without GPU rendering: ViewRootImpl then draws in
         // software, through Surface.lockCanvas, which libuxdroid_system.so shows on Wayland.
         android.view.ThreadedRenderer.sRendererEnabled = false;

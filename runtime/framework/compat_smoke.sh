@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|activity|no activity|launched) " "$WORK/out"
+grep -E "^(identity|database|factory|network|activity|no activity|launched) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -42,6 +42,14 @@ expect "^factory instantiates com\.example\.compat\.CompatApplication with the a
     "the app's component factory did not make its Application"
 grep -q "Unable to instantiate appComponentFactory" "$WORK/out" \
     && fail "the component factory was looked up outside the app's class loader"
+# 5. The network the host has, as ConnectivityManager and TrafficStats report it: a default route is
+# an active network with internet; the host's counters are the totals, an app's own traffic is not
+# counted apart. Every corpus app looked both services up.
+if awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route; then online=true; else online=false; fi
+expect "^network active $online internet $online connected $online total received true own received -1$" \
+    "ConnectivityManager or TrafficStats do not report the host's network (default route: $online)"
+grep -q "TrafficStats not initialized" "$WORK/out" && fail "TrafficStats did not find its service"
+
 # 4. The app's own startActivity reaches its task: by class and by action, and an intent no activity
 # takes fails with ActivityNotFoundException, as on Android.
 expect "^activity created com\.example\.compat\.SecondActivity by class$" "an activity the app started by class was not made"
