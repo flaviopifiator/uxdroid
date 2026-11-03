@@ -463,8 +463,10 @@ unsafe extern "system" fn surface_lock_canvas(
     };
     // SAFETY: ART passes a valid environment, a Canvas and a Rect or null.
     match unsafe { lock(env, &layer, canvas, dirty) } {
-        // Surface.unlockCanvasAndPost checks it gets back the surface it locked.
-        Ok(()) => surface,
+        // As on Android, the locked surface is the Surface itself with one more reference, which
+        // unlockCanvasAndPost releases after posting.
+        Ok(()) if SURFACES.retain(surface) => surface,
+        Ok(()) => 0,
         Err(failure) => {
             // SAFETY: as above.
             unsafe { report(env, failure) };
