@@ -149,6 +149,10 @@ pub static LIBJNIGRAPHICS: Table = Table {
     ],
 };
 
+/// The signatures of OpenSL ES's method tables and of the callbacks into app code, which reach app
+/// code by pointer instead of by name; a translator wraps them from these.
+pub use opensles::interfaces as opensles_interfaces;
+
 /// Every table this crate serves.
 pub fn tables() -> [&'static Table; 7] {
     [

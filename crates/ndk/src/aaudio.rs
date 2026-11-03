@@ -182,7 +182,7 @@ fn sample_format(format: i32) -> Option<Format> {
 }
 
 /// Whether the app may record: the manifest must request `RECORD_AUDIO`.
-fn may_record() -> bool {
+pub(crate) fn may_record() -> bool {
     if cfg!(test) {
         return true;
     }
