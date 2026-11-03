@@ -367,8 +367,10 @@ name = "uxdroid-cli"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "serde_json",
  "uxdroid-apk",
  "uxdroid-bridge",
+ "uxdroid-system",
  "uxdroid-testkit",
 ]
 

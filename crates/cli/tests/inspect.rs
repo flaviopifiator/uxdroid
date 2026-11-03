@@ -279,7 +279,9 @@ fn wrong_usage_exits_2() {
 const ALL_COMMANDS_USAGE: &str = "usage: uxdroid inspect <apk>\n       \
      uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n       \
      uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]\n       \
-     uxdroid install <apk> --data <dir>\n";
+     uxdroid install <apk> --data <dir>\n       \
+     uxdroid app <package> status|start|intent|stop [<options>]\n       \
+     uxdroid app list\n";
 
 #[test]
 fn no_command_or_an_unknown_one_lists_all_commands() {
