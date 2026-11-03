@@ -144,9 +144,31 @@ public final class Boot {
         System.setProperty("icu.data.path", icuData(root));
         System.load(root + "/lib64/libandroid_runtime.so");
         Natives.bindSystem(root + "/build.prop");
+        useDataDirectory();
         android.graphics.Typeface.loadPreinstalledSystemFontMap();
         started = true;
         return defaults;
+    }
+
+    /**
+     * The framework names Android's data partition through Environment.getDataDirectory, which reads
+     * ANDROID_DATA, except SQLite's default page size, the block size of a literal "/data": every
+     * database an app opened failed with "Invalid path: /data". It is taken from ANDROID_DATA instead,
+     * the file system the app's databases live on. A framework scan found no other literal an app
+     * reaches; the rest belong to system_server.
+     */
+    private static void useDataDirectory() {
+        File data = android.os.Environment.getDataDirectory();
+        try {
+            java.lang.reflect.Field pageSize = android.database.sqlite.SQLiteGlobal.class
+                    .getDeclaredField("sDefaultPageSize");
+            pageSize.setAccessible(true);
+            pageSize.setInt(null, new android.os.StatFs(data.getPath()).getBlockSize());
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("cannot give SQLite the page size of " + data, e);
+        } catch (IllegalArgumentException e) {
+            // No data directory, as for a program that only parses: it opens no database.
+        }
     }
 
     private static String icuData(String root) {
