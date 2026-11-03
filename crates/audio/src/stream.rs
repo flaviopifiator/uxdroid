@@ -714,6 +714,10 @@ fn record(
             return;
         }
         let mut inner = shared.lock();
+        // A read can outlast close's wait: the app may have freed what its callback uses.
+        if inner.life.closed {
+            return;
+        }
         if inner.state != State::Playing {
             continue;
         }
@@ -814,5 +818,44 @@ mod tests {
         });
         dropped.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(started.elapsed() >= JOIN_LIMIT);
+    }
+
+    /// A device whose first read waits until the test lets it return, as a stalled sound server's.
+    struct Stalled {
+        entered: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Capture for Stalled {
+        fn read(&mut self, samples: &mut [f32]) -> Result<(), String> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+                let _ = self.release.recv();
+            }
+            samples.fill(0.25);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_input_callback_never_runs_after_its_stream_was_dropped() {
+        let (entered, inside) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (called, calls) = mpsc::channel();
+        let capture = Stalled {
+            entered: Some(entered),
+            release: released,
+        };
+        let callback: InputCallback = Box::new(move |_: &[f32]| {
+            let _ = called.send(());
+            Flow::Continue
+        });
+        let input = Input::on_capture(Box::new(capture), config(), Some(callback)).unwrap();
+        input.start();
+        inside.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(input);
+        // The stalled read returns only after the stream is gone.
+        release.send(()).unwrap();
+        assert!(calls.recv_timeout(Duration::from_millis(300)).is_err());
     }
 }
