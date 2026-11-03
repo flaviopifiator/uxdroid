@@ -11,6 +11,8 @@
 # SHOTS=<writable directory> keeps the screenshots, as PPM.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 APK="${RUSTDESK_APK:-/samples/rustdesk-1.5.1-universal-signed.apk}"
 PACKAGE=com.carriez.flutter_hbb
 fail() {
@@ -54,7 +56,10 @@ wait_for() {
     done
     fail "no $2 within ${WAIT:-60} s"
 }
-send() { echo "$*" >"$WORK/fifo"; }
+# A FIFO with no reader blocks its writer, so a compositor that died fails the script, never hangs it.
+send() {
+    timeout 5 sh -c 'echo "$1" >"$2"' send "$*" "$WORK/fifo" || fail "the compositor took no $*"
+}
 # Writes the last frame to $WORK/$1.ppm, and to $SHOTS when set.
 shot() {
     send "shot $WORK/$1.ppm"

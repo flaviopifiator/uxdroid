@@ -11,6 +11,8 @@
 # activity reports itself fully drawn, the window shows it. A failure names the furthest stage reached.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 APK="${RUSTDESK_APK:-/samples/rustdesk-1.5.1-universal-signed.apk}"
 PACKAGE=com.carriez.flutter_hbb
 STAGE="nothing"
