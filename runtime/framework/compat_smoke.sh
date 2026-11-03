@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|launched) " "$WORK/out"
+grep -E "^(identity|database|factory|activity|no activity|launched) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -42,5 +42,10 @@ expect "^factory instantiates com\.example\.compat\.CompatApplication with the a
     "the app's component factory did not make its Application"
 grep -q "Unable to instantiate appComponentFactory" "$WORK/out" \
     && fail "the component factory was looked up outside the app's class loader"
+# 4. The app's own startActivity reaches its task: by class and by action, and an intent no activity
+# takes fails with ActivityNotFoundException, as on Android.
+expect "^activity created com\.example\.compat\.SecondActivity by class$" "an activity the app started by class was not made"
+expect "^activity created com\.example\.compat\.SecondActivity by action$" "an activity the app started by action was not made"
+expect "^no activity takes No Activity found to handle Intent$" "an intent no activity takes did not fail as on Android"
 expect "^launched com\.example\.compat/\.CompatActivity " "the activity was not launched"
 echo "ok: the app has its own identity, storage and the system services the corpus asks for"

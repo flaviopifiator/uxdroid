@@ -12,5 +12,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Started by the launcher activity itself, as a trampoline starts the app's real screen. -->
+        <activity android:name=".SecondActivity" android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.compat.SECOND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>

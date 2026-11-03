@@ -152,6 +152,40 @@ final class ActivityStack {
         return "launched";
     }
 
+    /**
+     * The app's own startActivity, which Instrumentation turns into an ActivityManager result code: an
+     * intent for one of the app's activities starts as {@link #start} does, with FLAG_ACTIVITY_CLEAR_TASK
+     * first finishing the task; one for another app's activity, or that none of the app's takes, has no
+     * activity here, since no other app is installed, and fails with ActivityNotFoundException.
+     * Results of startActivityForResult are not delivered yet.
+     */
+    int startFromApp(Intent intent) throws RemoteException {
+        ComponentName component = intent.getComponent();
+        String packageName = app.application.packageName;
+        if (component != null && !component.getPackageName().equals(packageName)) {
+            return android.app.ActivityManager.START_CLASS_NOT_FOUND;
+        }
+        if (intent.getPackage() != null && !intent.getPackage().equals(packageName)) {
+            return android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
+        }
+        ActivityInfo info;
+        try {
+            info = resolve(intent, component == null ? null : component.getClassName());
+        } catch (Refusal refused) {
+            return component != null ? android.app.ActivityManager.START_CLASS_NOT_FOUND
+                    : android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
+        }
+        int flags = intent.getFlags();
+        if ((flags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0 && (flags & Intent.FLAG_ACTIVITY_CLEAR_TASK) != 0) {
+            while (!entries.isEmpty()) destroy(entries.get(entries.size() - 1));
+        }
+        switch (start(intent, info)) {
+            case "new_intent": return android.app.ActivityManager.START_DELIVERED_TO_TOP;
+            case "brought_forward": return android.app.ActivityManager.START_TASK_TO_FRONT;
+            default: return android.app.ActivityManager.START_SUCCESS;
+        }
+    }
+
     private Entry highest(ActivityInfo info) {
         for (int i = entries.size() - 1; i >= 0; i--) {
             if (entries.get(i).info.name.equals(info.name)) return entries.get(i);

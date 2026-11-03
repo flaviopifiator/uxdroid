@@ -449,6 +449,25 @@ public final class Launcher {
         public IActivityClientController getActivityClientController() {
             return CLIENT_CONTROLLER;
         }
+
+        /** The app's own Context.startActivity and Activity.startActivity: its task decides. */
+        public int startActivity(IApplicationThread caller, String callingPackage, String callingFeatureId,
+                Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode, int flags,
+                android.app.ProfilerInfo profilerInfo, Bundle options) throws RemoteException {
+            ActivityStack stack = ActivityStack.current;
+            if (stack == null) return android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
+            if (Looper.myLooper() == Looper.getMainLooper()) return stack.startFromApp(intent);
+            // The task runs on the main thread; a start from another thread is queued there.
+            Intent copy = new Intent(intent);
+            new android.os.Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    stack.startFromApp(copy);
+                } catch (RemoteException e) {
+                    throw new IllegalStateException("cannot start " + copy, e);
+                }
+            });
+            return android.app.ActivityManager.START_SUCCESS;
+        }
     }
 
     /** The handler of IPermissionManager. */
