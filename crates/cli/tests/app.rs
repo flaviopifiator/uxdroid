@@ -692,3 +692,60 @@ fn an_app_that_exits_during_start_is_reported() {
         )
     );
 }
+
+#[test]
+fn only_start_connects_to_a_socket_no_app_serves_yet() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = scratch("socket-unit");
+    // A systemd socket unit's socket before the app's first start: a listener, and no instance
+    // holding the ownership lock.
+    let control = uxdroid_system::control::control_dir_in(&dir.join("run")).unwrap();
+    let manager =
+        std::os::unix::net::UnixListener::bind(control.join("com.example.app.sock")).unwrap();
+    manager.set_nonblocking(true).unwrap();
+    for (args, code) in [
+        (&["app", "com.example.app", "status"][..], 3),
+        (&["app", "com.example.app", "intent", "--action", "a.b"], 3),
+        (&["app", "com.example.app", "stop"], 0),
+    ] {
+        let output = uxdroid(&dir, args);
+        assert_eq!(
+            (output.status.code(), stdout(&output)),
+            (Some(code), "com.example.app is not running\n".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            manager.accept().is_err(),
+            "{args:?} connected, which would start the app"
+        );
+    }
+    let output = uxdroid(&dir, &["app", "list"]);
+    assert_eq!(
+        (output.status.code(), stdout(&output)),
+        (Some(0), String::new())
+    );
+    assert!(
+        manager.accept().is_err(),
+        "list connected, which would start the app"
+    );
+    // start connects: that is what starts the app on demand. The started app answers here.
+    manager.set_nonblocking(false).unwrap();
+    let app = std::thread::spawn(move || {
+        let (stream, _) = manager.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        (&stream)
+            .write_all(
+                b"{\"v\":1,\"id\":1,\"ok\":true,\"result\":{\"outcome\":\"brought_forward\",\"pid\":9,\"activity\":\"com.example.app/.MainActivity\"}}\n",
+            )
+            .unwrap();
+        line
+    });
+    let output = uxdroid(&dir, &["app", "com.example.app", "start"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "com.example.app is already running as process 9; the intent went to it: brought_forward com.example.app/.MainActivity\n"
+    );
+    assert!(app.join().unwrap().contains("\"cmd\":\"start\""));
+}

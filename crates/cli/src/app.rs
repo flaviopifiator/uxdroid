@@ -13,8 +13,8 @@ use serde_json::Value;
 use uxdroid_system::control::client::{self, CallError};
 use uxdroid_system::control::protocol::{Command as Request, Failure, Intent};
 use uxdroid_system::control::{
-    DEFAULT_PROFILE, PROFILE_VARIABLE, control_dir, instance_name, instance_socket, valid_package,
-    valid_profile,
+    DEFAULT_PROFILE, PROFILE_VARIABLE, control_dir, instance_name, instance_socket, served,
+    valid_package, valid_profile,
 };
 
 use crate::runtime::{art_flags, default_runtime, failure, home_dir, runtime_environment};
@@ -247,8 +247,22 @@ fn call(
     }
 }
 
+/// As `call`, for an app that must already run: its socket is not even opened when no instance holds
+/// its ownership lock, since a connection to a systemd socket unit's socket would start the app.
+pub(crate) fn call_running(
+    dir: &Path,
+    app: &Instance,
+    request: &Request,
+    timeout: Duration,
+) -> Result<Option<Value>, String> {
+    if !served(dir, &app.package, &app.profile) {
+        return Ok(None);
+    }
+    call(dir, app, request, timeout)
+}
+
 fn status(dir: &Path, app: &Instance) -> Result<Done, String> {
-    let Some(result) = call(dir, app, &Request::Status, CALL_TIMEOUT)? else {
+    let Some(result) = call_running(dir, app, &Request::Status, CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(app.package.clone(), EXIT_NOT_RUNNING));
     };
     let mut report = format!(
@@ -273,7 +287,7 @@ fn status(dir: &Path, app: &Instance) -> Result<Done, String> {
 }
 
 fn send_intent(dir: &Path, app: &Instance, intent: Intent) -> Result<Done, String> {
-    let Some(result) = call(dir, app, &Request::Intent(intent), CALL_TIMEOUT)? else {
+    let Some(result) = call_running(dir, app, &Request::Intent(intent), CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(app.package.clone(), EXIT_NOT_RUNNING));
     };
     Ok(Done::Printed(format!(
@@ -296,22 +310,14 @@ pub(crate) fn profile_data(profile: &str) -> Result<PathBuf, String> {
     })
 }
 
-fn start(
-    dir: &Path,
+/// The data directory, installed APK and framework runtime an instance starts from: the named ones,
+/// else the profile's data directory and the default runtime. Missing ones are reported.
+pub(crate) fn installed(
     app: &Instance,
-    intent: Intent,
     data: Option<PathBuf>,
     runtime: Option<PathBuf>,
-) -> Result<Done, String> {
-    let package = app.package.as_str();
-    if let Some(result) = call(dir, app, &Request::Start(intent.clone()), CALL_TIMEOUT)? {
-        return Ok(Done::Printed(format!(
-            "{package} is already running as process {}; the intent went to it: {} {}\n",
-            field(&result, "pid"),
-            field(&result, "outcome"),
-            field(&result, "activity")
-        )));
-    }
+) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    let package = &app.package;
     let data = match data {
         Some(data) => data,
         None => profile_data(&app.profile)?,
@@ -333,6 +339,26 @@ fn start(
             runtime.display()
         ));
     }
+    Ok((data, apk, runtime))
+}
+
+fn start(
+    dir: &Path,
+    app: &Instance,
+    intent: Intent,
+    data: Option<PathBuf>,
+    runtime: Option<PathBuf>,
+) -> Result<Done, String> {
+    let package = app.package.as_str();
+    if let Some(result) = call(dir, app, &Request::Start(intent.clone()), CALL_TIMEOUT)? {
+        return Ok(Done::Printed(format!(
+            "{package} is already running as process {}; the intent went to it: {} {}\n",
+            field(&result, "pid"),
+            field(&result, "outcome"),
+            field(&result, "activity")
+        )));
+    }
+    let (data, apk, runtime) = installed(app, data, runtime)?;
     let log = dir.join(format!("{}.log", instance_name(package, &app.profile)));
     let mut child = background(
         launcher(&runtime, &data, &apk, &intent, &app.profile)?,
@@ -464,7 +490,7 @@ fn alive(pid: i32) -> bool {
 
 fn stop(dir: &Path, app: &Instance) -> Result<Done, String> {
     let package = &app.package;
-    let Some(result) = call(dir, app, &Request::Stop, CALL_TIMEOUT)? else {
+    let Some(result) = call_running(dir, app, &Request::Stop, CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(package.clone(), 0));
     };
     let pid = result
@@ -520,7 +546,7 @@ fn list(dir: &Path) -> Result<Done, String> {
             profile: profile.into(),
         };
         // An app that does not answer in time is left out, as one that ended is.
-        if let Ok(Some(result)) = call(dir, &app, &Request::Status, LIST_TIMEOUT) {
+        if let Ok(Some(result)) = call_running(dir, &app, &Request::Status, LIST_TIMEOUT) {
             report.push_str(&format!(
                 "{name} {} {}\n",
                 field(&result, "pid"),

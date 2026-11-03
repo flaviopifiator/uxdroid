@@ -177,6 +177,8 @@ stopped com.example.app (process 4242, 2 activities finished)
 | `stop` | Finishes every activity, and returns once the process has exited |
 | `list` | Each running app: package, followed by `@<profile>` for a profile other than `default`, process and data directory |
 
+`status`, `intent`, `stop` and `list` open a socket only while an instance holds its ownership lock, `<instance>.lock` beside it, so they never start an app whose socket a systemd socket unit holds (see `uxdroid service` below); `start` connects anyway, and that connection is what starts such an app.
+
 The outcome of an intent is `launched`, `new_intent` (the activity's `onNewIntent`) or `brought_forward`, by the activity's launch mode and the intent's flags, as on Android; see [the architecture](docs/architecture.md). A launch of an app that is already running, through `uxdroid app` or the launcher itself, starts no second process.
 
 | Option | Meaning |

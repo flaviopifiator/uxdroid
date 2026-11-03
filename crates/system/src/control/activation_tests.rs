@@ -191,3 +191,25 @@ fn a_bind_leaves_a_socket_its_manager_listens_on() {
     );
     assert!(manager.as_raw_fd() >= 0);
 }
+
+#[test]
+fn an_instance_is_served_only_while_its_ownership_lock_is_held() {
+    let dir = scratch("served");
+    // A socket unit's socket before the first start: a file, a listener, and no lock.
+    let (_manager, _) = passed(&dir.join("com.example.app.sock"));
+    assert!(!super::served(&dir, "com.example.app", "default"));
+    let Bound::Listening(listener) =
+        server::bind_instance(&dir, "com.example.app", "work").unwrap()
+    else {
+        panic!("the socket is taken");
+    };
+    assert!(super::served(&dir, "com.example.app", "work"));
+    // Looking takes the lock shared for an instant, which must not make a starting app give up.
+    assert!(matches!(
+        server::bind_instance(&dir, "com.example.app", "default").unwrap(),
+        Bound::Managed
+    ));
+    drop(listener);
+    assert!(!super::served(&dir, "com.example.app", "work"));
+    assert!(!super::served(&dir, "../x", "default"));
+}

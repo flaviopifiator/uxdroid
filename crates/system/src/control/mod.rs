@@ -137,6 +137,28 @@ pub fn instance_socket(dir: &Path, package: &str, profile: &str) -> Result<PathB
     Ok(path)
 }
 
+/// Whether an instance serves its socket in `dir`: whether a process holds its ownership lock, found
+/// without connecting, since a connection to a socket unit's socket would start the app. The lock is
+/// taken shared for an instant; a starting app retries its own claim for longer than that.
+pub fn served(dir: &Path, package: &str, profile: &str) -> bool {
+    if !valid_package(package) || !valid_profile(profile) {
+        return false;
+    }
+    let lock = dir.join(format!("{}.lock", instance_name(package, profile)));
+    let Ok(file) = File::open(&lock) else {
+        return false;
+    };
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        // Unknown: asking the socket is the only way to tell.
+        Err(std::fs::TryLockError::Error(_)) => true,
+    }
+}
+
 /// The instance lock of `package` over the data directory `data`.
 pub fn instance_lock(data: &Path, package: &str) -> PathBuf {
     data.join("app").join(format!(".{package}.running"))
