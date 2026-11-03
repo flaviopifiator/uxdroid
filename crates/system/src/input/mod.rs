@@ -10,6 +10,7 @@
 
 pub mod charmap;
 pub mod keys;
+pub mod natives;
 pub mod translate;
 pub mod wire;
 pub mod xkb;
