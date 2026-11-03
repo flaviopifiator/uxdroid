@@ -390,9 +390,20 @@ public final class Launcher {
                     ApplicationInfo.class, CompatibilityInfo.class, ClassLoader.class,
                     boolean.class, boolean.class, boolean.class, boolean.class);
             packageInfo.setAccessible(true);
-            // Base loader, then as the bind asks: no security violation, include code, do not register, no sandbox.
-            loadedApk = packageInfo.invoke(ActivityThread.currentActivityThread(), info, CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO,
-                    Launcher.class.getClassLoader(), false, true, false, false);
+            // A LoadedApk looks the manifest's appComponentFactory up on its base loader as it is made,
+            // which on Android is null and skips it, and again on the app's loader once that exists.
+            // Here the base is the framework's, which cannot hold the app's class, so the factory is
+            // hidden until the app's loader looks it up.
+            String factory = info.appComponentFactory;
+            info.appComponentFactory = null;
+            try {
+                // Base loader, then as the bind asks: no security violation, include code, do not register, no sandbox.
+                loadedApk = packageInfo.invoke(ActivityThread.currentActivityThread(), info,
+                        CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO, Launcher.class.getClassLoader(),
+                        false, true, false, false);
+            } finally {
+                info.appComponentFactory = factory;
+            }
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("cannot give the app the framework's class loader", e);
         }

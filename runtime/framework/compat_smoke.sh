@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|launched) " "$WORK/out"
+grep -E "^(identity|database|factory|launched) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -36,5 +36,11 @@ read -r _ _ my _ calling _ info _ user _ is_app <<<"$line"
 # the framework took it from a literal /data.
 expect "^database $ANDROID_DATA/data/com\.example\.compat/databases/compat\.db rows 1 page size [1-9][0-9]*$" \
     "a database did not open in the app's data directory"
+# 3. The manifest's appComponentFactory, a class of the app, is loaded by the app's class loader and
+# makes its components; every androidx app names androidx.core's.
+expect "^factory instantiates com\.example\.compat\.CompatApplication with the app's class loader true$" \
+    "the app's component factory did not make its Application"
+grep -q "Unable to instantiate appComponentFactory" "$WORK/out" \
+    && fail "the component factory was looked up outside the app's class loader"
 expect "^launched com\.example\.compat/\.CompatActivity " "the activity was not launched"
 echo "ok: the app has its own identity, storage and the system services the corpus asks for"
