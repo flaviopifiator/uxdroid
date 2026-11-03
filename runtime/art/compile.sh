@@ -16,7 +16,7 @@ for jar in "${JARS[@]}"; do
     APKS+=("--apk=$RUNTIME/javalib/$jar.jar" "--dex-location=$RUNTIME/javalib/$jar.jar")
 done
 # The first build has no profile yet: make_profile.sh records one from this full image.
-PROFILE=/work/runtime/art/boot-profile.txt
+PROFILE="${PROFILE:-/work/runtime/art/boot-profile.txt}"
 FILTER=(--compiler-filter=speed)
 if [ -e "$PROFILE" ]; then
     # An empty profile would compile nothing and still look like a working image.

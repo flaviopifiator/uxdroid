@@ -1,0 +1,76 @@
+Run dalvikvm's runtime on a thread with a mapped stack.
+
+ART protects the low end of each thread's stack. The process's first thread has a stack that the
+kernel grows on demand, so ART first touches every page of it, 8 MiB by default, twice per page,
+and only then returns them.
+A thread with a mapped stack needs none of it, and keeps the same 8 MiB. The stack did not count
+in peak memory, which the runtime reaches later, but its faults took a third of startup time.
+
+--- a/dalvikvm/dalvikvm.cc
++++ b/dalvikvm/dalvikvm.cc
+@@ -15,10 +15,14 @@
+  */
+ 
+ #include <dlfcn.h>
++#include <linux/membarrier.h>
++#include <pthread.h>
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/syscall.h>
++#include <unistd.h>
+ 
+ #include <algorithm>
+ #include <memory>
+@@ -254,8 +258,47 @@ extern "C" const char *__asan_default_options() {
+     return "detect_leaks=0";
+ }
+ 
++namespace {
++
++struct Arguments {
++  int argc;
++  char** argv;
++};
++
++void* RunDalvikvm(void* data) {
++  Arguments* arguments = static_cast<Arguments*>(data);
++  // Do not allow static destructors to be called, since it's conceivable that
++  // daemons may still awaken (literally).
++  art::FastExit(art::dalvikvm(arguments->argc, arguments->argv));
++}
++
++}  // namespace
++
+ int main(int argc, char** argv) {
+-  // Do not allow static destructors to be called, since it's conceivable that
+-  // daemons may still awaken (literally).
+-  art::FastExit(art::dalvikvm(argc, argv));
++  // The runtime registers for these, and the kernel only takes a slow path, an RCU grace period of
++  // several milliseconds each, when the process already has a second thread. Registering again is
++  // a no-op. An error here is not fatal: the runtime handles it the same way.
++  syscall(__NR_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0);
++  syscall(__NR_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0);
++  Arguments arguments = {argc, argv};
++  // The same size as the default limit for a first thread, and as Android's main thread.
++  static constexpr size_t kStackSize = 8 * 1024 * 1024;
++  pthread_attr_t attributes;
++  pthread_t thread{};
++  if (pthread_attr_init(&attributes) != 0 ||
++      pthread_attr_setstacksize(&attributes, kStackSize) != 0 ||
++      pthread_create(&thread, &attributes, RunDalvikvm, &arguments) != 0) {
++    RunDalvikvm(&arguments);
++  }
++  // The runtime blocks these on its own threads and waits for them. This thread must not take them,
++  // but must keep other signals: a thread dump signals every thread and waits for an answer.
++  sigset_t runtime_signals;
++  sigemptyset(&runtime_signals);
++  sigaddset(&runtime_signals, SIGPIPE);
++  sigaddset(&runtime_signals, SIGQUIT);
++  sigaddset(&runtime_signals, SIGUSR1);
++  pthread_sigmask(SIG_BLOCK, &runtime_signals, nullptr);
++  // RunDalvikvm ends the process and never returns.
++  pthread_join(thread, nullptr);
++  return EXIT_FAILURE;
+ }

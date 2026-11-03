@@ -22,6 +22,11 @@ SHARED_FLAGS=(-Xnorelocate -XX:HeapMinFree=256k -XX:HeapMaxFree=1m -XX:LargeObje
 "${COMPETITOR_ENV[@]}" "$P/bin/dalvikvm" -cp "$SAMPLES/Hello.jar" Hello >/dev/null 2>&1
 "${COMPETITOR_ENV[@]}" "$P/bin/dalvikvm" -cp "$SAMPLES/Compute.jar" Compute >/dev/null 2>&1
 
+# Peak memory depends on how the page cache holds a file: a freshly written copy read up to 6 MiB
+# higher than the same bytes read back. Both runtimes start from the same state.
+sync
+find "$RUNTIME" "$P" "$HOME/.cache/art" -type f -exec dd if={} iflag=nocache count=0 status=none \; 2>/dev/null
+
 for program in Hello Compute; do
     echo "$program"
     printf '  %-20s ' uxdroid-art
@@ -32,5 +37,9 @@ for program in Hello Compute; do
     "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" "${SHARED_FLAGS[@]}" -cp "$SAMPLES/$program.jar" "$program"
     printf '  %-20s ' art_standalone-nojit
     "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" "${SHARED_FLAGS[@]}" -Xusejit:false -cp "$SAMPLES/$program.jar" "$program"
+    # uxdroid's launcher avoids touching the first thread's stack. This is how close a smaller stack
+    # limit brings the competitor, at the price of a 256 KiB main thread.
+    printf '  %-20s ' art_standalone-256k
+    (ulimit -s 256; "${COMPETITOR_ENV[@]}" "$MEASURE" "$RUNS" "$P/bin/dalvikvm" "${SHARED_FLAGS[@]}" -Xusejit:false -cp "$SAMPLES/$program.jar" "$program")
 done
 echo "installed: uxdroid $(du -sh "$RUNTIME" | cut -f1), art_standalone $(du -sh "$P" | cut -f1) plus generated boot image $(du -sh "$HOME/.cache/art" 2>/dev/null | cut -f1)"
