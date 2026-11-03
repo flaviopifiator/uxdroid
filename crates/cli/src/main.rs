@@ -12,7 +12,9 @@ const INSTALL_USAGE: &str = "usage: uxdroid install <apk> --data <dir>";
 const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
                      uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n       \
                      uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]\n       \
-                     uxdroid install <apk> --data <dir>";
+                     uxdroid install <apk> --data <dir>\n       \
+                     uxdroid app <package> status|start|intent|stop [<options>]\n       \
+                     uxdroid app list";
 const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 
@@ -24,12 +26,25 @@ fn main() -> ExitCode {
         Some((command, rest)) if command == "load" => native::run_load(rest),
         Some((command, rest)) if command == "run" => run_command(rest),
         Some((command, rest)) if command == "install" => install::run_install(rest),
+        Some((command, rest)) if command == "app" => app_command(rest),
         _ => fail(USAGE, EXIT_USAGE),
     }
 }
 
+#[cfg(target_os = "linux")]
+mod app;
 mod install;
 mod runtime;
+
+#[cfg(target_os = "linux")]
+fn app_command(args: &[OsString]) -> ExitCode {
+    app::run_app(args)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn app_command(_args: &[OsString]) -> ExitCode {
+    fail("error: uxdroid app needs a Linux host", EXIT_FAILURE)
+}
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 mod run;

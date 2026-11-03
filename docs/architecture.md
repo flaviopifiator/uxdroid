@@ -136,6 +136,54 @@ Not yet: key repeat, a soft keyboard and the input method service, pointer captu
 
 The spike measured 28 MiB of private dirty memory per process. Most of the rest was clean framework pages, shared between processes.
 
+### One process per app, driven through a control socket
+
+Android keeps one process per app, and two processes over one data directory can corrupt its databases and preferences, so the launcher allows one. It holds an exclusive `flock` on `ANDROID_DATA/app/.<package>.running` for the life of the process; the kernel drops it when the process ends, however it ends, so a crash leaves no stale lock, and the file closes on exec, so programs the app runs do not inherit it. A launch that finds the lock held hands its intent to the running process through its control socket, prints `uxdroid: <package> is already running as process <pid> over <data>, so this launch went to it: <outcome> <activity>`, and exits 0; the running instance may still be starting, so the socket is tried for up to 30 s. A lock that cannot be taken at all, as on a read-only directory, is reported and the app runs anyway.
+
+The running app's activities form one task, `dev.uxdroid.system.ActivityStack`, which decides what an intent does as `ActivityTaskManager` does, and tells the framework through its own client transactions:
+
+| Intent | Result |
+|--------|--------|
+| The launcher's (`MAIN`, `LAUNCHER`, no data) while an activity runs | `brought_forward`: nothing changes |
+| For the activity on top, which is `singleTop`, `singleTask` or `singleInstance`, or with `FLAG_ACTIVITY_SINGLE_TOP` | `new_intent`: `onNewIntent`, then resumed |
+| For an activity lower down, with `FLAG_ACTIVITY_CLEAR_TOP` or a `singleTask` launch mode | The activities above it finish; `new_intent` if it is single-top as above, else it is made again, `launched` |
+| Anything else | `launched`: a new activity on top |
+
+An intent names an activity by class, or `.Name` relative to the package, or is resolved by the manifest's intent filters with the default category, as `startActivity` resolves an implicit one; a launcher's intent goes to the launcher activity. Each activity has its own window, as in desktop windowing, so an activity covered by a newer one is paused, not stopped, and its window stays. `Activity.finish` destroys the activity and resumes the one below; when the last one finishes, the process exits, as a desktop app does when its last window closes. An app's own `startActivity` does not reach the stack yet.
+
+The control socket is `<dir>/<package>.sock`, where `<dir>` is `$XDG_RUNTIME_DIR/uxdroid`, or `/tmp/uxdroid-<uid>` without a runtime directory. The directory is made with mode 0700, and an existing one that is not the user's, or that other users can enter, is refused rather than repaired; the socket has mode 0600, and each connection's peer uid, from `SO_PEERCRED`, must be the app's own, or it gets `not_allowed` and nothing else. The socket is served once the main thread is first idle after the launch: served at once, it delayed the sample app's first frame by about 5 ms, though binding it takes 0.3 ms, for a reason not found. A thread of `crates/system` accepts connections, one thread per connection reads its requests in order, and every request is checked before the app sees it. A checked command is queued for the main Looper, which watches an eventfd through `MessageQueue.addOnFileDescriptorEventListener` and runs it between the app's own messages, so the framework is only touched on the thread it expects; a main thread that does not answer within 10 s gets the command `busy`. At most 16 connections are served at once, and one idle for 30 s is closed. A socket file whose owner died is replaced: ownership is a second lock, `<dir>/<package>.lock`, held as long as the socket is served. The socket is per package and user, so an instance over another data directory runs without one and says so. A clean exit, through `stop` or the last activity finishing, removes it. A socket that cannot be served costs only the control, never the app.
+
+#### Protocol, version 1
+
+One JSON object per line each way, UTF-8, each request answered in order on its connection. A request is at most 64 KiB; a longer one gets `too_long` and the connection is closed. Answers are read up to 16 MiB, for what later commands report.
+
+```text
+→ {"v":1,"id":7,"cmd":"start","intent":{"activity":".Detail","action":"android.intent.action.VIEW","data":"example://x","extras":{"k":"v"},"flags":0}}
+← {"v":1,"id":7,"ok":true,"result":{"outcome":"launched","pid":4242,"activity":"com.example/.Detail"}}
+← {"v":1,"id":8,"ok":false,"error":{"code":"no_such_activity","message":"com.example declares no activity com.example.Nope"}}
+```
+
+`v` must be 1, else `unsupported_version`. `id` is optional, a non-negative integer or a string of at most 64 bytes, and is echoed, also in refusals. Unknown fields are refused, so a field a later version adds is never silently ignored.
+
+| `cmd` | Takes | Result |
+|-------|-------|--------|
+| `hello` | | `versions`, `commands`, `package`, `pid`, answered by the server thread without the main Looper |
+| `status` | | `package`, `pid`, `data`, `activities`: `component` and `state` (`resumed` or `paused`), bottom to top |
+| `start` | `intent`, optional: the launcher's intent without one | `outcome` (`launched`, `new_intent`, `brought_forward`), `pid`, `activity` |
+| `intent` | `intent` naming an activity, an action or data | As `start` |
+| `stop` | | `pid` and the number of activities `finished`; the process exits after answering |
+
+An `intent` holds `activity` (a class name), `action` (at most 255 bytes), `data` (a URI of at most 4096 bytes), `extras` (at most 64 strings, keys of at most 255 bytes, values of at most 4096) and `flags` (`Intent.setFlags`, 0 to 2^32-1); none may hold control characters but extra values. Refusal codes: `bad_request`, `unsupported_version`, `unknown_command`, `too_long`, `not_allowed`, `busy`, `no_such_activity`, `failed`.
+
+Nothing a client sends can make the app run code its APK does not hold: an intent can only start an activity the manifest declares, of the app's own package, and extras are only strings, so no class is named, loaded or deserialized from a request.
+
+#### What later versions add
+
+New commands are added to version 1 and listed by `hello`, which a client asks first; an older app answers a command it lacks with `unknown_command`. Only a change to an existing command's meaning makes a version 2. Planned:
+
+- Agent control: `ui` returns the view hierarchy and accessibility nodes read in process from each `ViewRootImpl` (class, text, content description, role, bounds, a node id); `screenshot` the composed window as PNG, base64 in the result or, to skip the copy, a memfd passed with `SCM_RIGHTS`; `tap`, `type`, `scroll` and `back`, by node id or coordinates, injected through the window's `InputChannel` as seat input is; and an MCP server, `uxdroid app <package> mcp`, mapping its tools one to one onto these commands over the same socket.
+- systemd: a user service per app, `uxdroid service enable <package>`, running the launcher in the foreground, and a socket unit with `ListenStream=%t/uxdroid/<package>.sock` and `SocketMode=0600`, so the first connection starts the app. The launcher then takes the socket from systemd (`LISTEN_PID`, `LISTEN_FDS`, descriptor 3) instead of binding it, and keeps the instance lock and the peer check.
+
 ### Audio goes to the host's sound server over the PulseAudio protocol
 
 `AudioTrack`, `AudioRecord` and the `AudioSystem` values they read are natives in `crates/system`, so a Java app's sound reaches the server with no `audioserver` and no Binder in between; `IAudioService` gives players ids, full volume and audio focus. Recording, through any API, needs the manifest's `RECORD_AUDIO`: the launcher records the requested permissions in `dev.uxdroid.system.Permissions`, and a desktop has no dialog, so a requested permission counts as granted.

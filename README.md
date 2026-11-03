@@ -91,6 +91,9 @@ docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
 docker compose run --rm -T dev bash /work/runtime/framework/audio_smoke.sh
 # Wayland pointer, touch and keyboard input to an SDK-built APK's Views, through a scripted seat.
 docker compose run --rm -T dev bash /work/runtime/framework/input_smoke.sh
+# One process per app: uxdroid app starts it, a second launch goes to it, and intents, status, list
+# and stop reach it through its control socket.
+docker compose run --rm -T dev bash /work/runtime/framework/control_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
@@ -141,6 +144,51 @@ prepared com.example.app in /data/app/com.example.app: code compiled (verify), m
 ```
 
 The `verify` filter was chosen by measurement, in [benches/framework](benches/framework/README.md). The record and the library are valid only for the runtime and the `base.apk` they were made with: if either changes, the launcher says so on stderr and parses the APK and makes the default bodies itself, and ART ignores compiled code that no longer matches. On a file system mounted `noexec`, `defaults.so` cannot be mapped and the bodies are made at start. If preparing fails, the install fails with `error: cannot prepare <package> for the framework: ...` and the previous install stays. Without a framework, only the libraries are installed, an older preparation is removed, and stderr says `note: no framework in <runtime>, so <package> is not prepared: ...`; the launcher then works from the APK as before. The install runs the framework's parser on the manifest, not the app's code.
+
+### Control a running app
+
+An installed app runs once per data directory, as Android keeps one process per app. `uxdroid app` sends it commands through its control socket, `$XDG_RUNTIME_DIR/uxdroid/<package>.sock` (`/tmp/uxdroid-<uid>/` without a runtime directory), which only the same user can open:
+
+```sh
+uxdroid app com.example.app start --data-dir /path/to/android-data
+uxdroid app com.example.app intent --action android.intent.action.VIEW --data example://item/7 --extra source=cli
+uxdroid app com.example.app status
+uxdroid app list
+uxdroid app com.example.app stop
+```
+
+```text
+started com.example.app as process 4242: com.example.app/.MainActivity, log in /run/user/1000/uxdroid/com.example.app.log
+com.example.app (process 4242): launched com.example.app/.DetailActivity
+package: com.example.app
+pid: 4242
+data: /path/to/android-data
+activity: com.example.app/.MainActivity (paused)
+activity: com.example.app/.DetailActivity (resumed)
+com.example.app 4242 /path/to/android-data
+stopped com.example.app (process 4242, 2 activities finished)
+```
+
+| Command | Does |
+|---------|------|
+| `start` | Hands the intent to the running app, printing `<package> is already running as process <pid>; the intent went to it: <outcome> <activity>`. If the app is not running, starts the installed `<data-dir>/app/<package>/base.apk` in the background, its own session, with its output in the log beside the socket, and returns once it answers. Without options the intent is the launcher's, as a click on the app's icon |
+| `intent` | Sends an intent to the running app, which must name an activity, an action or data |
+| `status` | The process, its data directory, and its activities from bottom to top, `resumed` or `paused` |
+| `stop` | Finishes every activity, and returns once the process has exited |
+| `list` | Each running app: package, process and data directory |
+
+The outcome of an intent is `launched`, `new_intent` (the activity's `onNewIntent`) or `brought_forward`, by the activity's launch mode and the intent's flags, as on Android; see [the architecture](docs/architecture.md). A launch of an app that is already running, through `uxdroid app` or the launcher itself, starts no second process.
+
+| Option | Meaning |
+|--------|---------|
+| `--activity <class>` | The activity, by class name or `.Name` relative to the package. Otherwise the intent's filters choose, or the launcher activity |
+| `--action <action>`, `--data <uri>` | The intent's action and data |
+| `--extra <key>=<value>` | A string extra. Can repeat |
+| `--flags <n>` | `Intent.setFlags`, decimal or `0x` hexadecimal, such as `0x24000000` for `CLEAR_TOP` and `SINGLE_TOP` |
+| `--data-dir <dir>` | `start` only: the absolute data directory given to `uxdroid install`. Otherwise `$XDG_DATA_HOME/uxdroid/data` |
+| `--runtime <dir>` | `start` only: the runtime, found otherwise as for `uxdroid install` |
+
+Exit codes: `0` success, also for `stop` of an app that is not running; `1` the command failed or the app refused it, with its reason; `2` wrong usage; `3` for `status` and `intent`, the app is not running, printed as `<package> is not running`.
 
 ## Tests
 

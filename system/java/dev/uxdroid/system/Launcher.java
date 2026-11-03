@@ -6,9 +6,6 @@ import android.app.IActivityClientController;
 import android.app.IActivityManager;
 import android.app.IActivityTaskManager;
 import android.app.IApplicationThread;
-import android.app.servertransaction.ClientTransaction;
-import android.app.servertransaction.LaunchActivityItem;
-import android.app.servertransaction.ResumeActivityItem;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -20,14 +17,12 @@ import android.content.pm.pkg.FrameworkPackageUserState;
 import android.content.res.CompatibilityInfo;
 import android.content.res.Configuration;
 import android.graphics.Rect;
-import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.RemoteException;
 import android.view.View;
 import android.view.ViewGroup;
-import android.window.ActivityWindowInfo;
 import java.io.File;
 
 /**
@@ -36,6 +31,10 @@ import java.io.File;
  * scheduling a transaction that launches the Activity, so the framework itself makes the LoadedApk, the
  * Application, the Activity, its Context and its PhoneWindow. Without --once the Activity is then
  * resumed, and its window drawn by the framework's ViewRootImpl into a Wayland window.
+ *
+ * <p>One process runs an app over one data directory, as Android keeps one process per app: the first
+ * launch holds a lock and serves a control socket, and a later launch hands its intent to that process
+ * through the socket and exits. See {@link Control}.
  */
 public final class Launcher {
     private Launcher() {}
@@ -43,8 +42,14 @@ public final class Launcher {
     public static void main(String[] args) throws Exception {
         boolean once = args.length > 0 && args[0].equals("--once");
         int first = once ? 1 : 0;
+        String givenIntent = null;
+        if (args.length > first + 1 && args[first].equals("--intent")) {
+            givenIntent = args[first + 1];
+            first += 2;
+        }
         if (args.length - first < 3 || args.length - first > 4) {
-            System.err.println("usage: Launcher [--once] <runtime root> <libuxdroid_system.so> <apk> [activity class]");
+            System.err.println("usage: Launcher [--once] [--intent <json>] <runtime root> <libuxdroid_system.so> <apk>"
+                    + " [activity class]");
             System.exit(2);
         }
         String root = args[first];
@@ -56,6 +61,9 @@ public final class Launcher {
         boolean prepared = record.isFile() && Record.matches(record, identity);
         File defaults = new File(apk.getParentFile(), Installer.DEFAULTS);
         Boot.start(root, args[first + 1], prepared && defaults.isFile() ? defaults.getPath() : null);
+        org.json.JSONObject intent = new org.json.JSONObject(Control.intent(givenIntent != null ? givenIntent : "{}"));
+        if (activityName == null) activityName = intent.optString("activity", null);
+        else if (!intent.has("activity")) intent.put("activity", activityName);
         Services.register("permissionmgr", android.permission.IPermissionManager.class, new PermissionManager());
         App app = null;
         if (record.isFile()) {
@@ -67,13 +75,17 @@ public final class Launcher {
             }
         }
         if (app == null) app = App.parse(apk, activityName);
+        String packageName = app.application.packageName;
+        if (!claimInstance(packageName)) {
+            forward(packageName, intent);
+        }
         App started = app;
         Permissions.declare(() -> {
             String[] names = started.packageInfo(android.content.pm.PackageManager.GET_PERMISSIONS, 0)
                     .requestedPermissions;
             return names == null ? java.util.List.of() : java.util.Arrays.asList(names);
         });
-        Services.register("activity", IActivityManager.class, new ActivityManager(app, once));
+        Services.register("activity", IActivityManager.class, new ActivityManager(app, once, intent, givenIntent == null));
         Services.register("activity_task", IActivityTaskManager.class, new ActivityTaskManager());
         Services.register("package", IPackageManager.class, new PackageManager(app));
         Services.register("display", android.hardware.display.IDisplayManager.class, new DisplayService());
@@ -96,6 +108,35 @@ public final class Launcher {
         android.view.ThreadedRenderer.sRendererEnabled = false;
         // Prepares the main Looper, attaches through the "activity" service above, then loops forever.
         ActivityThread.main(new String[0]);
+    }
+
+    /**
+     * Takes this app's instance lock over the data directory. A lock that cannot be taken at all, such
+     * as on a read-only directory, is reported and the app runs anyway.
+     */
+    private static boolean claimInstance(String packageName) {
+        File lock = new File(dataRoot(), "app/." + packageName + ".running");
+        try {
+            return Control.claim(lock.getPath());
+        } catch (IllegalStateException e) {
+            System.err.println("uxdroid: " + packageName + " runs without its instance lock: " + e.getMessage());
+            return true;
+        }
+    }
+
+    /** Another process runs the app over this data directory: it takes this launch, and this one exits. */
+    private static void forward(String packageName, org.json.JSONObject intent) {
+        try {
+            org.json.JSONObject result = new org.json.JSONObject(Control.forward(packageName, intent.toString(), 30_000));
+            System.err.println("uxdroid: " + packageName + " is already running as process " + result.optInt("pid")
+                    + " over " + dataRoot() + ", so this launch went to it: " + result.optString("outcome") + " "
+                    + result.optString("activity"));
+            System.exit(0);
+        } catch (IllegalStateException | org.json.JSONException e) {
+            System.err.println("uxdroid: " + packageName + " is already running over " + dataRoot()
+                    + ", and it did not take this launch: " + e.getMessage());
+            System.exit(1);
+        }
     }
 
     /** The installed APK: its application and the Activity to launch, from its record or parsed now. */
@@ -126,7 +167,8 @@ public final class Launcher {
 
         /** From the install record, or null if the record holds another Activity than the one asked for. */
         static App recorded(File apk, Record.Contents record, String activityName) {
-            if (record.activity == null || (activityName != null && !activityName.equals(record.activity.name))) {
+            if (record.activity == null || (activityName != null
+                    && !className(record.application.packageName, activityName).equals(record.activity.name))) {
                 return null;
             }
             place(record.application, apk, true);
@@ -161,7 +203,7 @@ public final class Launcher {
         static ActivityInfo activity(PackageParser.Package parsed, ApplicationInfo application, String activityName) {
             for (PackageParser.Activity candidate : parsed.activities) {
                 boolean chosen = activityName != null
-                        ? candidate.className.equals(activityName)
+                        ? candidate.className.equals(className(parsed.packageName, activityName))
                         : candidate.intents.stream().anyMatch(filter -> filter.hasAction(Intent.ACTION_MAIN)
                                 && filter.hasCategory(Intent.CATEGORY_LAUNCHER));
                 if (chosen) {
@@ -195,6 +237,12 @@ public final class Launcher {
         /** What PackageManager.getPackageInfo answers; parses the APK only when the record holds too little. */
         android.content.pm.PackageInfo packageInfo(long flags, int userId) {
             if (record != null && (flags & BEYOND_RECORD) == 0) return record.packageInfo();
+            return PackageParser.generatePackageInfo(parsed(), new int[0], (int) flags, 0, 0,
+                    java.util.Collections.emptySet(), FrameworkPackageUserState.DEFAULT, userId);
+        }
+
+        /** The framework's parse of the APK, made the first time something needs more than the record. */
+        PackageParser.Package parsed() {
             if (parsed == null) {
                 try {
                     parsed = parsePackage(apk);
@@ -202,13 +250,23 @@ public final class Launcher {
                     throw new IllegalStateException("cannot parse " + apk, e);
                 }
             }
-            return PackageParser.generatePackageInfo(parsed, new int[0], (int) flags, 0, 0,
-                    java.util.Collections.emptySet(), FrameworkPackageUserState.DEFAULT, userId);
+            return parsed;
+        }
+
+        ActivityInfo activityInfo(PackageParser.Activity declared) {
+            ActivityInfo info = PackageParser.generateActivityInfo(declared, 0, FrameworkPackageUserState.DEFAULT, 0);
+            info.applicationInfo = application;
+            return info;
         }
 
         ComponentName component() {
             return new ComponentName(activity.packageName, activity.name);
         }
+    }
+
+    /** A class name as a manifest gives it: {@code .Name} and {@code Name} are in the package. */
+    static String className(String packageName, String name) {
+        return name.startsWith(".") ? packageName + name : name.contains(".") ? name : packageName + "." + name;
     }
 
     /** Android's /data: where the installer put the app, and where its data goes. */
@@ -224,11 +282,16 @@ public final class Launcher {
     public static final class ActivityManager {
         private final App app;
         private final boolean once;
+        private final org.json.JSONObject intent;
+        private final boolean launcherIntent;
         private final java.util.Map<String, android.content.IContentProvider> providers = new java.util.HashMap<>();
 
-        ActivityManager(App app, boolean once) {
+        /** @param launcherIntent the launch names at most an activity, so it gets the launcher's intent */
+        ActivityManager(App app, boolean once, org.json.JSONObject intent, boolean launcherIntent) {
             this.app = app;
             this.once = once;
+            this.intent = intent;
+            this.launcherIntent = launcherIntent;
         }
 
         public void attachApplication(IApplicationThread thread, long startSeq) throws RemoteException {
@@ -247,26 +310,18 @@ public final class Launcher {
                     null, sharedMemory(), // fonts are already loaded by Boot
                     android.os.SystemClock.elapsedRealtime(), android.os.SystemClock.uptimeMillis());
 
-            IBinder token = new Binder();
-            Intent intent = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                    .setComponent(app.component());
-            ClientTransaction launch = new ClientTransaction(thread);
-            launch.addTransactionItem(new LaunchActivityItem(token, intent, 0, app.activity, config, config,
-                    0, info.packageName, null, // default device, referrer, no voice interactor
-                    android.app.ActivityManager.PROCESS_STATE_TOP,
-                    null, null, null, null, null, // no saved state, results, new intents or scene transition
-                    true, null, new Binder(), // forward, no profiler, assist token
-                    CLIENT_CONTROLLER, new Binder(), false, null, new Binder(), // not from a bubble, no task fragment
-                    new ActivityWindowInfo()));
-            if (once) {
-                // Created only: a report needs no window, so it runs with no compositor.
-                thread.scheduleTransaction(launch);
-                exitWhenLaunched(token);
-                return;
+            // Created only with --once: a report needs no window, so it runs with no compositor.
+            ActivityStack stack = new ActivityStack(app, thread, !once);
+            ActivityStack.current = stack;
+            Control.start(info.packageName);
+            try {
+                Intent launch = Control.intentOf(intent);
+                if (launcherIntent) launch.addCategory(Intent.CATEGORY_LAUNCHER);
+                stack.start(launch, stack.resolve(launch, intent.optString("activity", null)));
+            } catch (ActivityStack.Refusal | org.json.JSONException e) {
+                throw new IllegalArgumentException("cannot launch " + info.packageName + ": " + e.getMessage(), e);
             }
-            // As ActivityTaskManager does for a launch in front: resume it, which adds its window.
-            launch.addTransactionItem(new ResumeActivityItem(token, true, false));
-            thread.scheduleTransaction(launch);
+            if (once) exitWhenLaunched(stack.top());
         }
 
         /**
@@ -320,12 +375,22 @@ public final class Launcher {
         public boolean isUserUnlockingOrUnlocked(int userId) { return userId == 0; }
     }
 
+    static IActivityClientController clientController() {
+        return CLIENT_CONTROLLER;
+    }
+
     /** What an Activity asks about its task and window. Other calls are counted. */
     private static final IActivityClientController CLIENT_CONTROLLER =
             Services.local(IActivityClientController.class, new ActivityClientController());
 
     /** The handler of IActivityClientController. */
     public static final class ActivityClientController {
+        /** Activity.finish: the task drops it and resumes the one below. */
+        public boolean finishActivity(IBinder token, int resultCode, Intent resultData, int finishTask)
+                throws RemoteException {
+            return ActivityStack.current != null && ActivityStack.current.finish(token);
+        }
+
         /**
          * Activity.reportFullyDrawn: an app's own signal that its first full frame is on screen. Flutter's
          * activity sends it once its first frame is rendered, so tests wait for this line.
@@ -365,7 +430,9 @@ public final class Launcher {
         }
 
         public ActivityInfo getActivityInfo(ComponentName component, long flags, int userId) {
-            return component.equals(app.component()) ? app.activity : null;
+            if (component.equals(app.component())) return app.activity;
+            // Activities started since, which the APK was parsed for; others are not looked up.
+            return ActivityStack.current != null ? ActivityStack.current.info(component) : null;
         }
 
         public android.content.pm.PackageInfo getPackageInfo(String packageName, long flags, int userId) {

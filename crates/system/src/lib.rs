@@ -14,6 +14,7 @@ macro_rules! f {
 
 mod audio;
 mod compose;
+pub mod control;
 pub mod default_library;
 pub mod defaults;
 mod handles;

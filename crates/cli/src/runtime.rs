@@ -45,6 +45,22 @@ pub(crate) fn boot_class_path(runtime: &Path) -> String {
     jars.join(":")
 }
 
+/// How the framework's programs run ART, as `runtime/art/run.sh` does: the boot image at its compiled
+/// address, so its pages stay clean and shared, and heap limits that return freed memory sooner.
+pub(crate) fn art_flags(runtime: &Path) -> Vec<String> {
+    let boot = boot_class_path(runtime);
+    vec![
+        format!("-Xbootclasspath:{boot}"),
+        format!("-Xbootclasspath-locations:{boot}"),
+        format!("-Ximage:{}", runtime.join("framework/boot.art").display()),
+        "-Xnorelocate".into(),
+        "-XX:HeapMinFree=256k".into(),
+        "-XX:HeapMaxFree=1m".into(),
+        "-XX:LargeObjectSpace=disabled".into(),
+        "-XX:ForegroundHeapGrowthMultiplier=1.0".into(),
+    ]
+}
+
 pub(crate) fn runtime_environment(
     command: &mut Command,
     runtime: &Path,
