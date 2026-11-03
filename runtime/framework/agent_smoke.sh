@@ -6,10 +6,12 @@
 # by build_system.sh. RUNS=<n> times ui and screenshot calls n times each.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 PACKAGE=com.example.input
 fail() {
     echo "FAIL: $*"
-    for f in "$WORK/out" "$LOG"; do [ -f "$f" ] && tail -"${TAIL:-25}" "$f" | cut -c1-220; done
+    for f in "$WORK/out" "${LOG:-}"; do [ -f "$f" ] && tail -"${TAIL:-25}" "$f" | cut -c1-220; done
     [ -f "$WORK/compositor" ] && tail -8 "$WORK/compositor" | cut -c1-160
     exit 1
 }
@@ -111,7 +113,8 @@ echo "ok: key DEL, scroll and back"
 "$TARGET/uxdroid" app "$PACKAGE" wait --idle >/dev/null || fail "not idle"
 app screenshot "$WORK/shot.png" || fail "screenshot: exit $? $(cat "$WORK/err")"
 grep -q "^wrote $WORK/shot.png (400x700)$" "$WORK/out" || fail "screenshot: $(cat "$WORK/out")"
-echo "shot $WORK/shot.ppm" >"$WORK/fifo"
+# A FIFO with no reader blocks its writer, so a compositor that died fails the script, never hangs it.
+timeout 5 sh -c 'echo "$1" >"$2"' send "shot $WORK/shot.ppm" "$WORK/fifo" || fail "the compositor took no shot"
 for _ in $(seq 100); do grep -q "shot $WORK/shot.ppm" "$WORK/compositor" && break; pause 0.05; done
 python3 - "$WORK/shot.png" "$WORK/shot.ppm" <<'EOF' || fail "the screenshot differs from the compositor's frame"
 import struct, sys, zlib

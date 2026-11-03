@@ -340,3 +340,90 @@ fn the_client_refuses_a_hostile_server() {
     assert!(matches!(error, CallError::Protocol(_)), "{error:?}");
     thread.join().unwrap();
 }
+
+/// Answers every command with a large text and reports each connection's end.
+struct Large(Mutex<std::sync::mpsc::Sender<()>>);
+
+impl Handler for Large {
+    fn handle(&self, _: Command) -> Result<Value, Failure> {
+        Ok(json!({"text": "x".repeat(8 << 20)}))
+    }
+    fn ended(&self, _: &server::Session) {
+        let _ = self.0.lock().unwrap().send(());
+    }
+}
+
+#[test]
+fn a_client_that_stops_reading_loses_its_connection() {
+    let dir = scratch("slow");
+    let Bound::Listening(listener) = server::bind(&dir, "com.example.app").unwrap() else {
+        panic!("the socket is free");
+    };
+    let path = listener.path().to_path_buf();
+    let (ended, connection_ended) = std::sync::mpsc::channel();
+    let info = Info {
+        package: "com.example.app".into(),
+        pid: 4242,
+    };
+    let server = server::serve(listener, info, uid(), Arc::new(Large(Mutex::new(ended)))).unwrap();
+    let mut stream = UnixStream::connect(&path).unwrap();
+    stream
+        .write_all(b"{\"v\":1,\"id\":1,\"cmd\":\"status\"}\n")
+        .unwrap();
+    // The answer is far larger than the socket holds, and nothing reads it.
+    connection_ended
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the server gave up on the connection");
+    drop(stream);
+    server.shutdown();
+}
+
+#[test]
+fn a_socket_is_replaced_only_when_nothing_is_known_to_listen_on_it() {
+    let path = Path::new("/run/user/1000/uxdroid/com.example.app.sock");
+    let table = b"Num       RefCount Protocol Flags    Type St Inode Path\n\
+        0000000000000000: 00000002 00000000 00010000 0001 01 4242 /run/user/1000/uxdroid/com.example.app.sock\n\
+        0000000000000000: 00000002 00000000 00000000 0001 03 4243 /run/user/1000/uxdroid/other.sock\n";
+    assert!(server::listening_in(table, path));
+    assert!(!server::listening_in(
+        table,
+        Path::new("/run/user/1000/uxdroid/other.sock")
+    ));
+    assert!(server::may_replace(Some(false), true));
+    assert!(!server::may_replace(Some(true), true));
+    // Without /proc/net/unix, an existing file may be a socket unit's: it is kept.
+    assert!(!server::may_replace(None, true));
+    assert!(server::may_replace(None, false));
+}
+
+#[test]
+fn passed_descriptors_close_on_exec() {
+    let mut pipe = [0; 2];
+    // SAFETY: a valid array of two descriptors.
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    // Two consecutive numbers, as a service manager passes them, without close-on-exec.
+    let first = 900;
+    for (offset, fd) in pipe.iter().enumerate() {
+        // SAFETY: duplicates an open descriptor onto a free number.
+        assert_eq!(
+            unsafe { libc::dup2(*fd, first + offset as i32) },
+            first + offset as i32
+        );
+    }
+    server::close_on_exec(first, 2);
+    for fd in [first, first + 1] {
+        // SAFETY: reads the flags of an open descriptor.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_eq!(
+            flags & libc::FD_CLOEXEC,
+            libc::FD_CLOEXEC,
+            "descriptor {fd}"
+        );
+    }
+    // SAFETY: closes the descriptors this test opened, once.
+    unsafe {
+        for fd in [pipe[0], pipe[1], first, first + 1] {
+            libc::close(fd);
+        }
+    }
+}

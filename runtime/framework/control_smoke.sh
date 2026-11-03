@@ -5,6 +5,8 @@
 # build_system.sh.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $*"; for f in "$WORK/out" "$LOG"; do [ -f "$f" ] && tail -"${TAIL:-25}" "$f" | cut -c1-220; done; exit 1; }
 
 cargo build -q --release -p uxdroid-system -p uxdroid-cli --manifest-path /work/Cargo.toml || fail "build"

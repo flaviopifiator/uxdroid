@@ -7,6 +7,8 @@
 # KEEP=<directory>, the log and both screenshots are copied there.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $*"; tail -"${TAIL:-25}" "$WORK/out" | cut -c1-220; exit 1; }
 
 cargo build -q --release -p uxdroid-system -p uxdroid-nativebridge --manifest-path /work/Cargo.toml || fail "build"

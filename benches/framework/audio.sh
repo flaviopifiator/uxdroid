@@ -11,6 +11,8 @@
 # built by build_system.sh at the path it runs from, or ART runs without its boot image.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 RUNS="${RUNS:-30}"
 SOURCE="${SOURCE:-/work}"
 MEASURE=(python3 -I /work/benches/framework/measure.py)
@@ -69,22 +71,26 @@ pulseaudio -n --daemonize=no --exit-idle-time=-1 --use-pid-file=no \
     >"$WORK/pulse.log" 2>&1 &
 server=$!
 for _ in $(seq 100); do [ -S "$WORK/pulse/native" ] && break; pause 0.05; done
+[ -S "$WORK/pulse/native" ] || fail "PulseAudio did not start: $(tail -n 3 "$WORK/pulse.log")"
 pacat --latency-msec=10 --rate=48000 --channels=2 /dev/zero &
 keep_sink=$!
 parec -d microphone --latency-msec=10 --raw >/dev/null &
 keep_source=$!
 for run in 1 2 3; do
     UXDROID_TEST_PULSE="$PULSE_SERVER" cargo test -q --release -p uxdroid-audio --test pulse \
-        --manifest-path "$SOURCE/Cargo.toml" -- --nocapture --test-threads=1 2>&1 | grep -E "Hz:|FAIL|panicked"
+        --manifest-path "$SOURCE/Cargo.toml" -- --nocapture --test-threads=1 >"$WORK/pulse-test" 2>&1 \
+        || fail "the PulseAudio stream tests failed: $(grep -E "FAIL|panicked" "$WORK/pulse-test" | head -n 3)"
+    grep -E "Hz:" "$WORK/pulse-test" || fail "the PulseAudio stream tests measured nothing"
 done
 LIBS="$ANDROID_DATA/data/com.example.audio/lib"
 for run in 1 2 3; do
     UXDROID_AUDIO=pulse "${VM[@]}" -XX:NativeBridge=libuxdroid_nativebridge.so -Xforce-nb-testing -cp "$CP" \
         dev.uxdroid.system.Launcher "$RUNTIME" "$LIBRARY" "$RUNTIME/samples/framework/audio.apk" >"$WORK/app" 2>&1 &
     app=$!
-    for _ in $(seq 400); do grep -q "^audio sample done" "$WORK/app" && break; pause 0.05; done
+    for _ in $(seq 400); do grep -q "^audio sample done" "$WORK/app" && break; kill -0 "$app" 2>/dev/null || break; pause 0.05; done
     kill "$app" 2>/dev/null
     wait "$app" 2>/dev/null
-    grep -E "^aaudio: " "$WORK/app" | sed 's/; read.*//'
+    grep -q "^audio sample done" "$WORK/app" || fail "the audio sample did not finish: $(tail -n 3 "$WORK/app")"
+    grep -E "^aaudio: " "$WORK/app" | sed 's/; read.*//' | grep . || fail "the audio sample reported no AAudio stream"
 done
 echo "storage: $WORK on $(findmnt -n -o FSTYPE -T "$WORK"), $RUNTIME on $(findmnt -n -o FSTYPE -T "$RUNTIME")"

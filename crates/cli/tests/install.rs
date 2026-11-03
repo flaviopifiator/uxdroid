@@ -581,6 +581,28 @@ fn without_a_framework_the_app_is_not_prepared_and_an_old_preparation_goes() {
 }
 
 #[test]
+fn a_framework_that_cannot_be_looked_for_is_named_as_such() {
+    let dir = scratch("no-home");
+    let data = dir.join("data");
+    let apk = dir.join("app.apk");
+    Apk::new().manifest(&sample_manifest()).write(&apk);
+    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+        .args(["install", apk.to_str().unwrap(), "--data"])
+        .arg(&data)
+        .env("UXDROID_RUNTIME", "")
+        .env("XDG_DATA_HOME", "")
+        .env_remove("HOME")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stderr),
+        "note: cannot look for the framework (HOME is not set), so com.example.app is not prepared: \
+         its manifest is parsed, its default bodies made and its code run uncompiled at each start\n"
+    );
+}
+
+#[test]
 fn a_relative_data_directory_is_refused() {
     let dir = scratch("relative");
     let apk = dir.join("app.apk");

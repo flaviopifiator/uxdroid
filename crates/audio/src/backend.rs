@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::{Config, Error};
@@ -23,7 +24,10 @@ pub(crate) trait Sink: Send {
 /// Records interleaved `f32` frames; `read` returns once a period was captured.
 pub(crate) trait Capture: Send {
     fn read(&mut self, samples: &mut [f32]) -> Result<(), String>;
-    fn resume(&mut self) {}
+    /// Called when the stream records again; an error fails the device.
+    fn resume(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// A host audio backend, chosen with `UXDROID_AUDIO`.
@@ -106,24 +110,36 @@ impl Backend {
 /// not probe again.
 fn auto<T>(open: impl Fn(&Backend) -> Result<T, Error>) -> Result<T, Error> {
     static CHOSEN: OnceLock<Backend> = OnceLock::new();
-    if let Some(backend) = CHOSEN.get() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    choose(&CHOSEN, &WARNED, open)
+}
+
+/// Silence is never remembered: a sound server that starts after the app, as a session's often
+/// does, serves the next stream.
+fn choose<T>(
+    chosen: &OnceLock<Backend>,
+    warned: &AtomicBool,
+    open: impl Fn(&Backend) -> Result<T, Error>,
+) -> Result<T, Error> {
+    if let Some(backend) = chosen.get() {
         return open(backend);
     }
     let mut reasons = Vec::new();
     for backend in [Backend::Pulse(None), Backend::Alsa("default".into())] {
         match open(&backend) {
             Ok(opened) => {
-                let _ = CHOSEN.set(backend);
+                let _ = chosen.set(backend);
                 return Ok(opened);
             }
             Err(error) => reasons.push(error.to_string()),
         }
     }
-    eprintln!(
-        "uxdroid: no sound server or device, audio plays into silence: {}",
-        reasons.join("; ")
-    );
-    let _ = CHOSEN.set(Backend::Null);
+    if !warned.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "uxdroid: no sound server or device, audio plays into silence: {}",
+            reasons.join("; ")
+        );
+    }
     open(&Backend::Null)
 }
 
@@ -228,7 +244,32 @@ impl Capture for Clocked<Silence> {
         self.pace(samples.len());
         Ok(())
     }
-    fn resume(&mut self) {
+    fn resume(&mut self) -> Result<(), String> {
         self.restart();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn auto_falls_back_to_silence_without_remembering_it() {
+        let chosen = OnceLock::new();
+        let warned = AtomicBool::new(false);
+        let server_up = Cell::new(false);
+        let open = |backend: &Backend| match backend {
+            Backend::Pulse(_) if server_up.get() => Ok(backend.clone()),
+            Backend::Null => Ok(Backend::Null),
+            _ => Err(Error::Unavailable("down".into())),
+        };
+        assert_eq!(choose(&chosen, &warned, open), Ok(Backend::Null));
+        server_up.set(true);
+        assert_eq!(choose(&chosen, &warned, open), Ok(Backend::Pulse(None)));
+        server_up.set(false);
+        // A backend that opened once is kept, and its own failure is reported.
+        assert!(choose(&chosen, &warned, open).is_err());
     }
 }

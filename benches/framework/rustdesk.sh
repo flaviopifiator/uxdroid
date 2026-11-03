@@ -10,6 +10,8 @@
 # RUNS sets the measured runs per row (default 30); RUSTDESK_APK names another APK.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 RUNS="${RUNS:-30}"
 APK="${RUSTDESK_APK:-/samples/rustdesk-1.5.1-universal-signed.apk}"
 PACKAGE=com.carriez.flutter_hbb

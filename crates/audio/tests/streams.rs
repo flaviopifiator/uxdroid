@@ -408,3 +408,80 @@ fn a_stream_dropped_inside_its_own_callback_ends_without_waiting_for_itself() {
     *holder.lock().unwrap() = Some(output);
     finished.recv_timeout(Duration::from_secs(2)).unwrap();
 }
+
+#[test]
+fn a_callback_that_panics_disconnects_its_output_stream() {
+    let output = Output::with_callback(&Backend::Null, config(8_000, 1), |_| {
+        panic!("app callback failed")
+    })
+    .unwrap();
+    assert!(output.start());
+    assert_eq!(
+        output.wait_while(State::Playing, Duration::from_secs(2)),
+        State::Disconnected
+    );
+    assert!(!output.start(), "a failed device does not play again");
+}
+
+#[test]
+fn a_callback_that_panics_disconnects_its_input_stream() {
+    let input = Input::with_callback(&Backend::Null, config(8_000, 1), |_| {
+        panic!("app callback failed")
+    })
+    .unwrap();
+    assert!(input.start());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while input.state() == State::Playing && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(input.state(), State::Disconnected);
+}
+
+#[test]
+fn a_blocking_read_on_a_callback_input_returns_nothing_at_once() {
+    let input = Arc::new(
+        Input::with_callback(&Backend::Null, config(8_000, 1), |_| Flow::Continue).unwrap(),
+    );
+    input.start();
+    let reader = input.clone();
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = [0.0; 80];
+        let _ = done.send(reader.read(&mut out, true));
+    });
+    assert_eq!(finished.recv_timeout(Duration::from_secs(2)), Ok(0));
+}
+
+#[test]
+fn a_timeout_too_long_for_the_clock_waits_without_overflowing() {
+    let dir = Scratch::new("forever");
+    let output = Output::open(&Backend::File(dir.0.clone()), config(8_000, 1)).unwrap();
+    assert_eq!(output.write_within(&[0.5; 80], Some(Duration::MAX)), 80);
+    assert_eq!(
+        output.wait_while(State::Playing, Duration::MAX),
+        State::Stopped
+    );
+    let input = Input::open(&Backend::Null, config(8_000, 1)).unwrap();
+    let mut out = [0.0; 80];
+    assert_eq!(input.read_within(&mut out, Some(Duration::MAX)), 0);
+}
+
+#[test]
+fn dropping_a_stream_waits_for_its_callback_to_return() {
+    let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = returned.clone();
+    let (entered, inside) = std::sync::mpsc::channel();
+    let output = Output::with_callback(&Backend::Null, config(8_000, 1), move |out| {
+        out.fill(0.0);
+        let _ = entered.send(());
+        // Longer than a hung device is waited for: the app's data must outlive its callback.
+        std::thread::sleep(Duration::from_millis(1_300));
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Flow::Continue
+    })
+    .unwrap();
+    output.start();
+    inside.recv_timeout(Duration::from_secs(2)).unwrap();
+    drop(output);
+    assert!(returned.load(std::sync::atomic::Ordering::SeqCst));
+}

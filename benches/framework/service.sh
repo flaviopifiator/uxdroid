@@ -13,6 +13,8 @@
 set -u -o pipefail
 RUNS="${RUNS:-20}"
 WORK=$(mktemp -d -p "$([ -w /var/tmp ] && echo /var/tmp || echo /tmp)")
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 TARGET="${CARGO_TARGET_DIR:-/cache/target}/release"
 fail() { echo "FAIL: $*"; tail -5 "$WORK/out" 2>/dev/null; exit 1; }
 

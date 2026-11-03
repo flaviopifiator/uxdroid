@@ -7,6 +7,8 @@
 # service; the APK is ours, built by build_system.sh.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 fail() {
     echo "FAIL: $*"
     for f in "$WORK/out" "$WORK/manager.log" "$WORK/app.log" "$WORK/activate.log"; do

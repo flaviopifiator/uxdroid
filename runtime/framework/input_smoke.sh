@@ -6,6 +6,8 @@
 # build_system.sh.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 fail() {
     echo "FAIL: $*"
     tail -"${TAIL:-25}" "$WORK/out" | cut -c1-220
@@ -47,7 +49,10 @@ wait_for() {
     done
     fail "no $2 within ${WAIT:-20} s"
 }
-send() { echo "$*" >"$WORK/fifo"; }
+# A FIFO with no reader blocks its writer, so a compositor that died fails the script, never hangs it.
+send() {
+    timeout 5 sh -c 'echo "$1" >"$2"' send "$*" "$WORK/fifo" || fail "the compositor took no $*"
+}
 
 wait_for "^input: window focus true$" "window focus from the activated toplevel"
 echo "ok: an activated toplevel focuses the window"

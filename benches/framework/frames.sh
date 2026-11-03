@@ -16,6 +16,8 @@ APP="${APP:-sample}"
 EVENTS="${EVENTS:-60}"
 RUNS="${RUNS:-5}"
 WORK=$(mktemp -d -p "$([ -w /var/tmp ] && echo /var/tmp || echo /tmp)")
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 TARGET="${CARGO_TARGET_DIR:-/cache/target}/release"
 fail() { echo "FAIL: $*"; tail -5 "$WORK/out" 2>/dev/null; tail -5 "$WORK/compositor" 2>/dev/null; exit 1; }
 
@@ -48,7 +50,10 @@ wait_for() {
     done
     fail "no $pattern within ${WAIT:-60} s"
 }
-send() { echo "$*" >"$WORK/fifo"; }
+# A FIFO with no reader blocks its writer, so a compositor that died fails the script, never hangs it.
+send() {
+    timeout 5 sh -c 'echo "$1" >"$2"' send "$*" "$WORK/fifo" || fail "the compositor took no $*"
+}
 settle() {
     local last=-1 now
     for _ in $(seq 40); do
@@ -70,6 +75,7 @@ for run in $(seq "$RUNS"); do
         "$WORK/keymap" >"$WORK/compositor" 2>&1 &
     compositor=$!
     for _ in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && break; pause 0.05; done
+    [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] || fail "the compositor did not start"
     "${VM[@]}" -cp "$CP" dev.uxdroid.system.Launcher "$RUNTIME" "$TARGET/libuxdroid_system.so" "$APK" \
         >"$WORK/out" 2>&1 &
     app=$!
@@ -95,6 +101,9 @@ for run in $(seq "$RUNS"); do
         pause 0.1
     done
     settle
+    # A process that ended has no CPU time to read, so the run would count nothing.
+    kill -0 "$app" 2>/dev/null || fail "the app exited during run $run"
+    kill -0 "$compositor" 2>/dev/null || fail "the compositor exited during run $run"
     echo "$(( $(cpu) - start_cpu )) $(( $(frames) - start_frames ))" >>"$WORK/results"
     kill "$app" "$compositor" 2>/dev/null
     wait 2>/dev/null
@@ -108,6 +117,8 @@ def median(values):
     return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
 app, events = sys.argv[1], int(sys.argv[2])
 runs = [tuple(map(int, line.split())) for line in open(sys.argv[3]) if line.strip()]
+if not runs or any(cpu <= 0 or frames <= 0 for cpu, frames in runs):
+    sys.exit(f"a run measured no CPU time or no frames: {runs}")
 per_frame = [cpu / frames / 1e6 for cpu, frames in runs if frames]
 per_key = [cpu / events / 1e6 for cpu, _ in runs]
 frames = [frames for _, frames in runs]
@@ -115,4 +126,5 @@ print(f"{app}: {len(runs)} runs of {events} keys; frames per run {min(frames)}-{
       f"CPU per frame median {median(per_frame):.2f} ms ({min(per_frame):.2f}-{max(per_frame):.2f}); "
       f"CPU per key median {median(per_key):.2f} ms")
 PY
+[ $? = 0 ] || fail "no result"
 echo "storage: app data on $(findmnt -n -o FSTYPE -T "$WORK"), $RUNTIME on $(findmnt -n -o FSTYPE -T "$RUNTIME")"

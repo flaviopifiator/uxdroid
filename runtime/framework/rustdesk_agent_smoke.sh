@@ -12,6 +12,8 @@
 # SHOTS=<writable directory> keeps the screenshots, as PNG.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 APK="${RUSTDESK_APK:-/samples/rustdesk-1.5.1-universal-signed.apk}"
 PACKAGE=com.carriez.flutter_hbb
 fail() {

@@ -8,6 +8,8 @@
 # RUNS sets the measured runs per row (default 30). RustDesk is measured by rustdesk.sh in sandbox.
 set -u -o pipefail
 WORK=$(mktemp -d)
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 RUNS="${RUNS:-30}"
 TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
 BIN="${CARGO_TARGET_DIR:-/cache/target}/release"

@@ -13,6 +13,8 @@ set -u -o pipefail
 APP="${APP:-sample}"
 EVENTS="${EVENTS:-30}"
 WORK=$(mktemp -d -p "$([ -w /var/tmp ] && echo /var/tmp || echo /tmp)")
+# Removed however the script ends, a failure before the full trap below included.
+trap 'rm -rf "$WORK"' EXIT
 TARGET="${CARGO_TARGET_DIR:-/cache/target}/release"
 fail() { echo "FAIL: $*"; tail -5 "$WORK/out" 2>/dev/null; tail -5 "$WORK/compositor" 2>/dev/null; exit 1; }
 
@@ -53,7 +55,10 @@ wait_for() {
     done
     fail "no $pattern within ${WAIT:-60} s"
 }
-send() { echo "$*" >"$WORK/fifo"; }
+# A FIFO with no reader blocks its writer, so a compositor that died fails the script, never hangs it.
+send() {
+    timeout 5 sh -c 'echo "$1" >"$2"' send "$*" "$WORK/fifo" || fail "the compositor took no $*"
+}
 settle() {
     local last=-1 now
     for _ in $(seq 40); do

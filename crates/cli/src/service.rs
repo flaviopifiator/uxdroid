@@ -184,8 +184,25 @@ fn memory_size(value: &str) -> bool {
         return percent.parse::<u8>().is_ok_and(|percent| percent <= 100)
             && percent.bytes().all(|byte| byte.is_ascii_digit());
     }
-    let digits = value.strip_suffix(['K', 'M', 'G', 'T']).unwrap_or(value);
-    !digits.is_empty() && digits.len() <= 19 && digits.bytes().all(|byte| byte.is_ascii_digit())
+    let (digits, scale) = match value.strip_suffix(['K', 'M', 'G', 'T']) {
+        Some(digits) => (digits, value.len() - digits.len()),
+        None => (value, 0),
+    };
+    let shift = match value.as_bytes().last() {
+        _ if scale == 0 => 0,
+        Some(b'K') => 10,
+        Some(b'M') => 20,
+        Some(b'G') => 30,
+        _ => 40,
+    };
+    // systemd counts bytes in 64 bits; a size beyond them would be refused or cut when it loads.
+    !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && digits
+            .parse::<u64>()
+            .ok()
+            .and_then(|count| count.checked_mul(1 << shift))
+            .is_some()
 }
 
 pub fn run_service(args: &[OsString]) -> ExitCode {
@@ -497,6 +514,15 @@ fn write_unit(path: &Path, contents: &str) -> Result<(), String> {
     result.map_err(cannot)
 }
 
+/// `result`, after printing `done` when it failed, so a failure part way still tells what was done.
+fn told(done: &str, result: Result<String, String>) -> Result<String, String> {
+    if result.is_err() {
+        print!("{done}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
+    result
+}
+
 /// Runs `systemctl --user` with `args`, returning the line that reports it.
 fn systemctl(args: &[&str]) -> Result<String, String> {
     let line = format!("systemctl --user {}", args.join(" "));
@@ -557,6 +583,16 @@ fn enable(app: &Instance, options: Options) -> Result<(String, u8), String> {
     );
     let socket_unit = format!("{name}.socket");
     let service_unit = format!("{name}.service");
+    if !settings.on_login {
+        // An earlier enable with --on-login linked the service to start at login; the unit no longer
+        // asks for it, so neither does the link.
+        let link = dir.join("default.target.wants").join(&service_unit);
+        if std::fs::symlink_metadata(&link).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            std::fs::remove_file(&link)
+                .map_err(|error| format!("cannot remove {}: {error}", link.display()))?;
+            report.push_str(&format!("removed {}\n", link.display()));
+        }
+    }
     let mut commands: Vec<Vec<&str>> =
         vec![vec!["daemon-reload"], vec!["enable", "--now", &socket_unit]];
     if settings.on_login {
@@ -564,7 +600,7 @@ fn enable(app: &Instance, options: Options) -> Result<(String, u8), String> {
     }
     if options.now {
         for command in &commands {
-            report.push_str(&systemctl(command)?);
+            report.push_str(&told(&report, systemctl(command))?);
         }
     } else {
         let lines: Vec<String> = commands
@@ -605,6 +641,7 @@ fn disable(app: &Instance, now: bool) -> Result<(String, u8), String> {
             &service_unit,
         ])?);
     }
+    let started = report.clone();
     // What `systemctl --user enable` linked, which would otherwise point at nothing.
     for (wants, unit) in [
         ("sockets.target.wants", &socket_unit),
@@ -625,7 +662,10 @@ fn disable(app: &Instance, now: bool) -> Result<(String, u8), String> {
         }
     }
     if now {
-        report.push_str(&systemctl(&["daemon-reload"])?);
+        report.push_str(&told(
+            &(removed.clone() + &started),
+            systemctl(&["daemon-reload"]),
+        )?);
         Ok((removed + &report, 0))
     } else {
         Ok((

@@ -1,7 +1,7 @@
 //! PNG images of the display for `screenshot`, and the base64 that carries them in a JSON answer.
 //! Only what that needs: 8-bit RGB, no filter, one zlib stream.
 
-use std::io::Write;
+use std::io::{Read, Write};
 
 /// An RGB image, row after row, 3 bytes a pixel.
 #[derive(Debug, PartialEq)]
@@ -13,7 +13,7 @@ pub struct Image {
 
 impl Image {
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 3] {
-        let at = ((y * self.width + x) * 3) as usize;
+        let at = (y as usize * self.width as usize + x as usize) * 3;
         [self.rgb[at], self.rgb[at + 1], self.rgb[at + 2]]
     }
 }
@@ -30,9 +30,23 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc.finalize().to_be_bytes());
 }
 
-/// The image as a PNG file. Compression is fast rather than small: a screenshot is taken while the
-/// agent waits.
-pub fn encode(image: &Image) -> Vec<u8> {
+/// The bytes of an RGB image of this size, if PNG can hold it: both sides 1 to 2^31 - 1.
+fn rgb_length(width: u32, height: u32) -> Option<usize> {
+    let valid = |side: u32| (1..=i32::MAX as u32).contains(&side);
+    if !valid(width) || !valid(height) {
+        return None;
+    }
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(3)
+}
+
+/// The image as a PNG file, or `None` when its pixels do not fill its size. Compression is fast
+/// rather than small: a screenshot is taken while the agent waits.
+pub fn encode(image: &Image) -> Option<Vec<u8>> {
+    if rgb_length(image.width, image.height)? != image.rgb.len() {
+        return None;
+    }
     let row = image.width as usize * 3;
     let mut raw = Vec::with_capacity((row + 1) * image.height as usize);
     for line in image
@@ -56,7 +70,7 @@ pub fn encode(image: &Image) -> Vec<u8> {
     chunk(&mut out, b"IHDR", &header);
     chunk(&mut out, b"IDAT", &compressed);
     chunk(&mut out, b"IEND", &[]);
-    out
+    Some(out)
 }
 
 /// Reads back a PNG this module wrote: 8-bit RGB with no row filters. `None` for anything else.
@@ -78,12 +92,15 @@ pub fn decode(data: &[u8]) -> Option<Image> {
         }
         rest = rest.get(12 + length..)?;
     }
-    let mut raw = Vec::new();
-    let mut zlib = flate2::write::ZlibDecoder::new(&mut raw);
-    zlib.write_all(&compressed).ok()?;
-    zlib.finish().ok()?;
     let row = width as usize * 3;
-    if raw.len() != (row + 1) * height as usize {
+    let expected = rgb_length(width, height)?.checked_add(height as usize)?;
+    // Inflates no more than the size promises, so a small file cannot claim gigabytes.
+    let mut raw = Vec::new();
+    flate2::read::ZlibDecoder::new(&compressed[..])
+        .take(expected as u64 + 1)
+        .read_to_end(&mut raw)
+        .ok()?;
+    if raw.len() != expected {
         return None;
     }
     let mut rgb = Vec::with_capacity(row * height as usize);
@@ -173,11 +190,53 @@ mod tests {
             height: 2,
             rgb: (0..18).collect(),
         };
-        let data = encode(&image);
+        let data = encode(&image).unwrap();
         assert_eq!(&data[..8], &SIGNATURE);
         assert_eq!(&data[12..16], b"IHDR");
         assert_eq!(decode(&data), Some(image));
         assert_eq!(decode(&data[..20]), None);
         assert_eq!(decode(b"not a png"), None);
+    }
+
+    #[test]
+    fn pixels_that_do_not_fill_the_size_are_no_image() {
+        let short = Image {
+            width: 3,
+            height: 2,
+            rgb: vec![0; 17],
+        };
+        assert_eq!(encode(&short), None);
+        let empty = Image {
+            width: 0,
+            height: 2,
+            rgb: Vec::new(),
+        };
+        assert_eq!(encode(&empty), None);
+    }
+
+    #[test]
+    fn a_png_claiming_a_huge_size_is_refused_without_overflowing() {
+        let mut data = SIGNATURE.to_vec();
+        let mut header = Vec::new();
+        header.extend_from_slice(&u32::MAX.to_be_bytes());
+        header.extend_from_slice(&u32::MAX.to_be_bytes());
+        header.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut data, b"IHDR", &header);
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        zlib.write_all(&[0; 64]).unwrap();
+        chunk(&mut data, b"IDAT", &zlib.finish().unwrap());
+        chunk(&mut data, b"IEND", &[]);
+        assert_eq!(decode(&data), None);
+        // A large size that fits is still bounded by what it promises.
+        let mut data = SIGNATURE.to_vec();
+        let mut header = Vec::new();
+        header.extend_from_slice(&1u32.to_be_bytes());
+        header.extend_from_slice(&1u32.to_be_bytes());
+        header.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut data, b"IHDR", &header);
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        zlib.write_all(&vec![0; 1 << 20]).unwrap();
+        chunk(&mut data, b"IDAT", &zlib.finish().unwrap());
+        assert_eq!(decode(&data), None);
     }
 }

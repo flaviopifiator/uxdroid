@@ -12,6 +12,7 @@ Usage: socket_unit.py <unit.socket> <unit.service> <log>
 import os
 import select
 import signal
+import time
 import socket
 import sys
 
@@ -71,6 +72,11 @@ def main():
         if key == "Environment":
             variable, setting = value.split("=", 1)
             environment[variable] = unescape(setting, False)
+    # As the user manager, a unit started too often in a row stops being started: an app that exits
+    # without taking the waiting connection would otherwise be started again at once, forever.
+    limits = dict(service)
+    interval = float(limits.get("StartLimitIntervalSec", "10"))
+    burst = int(limits.get("StartLimitBurst", "5"))
     log = open(log_path, "a", buffering=1, encoding="utf-8")
 
     os.makedirs(os.path.dirname(path), mode=dir_mode, exist_ok=True)
@@ -82,12 +88,18 @@ def main():
     listener.listen(16)
     log.write(f"listening {path}\n")
     running = []
+    starts = []
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     while True:
         if not running:
             # A connection waits in the backlog until the started app accepts it.
             select.select([listener], [], [])
+            now = time.monotonic()
+            starts = [start for start in starts if now - start < interval] + [now]
+            if len(starts) > burst:
+                log.write(f"start limit hit: {burst} starts within {interval:g} s\n")
+                sys.exit(1)
             pid = os.fork()
             if pid == 0:
                 if listener.fileno() == 3:

@@ -49,6 +49,7 @@ fn image() -> Vec<u8> {
         height: 1,
         rgb: vec![255, 0, 0, 0, 0, 255],
     })
+    .expect("the pixels fill the image")
 }
 
 /// What a running app with an agent answers; records what it is sent.

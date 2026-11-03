@@ -585,6 +585,18 @@ pub(crate) fn start(
     runtime: Option<PathBuf>,
 ) -> Result<Done, String> {
     let package = app.package.as_str();
+    // The socket is named by package and profile, so an instance over other data may answer it.
+    if let Some(wanted) = &data
+        && let Some(result) = call(dir, app, &Request::Status, CALL_TIMEOUT)?
+        && let Some(running) = result.get("data").and_then(Value::as_str)
+        && !same_directory(Path::new(running), wanted)
+    {
+        return Err(format!(
+            "{package} is already running over {}, not {}; give this one its own --profile to run both",
+            running.escape_debug(),
+            wanted.display()
+        ));
+    }
     if let Some(result) = call(dir, app, &Request::Start(intent.clone()), CALL_TIMEOUT)? {
         return Ok(Done::Printed(format!(
             "{package} is already running as process {}; the intent went to it: {} {}\n",
@@ -594,16 +606,36 @@ pub(crate) fn start(
         )));
     }
     let (data, apk, runtime) = installed(app, data, runtime)?;
-    let log = dir.join(format!("{}.log", instance_name(package, &app.profile)));
-    let mut child = background(
+    let name = instance_name(package, &app.profile);
+    let log = dir.join(format!("{name}.log"));
+    // The launch writes its own log, which replaces the instance's only once it is the instance: a
+    // start that hands its launch to another running one leaves that one's log alone.
+    let fresh = dir.join(format!(".{name}.log-{}", std::process::id()));
+    let spawned = background(
         launcher(&runtime, &data, &apk, &intent, &app.profile)?,
-        &log,
+        &fresh,
     )?
-    .spawn()
-    .map_err(|error| format!("cannot start the runtime: {error}"))?;
+    .spawn();
+    let child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = std::fs::remove_file(&fresh);
+            return Err(format!("cannot start the runtime: {error}"));
+        }
+    };
+    let mut launched = Launched {
+        child,
+        log: &fresh,
+        running: true,
+    };
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        if let Some(exit) = child.try_wait().map_err(|error| error.to_string())? {
+        if let Some(exit) = launched
+            .child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+        {
+            launched.running = false;
             if exit.success() {
                 // Another start won the lock, and this one handed its intent to it.
                 if let Some(result) = call(dir, app, &Request::Status, CALL_TIMEOUT)? {
@@ -614,6 +646,7 @@ pub(crate) fn start(
                     )));
                 }
             }
+            launched.keep(&log);
             let written = std::fs::read(&log).unwrap_or_default();
             return Err(format!(
                 "{package} exited during start with {exit}: {} (log in {})",
@@ -629,6 +662,8 @@ pub(crate) fn start(
                 .map_or("no activity".into(), |top| {
                     field(top, "component").into_owned()
                 });
+            launched.running = false;
+            launched.keep(&log);
             return Ok(Done::Printed(format!(
                 "started {package} as process {}: {top}, log in {}\n",
                 field(&result, "pid"),
@@ -636,6 +671,7 @@ pub(crate) fn start(
             )));
         }
         if Instant::now() > deadline {
+            launched.keep(&log);
             return Err(format!(
                 "{package} did not serve its control socket within {} s (log in {})",
                 START_TIMEOUT.as_secs(),
@@ -643,6 +679,46 @@ pub(crate) fn start(
             ));
         }
         std::thread::sleep(POLL);
+    }
+}
+
+/// Whether two paths name one directory, as far as can be told.
+fn same_directory(first: &Path, second: &Path) -> bool {
+    let resolved = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolved(first) == resolved(second)
+}
+
+/// A process `start` launched. Unless the start succeeded, dropping it stops the process and
+/// everything in its session, so a failed start leaves nothing running; its log goes with it unless
+/// it was kept.
+struct Launched<'a> {
+    child: std::process::Child,
+    log: &'a Path,
+    /// Still to be stopped on drop.
+    running: bool,
+}
+
+impl Launched<'_> {
+    /// The launch's log becomes the instance's.
+    fn keep(&mut self, log: &Path) {
+        if std::fs::rename(self.log, log).is_ok() {
+            self.log = Path::new("");
+        }
+    }
+}
+
+impl Drop for Launched<'_> {
+    fn drop(&mut self) {
+        if self.running {
+            let pid = self.child.id() as i32;
+            // SAFETY: signals the session the launch leads, which `background` made with setsid.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        if !self.log.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(self.log);
+        }
     }
 }
 

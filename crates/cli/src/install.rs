@@ -6,8 +6,10 @@
 //! start then only maps what is there.
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use uxdroid_apk::{ExecutionPath, extract_native_libs, host_abi, inspect};
 
@@ -18,6 +20,64 @@ use crate::{EXIT_FAILURE, EXIT_USAGE, INSTALL_USAGE, fail, print};
 /// private memory than `speed`, which also took 5 times as long to compile. See benches/framework.
 const COMPILER_FILTER: &str = "verify";
 const INSTALLER_CLASS: &str = "dev.uxdroid.system.Installer";
+/// How long the framework's installer or dex2oat may run while the package lock is held: far beyond
+/// what the largest app measured needs (RustDesk compiles in under a second), so only a hung program
+/// is stopped, and other installs of the package are not kept waiting forever.
+const STEP_LIMIT: Duration = Duration::from_secs(600);
+
+/// Runs `command` as `Command::output` does, but stops it after `limit`.
+fn output_within(command: &mut Command, what: &str, limit: Duration) -> Result<Output, String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot start {what}: {error}"))?;
+    // Both pipes are drained while the program runs, so a full one never stalls it.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(Output {
+                    status,
+                    stdout: stdout.join().unwrap_or_default(),
+                    stderr: stderr.join().unwrap_or_default(),
+                });
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{what} did not finish within {} s and was stopped",
+                    limit.as_secs()
+                ));
+            }
+            Err(error) => return Err(format!("cannot wait for {what}: {error}")),
+        }
+    }
+}
 
 /// App ids become directory names, so only their documented characters are accepted.
 pub(crate) fn valid_package(package: &str) -> bool {
@@ -107,13 +167,23 @@ impl Renames {
     }
 }
 
+/// Where the framework's runtime was looked for.
+enum Framework {
+    Found(PathBuf),
+    /// Nothing there: the app is installed unprepared.
+    Missing(PathBuf),
+    /// Where to look could not be told, such as without `HOME`.
+    Unknown(String),
+}
+
 /// The framework's runtime, if it has one: a missing framework only means nothing is prepared.
-fn framework_runtime() -> Result<PathBuf, String> {
-    let runtime = default_runtime()?;
-    if runtime.join("framework/framework.jar").is_file() {
-        Ok(runtime)
-    } else {
-        Err(runtime.display().to_string())
+fn framework_runtime() -> Framework {
+    match default_runtime() {
+        Ok(runtime) if runtime.join("framework/framework.jar").is_file() => {
+            Framework::Found(runtime)
+        }
+        Ok(runtime) => Framework::Missing(runtime),
+        Err(error) => Framework::Unknown(error),
     }
 }
 
@@ -166,9 +236,7 @@ fn prepare(
         .arg(&base)
         .arg(code.join("base.apk"));
     runtime_environment(&mut installer, runtime, data, &library_path);
-    let output = installer
-        .output()
-        .map_err(|error| format!("cannot start the runtime: {error}"))?;
+    let output = output_within(&mut installer, "the runtime", STEP_LIMIT)?;
     if !output.status.success() {
         return Err(format!(
             "the framework installer failed: {}",
@@ -215,9 +283,7 @@ fn prepare(
             staged.join("oat/x86_64/base.odex").display()
         ));
     runtime_environment(&mut dex2oat, runtime, data, &library_path);
-    let output = dex2oat
-        .output()
-        .map_err(|error| format!("cannot start dex2oat: {error}"))?;
+    let output = output_within(&mut dex2oat, "dex2oat", STEP_LIMIT)?;
     if !output.status.success() {
         return Err(format!("dex2oat failed: {}", failure(&output.stderr, &[])));
     }
@@ -275,7 +341,7 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
         let count =
             extract_native_libs(apk_path, abi, &staging).map_err(|error| error.to_string())?;
         let prepared = match &runtime {
-            Ok(runtime) => Some(
+            Framework::Found(runtime) => Some(
                 prepare(runtime, apk_path, &staged_code, &code, data).map_err(|error| {
                     format!(
                         "cannot prepare {} for the framework: {error}",
@@ -283,7 +349,7 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
                     )
                 })?,
             ),
-            Err(_) => None,
+            Framework::Missing(_) | Framework::Unknown(_) => None,
         };
         std::fs::write(&pending, format!("{abi}\n")).map_err(|error| cannot(&pending, error))?;
 
@@ -329,12 +395,41 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
             ));
             None
         }
-        (None, Err(runtime)) => Some(format!(
+        (None, Framework::Missing(runtime)) => Some(format!(
             "no framework in {}, so {} is not prepared: its manifest is parsed, its default bodies made and its code run uncompiled at each start",
-            runtime.escape_debug(),
+            runtime.display().to_string().escape_debug(),
             package.escape_debug()
         )),
-        (None, Ok(_)) => None,
+        (None, Framework::Unknown(error)) => Some(format!(
+            "cannot look for the framework ({}), so {} is not prepared: its manifest is parsed, its default bodies made and its code run uncompiled at each start",
+            error.escape_debug(),
+            package.escape_debug()
+        )),
+        (None, Framework::Found(_)) => None,
     };
     Ok((report, note))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_step_that_hangs_is_stopped_at_its_limit() {
+        let started = Instant::now();
+        let mut hung = Command::new("sleep");
+        hung.arg("30");
+        let error = output_within(&mut hung, "sleep", Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error, "sleep did not finish within 1 s and was stopped");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // A step that finishes in time gives what `output` gives.
+        let mut quick = Command::new("sh");
+        quick.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let output = output_within(&mut quick, "sh", Duration::from_secs(5)).unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(
+            (&output.stdout[..], &output.stderr[..]),
+            (&b"out\n"[..], &b"err\n"[..])
+        );
+    }
 }

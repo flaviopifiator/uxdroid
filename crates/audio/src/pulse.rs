@@ -194,10 +194,13 @@ impl Sink for Stream {
 impl Capture for Stream {
     /// The server records from the moment the stream connects; what it kept before the app started
     /// recording is stale, so it is dropped.
-    fn resume(&mut self) {
+    fn resume(&mut self) -> Result<(), String> {
         let mut error = 0;
         // SAFETY: a live handle.
-        unsafe { (self.library.flush)(self.handle, &mut error) };
+        if unsafe { (self.library.flush)(self.handle, &mut error) } < 0 {
+            return Err(format!("pulse: {}", self.library.message(error)));
+        }
+        Ok(())
     }
 
     fn read(&mut self, samples: &mut [f32]) -> Result<(), String> {

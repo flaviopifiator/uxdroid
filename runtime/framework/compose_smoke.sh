@@ -50,7 +50,10 @@ wait_for() {
     done
     fail "no $2 within ${WAIT:-20} s"
 }
-send() { echo "$*" >"$WORK/fifo"; }
+# A FIFO with no reader blocks its writer, so a compositor that died fails the script, never hangs it.
+send() {
+    timeout 5 sh -c 'echo "$1" >"$2"' send "$*" "$WORK/fifo" || fail "the compositor took no $*"
+}
 # The compositor's lines after the last one that matched $1 so far.
 mark() { wc -l <"$WORK/compositor"; }
 since() { tail -n +"$(( $1 + 1 ))" "$WORK/compositor"; }

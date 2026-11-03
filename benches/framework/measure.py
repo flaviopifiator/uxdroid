@@ -26,24 +26,36 @@ import time
 
 
 def evict(paths):
-    """Drops cached pages of every regular file under paths. Pages another process maps stay."""
+    """Drops cached pages of every regular file under paths. Pages another process maps stay.
+
+    A path that is missing or holds no file stops the measurement: a cold run that evicted nothing
+    would be a warm run reported as cold."""
     os.sync()
     for top in paths:
         if os.path.isdir(top):
             found = (os.path.join(root, name) for root, _, files in os.walk(top) for name in files)
-        else:
+        elif os.path.isfile(top):
             found = [top]
+        else:
+            sys.exit(f"FAIL --evict {top}: no such file or directory")
+        evicted = 0
         for path in found:
             if os.path.islink(path) or not os.path.isfile(path):
                 continue
             try:
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            except OSError:
+            except FileNotFoundError:
+                # Removed while the tree was walked, as a run's own temporary files are.
                 continue
+            except OSError as error:
+                sys.exit(f"FAIL --evict {path}: {error}")
             try:
                 os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                evicted += 1
             finally:
                 os.close(fd)
+        if evicted == 0 and not os.path.isdir(top):
+            sys.exit(f"FAIL --evict {top}: nothing to evict")
 
 
 def smaps(pid):
