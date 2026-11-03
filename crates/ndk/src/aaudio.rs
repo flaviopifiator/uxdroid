@@ -7,8 +7,8 @@
 //! An input stream needs the manifest's `RECORD_AUDIO`, as on Android.
 
 use std::ffi::{CStr, c_char, c_void};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use uxdroid_audio::{Backend, Config, Flow, Format, Input, Output, State};
@@ -140,9 +140,56 @@ struct Stream {
     io: OnceLock<Io>,
     status: Arc<Status>,
     frames_read: AtomicI64,
+    /// Whether a thread watches the device for the app's error callback.
+    watched: AtomicBool,
 }
 
 static STREAMS: Live<Stream> = Live::new();
+
+/// How often the watch looks at a device that may fail.
+const WATCH_PERIOD: Duration = Duration::from_millis(20);
+
+/// Looks at a stream's state until its device fails, which is true, or until the stream is closed
+/// or gone (`None`), which is false.
+fn await_disconnect(mut state: impl FnMut() -> Option<i32>) -> bool {
+    loop {
+        match state() {
+            Some(STATE_DISCONNECTED) => return true,
+            None | Some(STATE_CLOSED) => return false,
+            Some(_) => std::thread::sleep(WATCH_PERIOD),
+        }
+    }
+}
+
+/// Calls the app's error callback once, from its own thread as AAudio does, when the device fails,
+/// so the app can close the stream and open another, as oboe does.
+fn watch(stream: &Arc<Stream>, pointer: *mut c_void) {
+    let Some((callback, user)) = stream.settings.error else {
+        return;
+    };
+    if stream.watched.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let weak: Weak<Stream> = Arc::downgrade(stream);
+    let pointer = pointer as usize;
+    let spawned = std::thread::Builder::new()
+        .name("aaudio-error".into())
+        .spawn(move || {
+            if await_disconnect(|| weak.upgrade().map(|stream| stream.state())) {
+                // SAFETY: the app's callback, with its stream and data, as AAudio calls it.
+                unsafe {
+                    callback(
+                        pointer as *mut c_void,
+                        user as *mut c_void,
+                        ERROR_DISCONNECTED,
+                    )
+                };
+            }
+        });
+    if let Err(error) = spawned {
+        eprintln!("uxdroid: AAudio: no thread to report a failed device: {error}");
+    }
+}
 
 fn stream(pointer: *mut c_void) -> Option<Arc<Stream>> {
     STREAMS.get(pointer)
@@ -445,6 +492,7 @@ pub(crate) unsafe extern "C" fn open_stream(builder: *mut c_void, out: *mut *mut
         io: OnceLock::new(),
         status: status.clone(),
         frames_read: AtomicI64::new(0),
+        watched: AtomicBool::new(false),
     });
     let pointer = STREAMS.add(stream.clone());
     let frames = match settings.frames_per_callback {
@@ -538,6 +586,7 @@ pub(crate) unsafe extern "C" fn request_start(pointer: *mut c_void) -> i32 {
         return ERROR_DISCONNECTED;
     }
     stream.status.set(STATE_STARTED);
+    watch(&stream, pointer);
     OK
 }
 
@@ -659,6 +708,9 @@ pub(crate) unsafe extern "C" fn write(
     let mut samples = vec![0.0; frames as usize * usize::from(stream.config.channels)];
     stream.format.decode(raw, &mut samples);
     let written = output.write_within(&samples, timeout(timeout_ns));
+    if written == 0 && frames > 0 && output.state() == State::Disconnected {
+        return ERROR_DISCONNECTED;
+    }
     (written / usize::from(stream.config.channels)) as i32
 }
 
@@ -683,6 +735,9 @@ pub(crate) unsafe extern "C" fn read(
     let channels = usize::from(stream.config.channels);
     let mut samples = vec![0.0; frames as usize * channels];
     let read = input.read_within(&mut samples, timeout(timeout_ns));
+    if read == 0 && frames > 0 && input.state() == State::Disconnected {
+        return ERROR_DISCONNECTED;
+    }
     // SAFETY: the API gives room for `frames` frames of the stream's format.
     let raw = unsafe {
         std::slice::from_raw_parts_mut(buffer.cast::<u8>(), frames as usize * stream.frame_bytes())
@@ -1100,6 +1155,16 @@ mod tests {
         } else {
             0
         }
+    }
+
+    #[test]
+    fn the_watch_reports_a_disconnect_and_ends_when_the_stream_closes_or_goes() {
+        let mut states = [STATE_STARTED, STATE_PAUSED, STATE_DISCONNECTED].into_iter();
+        assert!(await_disconnect(|| states.next()));
+        let mut states = [STATE_STARTED, STATE_CLOSED, STATE_DISCONNECTED].into_iter();
+        assert!(!await_disconnect(|| states.next()));
+        let mut states = [STATE_STARTED].into_iter();
+        assert!(!await_disconnect(|| states.next()));
     }
 
     #[test]
