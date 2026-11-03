@@ -351,7 +351,8 @@ version = "0.1.0"
 dependencies = [
  "jni-sys",
  "libc",
- "uxdroid-platform",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]
