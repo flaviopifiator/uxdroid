@@ -26,11 +26,14 @@ final class Control implements MessageQueue.OnFileDescriptorEventListener {
     /** Serves the package's control socket; returns the descriptor that signals queued commands. */
     private static native int serve(String packageName);
 
-    /** The next queued command as {sequence, name, intent JSON or null}, or null when none is left. */
+    /**
+     * The next queued command as {sequence, name, arguments JSON or null}, or null when none is left:
+     * a start's or intent's intent, or another command's fields.
+     */
     private static native String[] take();
 
     /** Answers a command: its result as JSON, or the code and message of a refusal when result is null. */
-    private static native void answer(long sequence, String result, String code, String message);
+    static native void answer(long sequence, String result, String code, String message);
 
     /** Stops serving and removes the socket. */
     private static native void close();
@@ -78,7 +81,7 @@ final class Control implements MessageQueue.OnFileDescriptorEventListener {
         return EVENT_INPUT;
     }
 
-    private static void run(long sequence, String name, String intentJson) {
+    private static void run(long sequence, String name, String arguments) {
         ActivityStack stack = ActivityStack.current;
         try {
             if (stack == null) throw new ActivityStack.Refusal("busy", "the app is still starting");
@@ -89,7 +92,7 @@ final class Control implements MessageQueue.OnFileDescriptorEventListener {
                     break;
                 case "start":
                 case "intent":
-                    JSONObject json = new JSONObject(intentJson);
+                    JSONObject json = new JSONObject(arguments);
                     if (name.equals("intent") && !json.has("activity") && !json.has("action") && !json.has("data")) {
                         throw new ActivityStack.Refusal("bad_request", "an intent names an activity, an action or data");
                     }
@@ -100,6 +103,16 @@ final class Control implements MessageQueue.OnFileDescriptorEventListener {
                     break;
                 case "stop":
                     result = stack.stop();
+                    break;
+                case "ui":
+                    // Answered by the agent, after the nodes settle when it turned accessibility on.
+                    Agent.ui(sequence, new JSONObject(arguments));
+                    return;
+                case "commit":
+                    result = Agent.commit(new JSONObject(arguments).getString("text"));
+                    break;
+                case "release":
+                    result = Agent.release();
                     break;
                 default:
                     throw new ActivityStack.Refusal("unknown_command", "no command " + name);
