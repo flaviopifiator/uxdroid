@@ -185,6 +185,8 @@ fn accept_loop(
             return;
         }
         let Ok((stream, _)) = listener.accept() else {
+            // Out of descriptors, say: the listener stays readable, so waiting keeps this from spinning.
+            std::thread::sleep(Duration::from_millis(100));
             continue;
         };
         let mut list = connections.lock().unwrap_or_else(|p| p.into_inner());

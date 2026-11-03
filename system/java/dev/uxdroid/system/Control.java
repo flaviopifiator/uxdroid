@@ -44,8 +44,19 @@ final class Control implements MessageQueue.OnFileDescriptorEventListener {
     // Kept so its descriptor stays open while the Looper watches it.
     private static ParcelFileDescriptor watched;
 
-    /** Serves the control socket. One that cannot be served costs only the control, never the app. */
+    /**
+     * Serves the control socket once the main thread is first idle, after the launch it is scheduling:
+     * served at once, it delayed the sample app's first frame by about 5 ms, though binding takes 0.3 ms.
+     * One that cannot be served costs only the control, never the app.
+     */
     static void start(String packageName) {
+        Looper.myQueue().addIdleHandler(() -> {
+            serveNow(packageName);
+            return false;
+        });
+    }
+
+    private static void serveNow(String packageName) {
         try {
             int event = serve(packageName);
             watched = ParcelFileDescriptor.fromFd(event);
