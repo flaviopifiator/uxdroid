@@ -87,10 +87,12 @@ public final class Boot {
         "android.graphics.text.LineBreaker",
         "android.graphics.text.MeasuredText",
         "android.graphics.text.TextRunShaper",
+        "android.util.PathParser",
     };
 
     private static boolean started;
     private static int defaults = -1;
+    private static String defaultsRoot;
 
     /**
      * @param root the runtime, laid out as Android's system partition
@@ -105,6 +107,9 @@ public final class Boot {
         // Default bodies can be made once per process, so a start that failed later keeps them.
         if (defaults < 0) {
             defaults = Natives.bindDefaults(root + "/framework/natives.txt");
+            defaultsRoot = root;
+        } else if (!defaultsRoot.equals(root)) {
+            throw new IllegalStateException("default bodies came from " + defaultsRoot + ", not " + root);
         }
         System.setProperty("use_base_native_hostruntime", "true");
         System.setProperty("core_native_classes", String.join(",", CORE));

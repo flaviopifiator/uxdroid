@@ -8,6 +8,7 @@
 pub mod defaults;
 mod natives;
 pub mod properties;
+pub mod shared_memory;
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_void};

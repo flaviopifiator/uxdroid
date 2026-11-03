@@ -78,6 +78,8 @@ docker compose --profile art run --rm -T art-builder bash /work/runtime/framewor
 docker compose --profile art run --rm -T art-builder bash /work/runtime/framework/build_system.sh
 # Check it: the framework draws, writes text and reads its resources.
 docker compose run --rm -T dev bash /work/runtime/framework/smoke.sh
+# An SDK-built APK's Activity, launched by AOSP's own ActivityThread. No window yet.
+docker compose run --rm -T dev bash /work/runtime/framework/app_smoke.sh
 
 # Build uxdroid, then run an APK with a Wayland compositor available.
 docker compose run --rm dev cargo build --release -p uxdroid-cli -p uxdroid-nativebridge -p uxdroid-platform

@@ -34,7 +34,37 @@ python3 /work/runtime/framework/default_context.py "$W/context.txt" "$W/generate
 { find /work/system/java -name '*.java'; echo "$W/generated/DefaultContext.java"; } > "$W/system-sources"
 compile system "$RUNTIME/framework/uxdroid-system.jar" "PCL[$FRAMEWORK]" "$ALL" @"$W/system-sources"
 
+# Libraries the framework loads by name only to register natives, which already have default bodies.
+# Each is an empty library, so System.loadLibrary finds it.
+CLANG=/aosp/$(ls -d prebuilts/clang/host/linux-x86/clang-r* | sort -V | tail -1)/bin/clang
+for library in stats_jni framework-connectivity-tiramisu-jni; do
+    "$CLANG" -shared -nostdlib -o "$RUNTIME/lib64/lib$library.so" -x c /dev/null
+done
+
 mkdir -p "$RUNTIME/samples/framework"
 compile smoke "$RUNTIME/samples/framework/smoke.jar" "PCL[$FRAMEWORK:$RUNTIME/framework/uxdroid-system.jar]" \
     "$ALL:$W/system" /work/runtime/framework/samples/FrameworkSmoke.java
-ls -la "$RUNTIME/framework/uxdroid-system.jar" "$RUNTIME/samples/framework/smoke.jar"
+
+# A sample app built as the SDK would: resources and manifest by aapt2 against framework-res.apk, code
+# against the framework jar. It knows nothing about uxdroid.
+APP=/work/runtime/framework/samples/app
+AAPT2=/aosp/prebuilts/sdk/tools/linux/bin/aapt2
+mkdir -p "$W/app/gen" "$W/app/classes"
+"$AAPT2" compile --dir "$APP/res" -o "$W/app/res.zip"
+"$AAPT2" link -I "$RUNTIME/framework/framework-res.apk" --manifest "$APP/AndroidManifest.xml" \
+    --java "$W/app/gen" -o "$W/app/base.apk" "$W/app/res.zip"
+"$JDK/bin/javac" --release 11 -cp "$ALL" -d "$W/app/classes" $(find "$APP" "$W/app/gen" -name '*.java')
+mkdir -p "$W/app/dex"
+"${D8[@]}" --classpath "$FRAMEWORK" --output "$W/app/dex" $(find "$W/app/classes" -name '*.class') 2>&1 \
+    | { grep -v -i warning || true; }
+# resources.arsc and classes.dex stay uncompressed and aligned, as Android requires from targetSdk 30.
+PYTHONDONTWRITEBYTECODE=1 python3 - "$W/app/base.apk" "$W/app/dex/classes.dex" "$RUNTIME/samples/framework/app.apk" <<'EOF'
+import sys, zipfile
+sys.path.insert(0, "/work/runtime/framework")
+import assets
+base, dex, out = sys.argv[1:]
+with zipfile.ZipFile(base) as src:
+    entries = [(n, src.read(n)) for n in src.namelist()]
+assets.write_stored(out, entries + [("classes.dex", open(dex, "rb").read())])
+EOF
+ls -la "$RUNTIME/framework/uxdroid-system.jar" "$RUNTIME/samples/framework/smoke.jar" "$RUNTIME/samples/framework/app.apk"

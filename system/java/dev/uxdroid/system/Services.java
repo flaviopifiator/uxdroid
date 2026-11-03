@@ -31,7 +31,11 @@ public final class Services {
      */
     public static void register(String name, Class<?> type, Object handler) {
         INTERFACES.put(name, type);
-        if (handler != null) HANDLERS.put(name, handler);
+        if (handler != null) {
+            HANDLERS.put(name, handler);
+        } else {
+            HANDLERS.remove(name);
+        }
     }
 
     /** Calls nobody implements yet, with how many times each was made. */
@@ -77,11 +81,19 @@ public final class Services {
         }
     }
 
+    /** The service itself, for callers that hold an interface rather than a binder. */
+    static <T> T local(Class<T> type, Object handler) {
+        return type.cast(binder(type, handler).queryLocalInterface(type.getName()));
+    }
+
     /** A local binder: queryLocalInterface hands back the service itself, so no Parcel is ever made. */
     static IBinder binder(Class<?> type, Object handler) {
-        Object service = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type}, dispatch(type, handler));
+        // The service and its binder answer for each other, so asBinder always gives the same object.
+        IBinder[] self = new IBinder[1];
+        Object service = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type},
+                dispatch(type, handler, self));
         String descriptor = type.getName();
-        return (IBinder) Proxy.newProxyInstance(IBinder.class.getClassLoader(), new Class<?>[] {IBinder.class},
+        self[0] = (IBinder) Proxy.newProxyInstance(IBinder.class.getClassLoader(), new Class<?>[] {IBinder.class},
                 (proxy, method, args) -> {
                     switch (method.getName()) {
                         case "queryLocalInterface": return service;
@@ -93,15 +105,16 @@ public final class Services {
                         default: return defaultValue(method.getReturnType());
                     }
                 });
+        return self[0];
     }
 
-    private static InvocationHandler dispatch(Class<?> type, Object handler) {
+    private static InvocationHandler dispatch(Class<?> type, Object handler, IBinder[] binder) {
         return (proxy, method, args) -> {
             switch (method.getName()) {
                 case "hashCode": if (args == null) return System.identityHashCode(proxy); break;
                 case "equals": if (args != null && args.length == 1) return proxy == args[0]; break;
                 case "toString": if (args == null) return type.getSimpleName() + " in process"; break;
-                case "asBinder": if (args == null) return binder(type, handler); break;
+                case "asBinder": if (args == null) return binder[0]; break;
                 default: break;
             }
             if (handler != null) {

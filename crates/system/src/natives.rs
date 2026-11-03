@@ -445,6 +445,7 @@ pub unsafe fn register_all(env: *mut JNIEnv) -> Result<(), String> {
             c"android/os/ServiceManagerProxy",
             &service_manager_proxy,
         )?;
+        crate::shared_memory::register_natives(env)?;
     }
     Ok(())
 }
