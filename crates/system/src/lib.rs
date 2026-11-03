@@ -109,6 +109,8 @@ unsafe fn register(env: *mut JNIEnv, class: &CStr, methods: &[Method]) -> Result
 unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: jstring) -> jint {
     // SAFETY: ART passes a valid environment and string.
     let Some(path) = (unsafe { java_string(env, path) }) else {
+        // SAFETY: as above.
+        unsafe { throw(env, c"java/lang/NullPointerException", "no list of natives") };
         return 0;
     };
     let list = match std::fs::read_to_string(&path) {
@@ -143,6 +145,7 @@ unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: 
         by_class.entry(&native.class).or_default().push(index);
     }
     let mut bound = 0;
+    let mut skipped = Vec::new();
     for (class, indices) in by_class {
         let names: Vec<CString> = indices
             .iter()
@@ -172,14 +175,25 @@ unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: 
             let found = (jni.v1_1.FindClass)(env, class.as_ptr());
             if found.is_null() {
                 clear_exception(env);
+                skipped.push(class);
                 continue;
             }
             if (jni.v1_1.RegisterNatives)(env, found, table.as_ptr(), table.len() as jint) == 0 {
                 bound += table.len() as jint;
             } else {
                 clear_exception(env);
+                skipped.push(class);
             }
         }
+    }
+    // A class that does not load cannot call its natives either, so this only matters when debugging.
+    if !skipped.is_empty() && natives::min_priority() <= natives::DEBUG {
+        let names: Vec<_> = skipped.iter().map(|c| c.to_string_lossy()).collect();
+        eprintln!(
+            "uxdroid: no default bodies for {} classes: {}",
+            names.len(),
+            names.join(" ")
+        );
     }
     bound
 }

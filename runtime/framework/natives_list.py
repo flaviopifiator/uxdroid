@@ -9,7 +9,9 @@ has are left out: the boot copy is the one apps get, and its natives are ART's o
 import re
 import sys
 
-HEADER = re.compile(r"^\S.*?\b(?:class|interface|enum)\s+([\w.$]+)")
+# Modifiers are optional: a package-private class starts with `class` itself.
+HEADER = re.compile(r"^(?:(?:public|protected|private|abstract|static|final|sealed|non-sealed|strictfp)\s+)*"
+                    r"(?:class|interface|enum|@interface)\s+([\w.$]+)")
 NATIVE = re.compile(r"\snative\s.*?(\w+)\(")
 DESCRIPTOR = re.compile(r"^\s+descriptor:\s+(\S+)")
 

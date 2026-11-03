@@ -18,6 +18,11 @@ public class android.os.Foo$Bar<T> extends java.lang.Object {
   static native java.lang.String[] names(int, T) throws java.io.IOException;
     descriptor: (ILjava/lang/Object;)[Ljava/lang/String;
 }
+Compiled from "ColorSpace.java"
+class android.graphics.ColorSpace$Rgb$Native {
+  static native long nativeCreate(float, float);
+    descriptor: (FF)J
+}
 Compiled from "Integer.java"
 public final class java.lang.Integer {
   public static native int bitCount(int);
@@ -31,6 +36,7 @@ class NativesTest(unittest.TestCase):
         self.assertEqual(natives(JAVAP, {"java.lang.Integer"}), [
             ("android/os/Trace", "nativeIsTagEnabled", "(J)Z"),
             ("android/os/Foo$Bar", "names", "(ILjava/lang/Object;)[Ljava/lang/String;"),
+            ("android/graphics/ColorSpace$Rgb$Native", "nativeCreate", "(FF)J"),
         ])
 
     def test_keeps_boot_classes_out(self):

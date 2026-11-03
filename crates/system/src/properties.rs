@@ -33,16 +33,14 @@ impl Properties {
         }
     }
 
-    /// Like Android, a `ro.` property cannot change once it has a value.
+    /// Like Android's property service, a `ro.` property cannot change once it exists, even empty.
     pub fn set(&self, key: &str, value: &str) -> Result<(), String> {
         if key.is_empty() {
             return Err("empty property name".into());
         }
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         match entries.iter_mut().find(|(k, _)| k == key) {
-            Some((_, old)) if key.starts_with("ro.") && !old.is_empty() => {
-                Err(format!("{key} is read-only"))
-            }
+            Some(_) if key.starts_with("ro.") => Err(format!("{key} is read-only")),
             Some((_, old)) => {
                 *old = value.to_string();
                 Ok(())
@@ -80,20 +78,28 @@ impl Properties {
     }
 }
 
-/// Integers as Android parses them: decimal, or hexadecimal after `0x`, with an optional sign.
+/// Integers as `android::base::ParseInt` reads them: `strtoll` with base 0, so a leading `0x` is
+/// hexadecimal and a leading `0` octal. Leading spaces are skipped and anything after the digits fails.
 pub fn parse_int(value: Option<&str>) -> Option<i64> {
-    let value = value?.trim();
+    let value = value?.trim_start();
     let (negative, digits) = match value.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, value.strip_prefix('+').unwrap_or(value)),
     };
-    let magnitude = match digits
+    let (radix, digits) = if let Some(hex) = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        Some(hex) => i64::from_str_radix(hex, 16).ok()?,
-        None => digits.parse::<i64>().ok()?,
+        (16, hex)
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        (8, &digits[1..])
+    } else {
+        (10, digits)
     };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    let magnitude = i64::from_str_radix(digits, radix).ok()?;
     Some(if negative { -magnitude } else { magnitude })
 }
 
@@ -110,6 +116,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_read_only_property_never_changes_once_it_exists() {
+        let props = Properties::new();
+        props.load("ro.build.version.base_os=\n");
+        assert!(props.set("ro.build.version.base_os", "x").is_err());
+        assert_eq!(props.get("ro.build.version.base_os").as_deref(), Some(""));
+        assert!(props.set("ro.new", "1").is_ok());
+    }
+
+    #[test]
+    fn integers_follow_strtoll_with_base_zero() {
+        assert_eq!(parse_int(Some("010")), Some(8));
+        assert_eq!(parse_int(Some("  12")), Some(12));
+        assert_eq!(parse_int(Some("12 ")), None);
+        assert_eq!(parse_int(Some("09")), None);
+        assert_eq!(parse_int(Some("0")), Some(0));
+    }
+
+    #[test]
     fn loads_build_prop_and_keeps_read_only_values() {
         let props = Properties::new();
         props
@@ -118,8 +142,7 @@ mod tests {
         assert_eq!(props.get("persist.x").as_deref(), Some("1"));
         assert!(props.set("ro.build.version.sdk", "1").is_err());
         assert_eq!(props.get("ro.build.version.sdk").as_deref(), Some("36"));
-        // An empty read-only property can still get its first value.
-        assert!(props.set("ro.empty", "x86_64").is_ok());
+        assert!(props.set("ro.empty", "x86_64").is_err());
         assert!(props.set("persist.x", "2").is_ok());
         assert_eq!(props.get("persist.x").as_deref(), Some("2"));
     }

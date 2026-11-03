@@ -90,6 +90,7 @@ public final class Boot {
     };
 
     private static boolean started;
+    private static int defaults = -1;
 
     /**
      * @param root the runtime, laid out as Android's system partition
@@ -101,7 +102,10 @@ public final class Boot {
             throw new IllegalStateException("the framework is already started");
         }
         System.load(systemLibrary);
-        int defaults = Natives.bindDefaults(root + "/framework/natives.txt");
+        // Default bodies can be made once per process, so a start that failed later keeps them.
+        if (defaults < 0) {
+            defaults = Natives.bindDefaults(root + "/framework/natives.txt");
+        }
         System.setProperty("use_base_native_hostruntime", "true");
         System.setProperty("core_native_classes", String.join(",", CORE));
         System.setProperty("graphics_native_classes", String.join(",", GRAPHICS));

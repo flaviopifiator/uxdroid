@@ -14,7 +14,9 @@ pub static PROPERTIES: Properties = Properties::new();
 const LEVELS: [&str; 8] = ["?", "?", "V", "D", "I", "W", "E", "F"];
 
 /// The lowest priority printed, from `UXDROID_LOG` as a letter or number. INFO by default, like Android.
-fn min_priority() -> jint {
+pub const DEBUG: jint = 3;
+
+pub fn min_priority() -> jint {
     static MIN: OnceLock<jint> = OnceLock::new();
     *MIN.get_or_init(|| match std::env::var("UXDROID_LOG").ok().as_deref() {
         Some(level) => LEVELS
