@@ -12,6 +12,7 @@ macro_rules! f {
     };
 }
 
+mod compose;
 pub mod defaults;
 mod handles;
 mod java;

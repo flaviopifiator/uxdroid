@@ -1,5 +1,5 @@
 //! The window system below `android.view.Surface`: the natives of AOSP's `SurfaceControl`,
-//! `BLASTBufferQueue` and `Surface`, with one Wayland toplevel per layer.
+//! `BLASTBufferQueue` and `Surface`, with one Wayland toplevel per window.
 //!
 //! Android's window manager creates a layer for each window, `ViewRootImpl` makes a buffer queue on
 //! it and draws into the queue's `Surface`. Here a layer is a [`Layer`], the queue only points at
@@ -7,33 +7,64 @@
 //! `Bitmap` the size of the window, and `unlockCanvasAndPost` copies its pixels into the window's
 //! shared-memory buffer and presents it. The pixels come out as `Bitmap.getPixels` documents them,
 //! 0xAARRGGBB, which is Wayland's XRGB8888 with alpha ignored, whatever Skia's own byte order is.
+//!
+//! A layer with a parent, such as a `SurfaceView`'s, opens no window: its frames are kept and
+//! composed into the window of its root layer, at the position its transactions set, below the
+//! window's own pixels when any layer on its way to the root has a negative z, as SurfaceView's
+//! does, and above them otherwise. Transactions apply at once, not when the framework applies them.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Instant;
 
 use jni_sys::{JNIEnv, jboolean, jclass, jint, jintArray, jlong, jobject, jstring, jvalue};
 use uxdroid_platform::window::Window;
 
+use crate::compose::{Placed, compose};
 use crate::handles::Handles;
 use crate::java::{self, Pending};
 use crate::{Method, java_string, register, throw};
 
+/// Bounds a child layer's Bitmap, which no compositor sizes.
+const MAX_CHILD_DIMENSION: i32 = 16384;
+
 /// When this library loaded, for the first-frame report.
 pub static LOADED: OnceLock<Instant> = OnceLock::new();
 
-/// What a window shows: a name, a size, and once it first draws, its window.
+/// What a window shows: a name, a size, its place among other layers, its last frame, and once it
+/// first draws, where it draws.
 pub struct Layer {
     name: String,
     size: Mutex<(i32, i32)>,
+    geometry: Mutex<Geometry>,
+    children: Mutex<Vec<Weak<Layer>>>,
+    /// The last frame posted, read by composition. Only ever locked last, so it cannot deadlock.
+    content: Mutex<Content>,
     target: Mutex<Option<Target>>,
     posted: AtomicBool,
 }
 
-/// The Wayland window of a layer and the Bitmap the framework draws it into.
+#[derive(Default)]
+struct Geometry {
+    parent: Option<Arc<Layer>>,
+    x: i32,
+    y: i32,
+    z: i32,
+    hidden: bool,
+}
+
+#[derive(Default)]
+struct Content {
+    pixels: Vec<u32>,
+    width: i32,
+    height: i32,
+}
+
+/// Where a layer draws: the Wayland window of a root layer, or nothing for a child, and the Bitmap
+/// the framework draws it into.
 struct Target {
-    window: Window,
+    window: Option<Window>,
     bitmap: jobject,
     colors: jintArray,
     width: i32,
@@ -57,9 +88,80 @@ impl Layer {
         Arc::new(Layer {
             name,
             size: Mutex::new((width, height)),
+            geometry: Mutex::new(Geometry::default()),
+            children: Mutex::new(Vec::new()),
+            content: Mutex::new(Content::default()),
             target: Mutex::new(None),
             posted: AtomicBool::new(false),
         })
+    }
+
+    fn geometry(&self) -> MutexGuard<'_, Geometry> {
+        self.geometry.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn parent(&self) -> Option<Arc<Layer>> {
+        self.geometry().parent.clone()
+    }
+
+    /// Moves this layer under `parent`, refusing a parent that is the layer or one of its children.
+    fn set_parent(self: &Arc<Layer>, parent: Option<Arc<Layer>>) {
+        let mut ancestor = parent.clone();
+        while let Some(layer) = ancestor {
+            if Arc::ptr_eq(&layer, self) {
+                return;
+            }
+            ancestor = layer.parent();
+        }
+        if let Some(parent) = &parent {
+            let mut children = parent.children.lock().unwrap_or_else(|p| p.into_inner());
+            children.retain(|child| child.strong_count() > 0);
+            children.push(Arc::downgrade(self));
+        }
+        if let Some(old) = std::mem::replace(&mut self.geometry().parent, parent) {
+            let mut children = old.children.lock().unwrap_or_else(|p| p.into_inner());
+            children.retain(|child| !std::ptr::eq(child.as_ptr(), Arc::as_ptr(self)));
+        }
+    }
+
+    fn root(self: &Arc<Layer>) -> Arc<Layer> {
+        let mut layer = self.clone();
+        while let Some(parent) = layer.parent() {
+            layer = parent;
+        }
+        layer
+    }
+
+    /// Every visible descendant with a frame, its position in the root, and whether it goes below.
+    fn descendants(
+        &self,
+        x: i32,
+        y: i32,
+        below: bool,
+        found: &mut Vec<(Arc<Layer>, i32, i32, bool)>,
+    ) {
+        let children: Vec<Arc<Layer>> = self
+            .children
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for child in children {
+            let (child_x, child_y, child_below) = {
+                let geometry = child.geometry();
+                if geometry.hidden {
+                    continue;
+                }
+                (
+                    x.saturating_add(geometry.x),
+                    y.saturating_add(geometry.y),
+                    below || geometry.z < 0,
+                )
+            };
+            found.push((child.clone(), child_x, child_y, child_below));
+            child.descendants(child_x, child_y, child_below, found);
+        }
     }
 
     fn size(&self) -> (i32, i32) {
@@ -116,19 +218,96 @@ unsafe extern "system" fn control_create(
     width: jint,
     height: jint,
     _format: jint,
-    _flags: jint,
-    _parent: jlong,
+    flags: jint,
+    parent: jlong,
     _metadata: jobject,
 ) -> jlong {
     // SAFETY: ART passes a valid environment and a string or null.
     let name = unsafe { java_string(env, name) }.unwrap_or_default();
-    SURFACE_CONTROLS.add(Layer::new(name, width, height))
+    let layer = Layer::new(name, width, height);
+    layer.geometry().hidden = flags & CREATE_HIDDEN != 0;
+    if parent != 0 {
+        layer.set_parent(SURFACE_CONTROLS.get(parent));
+    }
+    SURFACE_CONTROLS.add(layer)
 }
 
 unsafe extern "system" fn control_copy(_env: *mut JNIEnv, _class: jclass, control: jlong) -> jlong {
     SURFACE_CONTROLS
         .get(control)
         .map_or(0, |layer| SURFACE_CONTROLS.add(layer))
+}
+
+/// The `hidden` flag of `SurfaceControl.Builder`, and of a transaction's `setFlags`.
+const CREATE_HIDDEN: jint = 0x4;
+const SURFACE_HIDDEN: jint = 0x1;
+
+unsafe extern "system" fn control_reparent(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    _transaction: jlong,
+    control: jlong,
+    parent: jlong,
+) {
+    if let Some(layer) = SURFACE_CONTROLS.get(control) {
+        layer.set_parent(SURFACE_CONTROLS.get(parent));
+    }
+}
+
+unsafe extern "system" fn control_position(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    _transaction: jlong,
+    control: jlong,
+    x: f32,
+    y: f32,
+) {
+    if let Some(layer) = SURFACE_CONTROLS.get(control) {
+        let mut geometry = layer.geometry();
+        // `as` saturates, and NaN becomes 0.
+        (geometry.x, geometry.y) = (x.round() as i32, y.round() as i32);
+    }
+}
+
+unsafe extern "system" fn control_layer(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    _transaction: jlong,
+    control: jlong,
+    z: jint,
+) {
+    if let Some(layer) = SURFACE_CONTROLS.get(control) {
+        layer.geometry().z = z;
+    }
+}
+
+/// Only the order counts here: a layer placed below another sits below its own parent's pixels.
+unsafe extern "system" fn control_relative_layer(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    _transaction: jlong,
+    control: jlong,
+    _relative_to: jlong,
+    z: jint,
+) {
+    if let Some(layer) = SURFACE_CONTROLS.get(control) {
+        layer.geometry().z = z;
+    }
+}
+
+unsafe extern "system" fn control_flags(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    _transaction: jlong,
+    control: jlong,
+    flags: jint,
+    mask: jint,
+) {
+    if mask & SURFACE_HIDDEN != 0
+        && let Some(layer) = SURFACE_CONTROLS.get(control)
+    {
+        layer.geometry().hidden = flags & SURFACE_HIDDEN != 0;
+    }
 }
 
 /// What `NativeAllocationRegistry` calls, on any thread, when a SurfaceControl is released.
@@ -309,15 +488,29 @@ unsafe extern "system" fn surface_height(
 }
 
 impl Target {
-    /// Opens the layer's window. The compositor may choose another size, which the Bitmap follows.
+    /// Opens the window of a root layer. The compositor may choose another size, which the Bitmap
+    /// follows. A child layer gets only the Bitmap, of the size its queue set.
     ///
     /// # Safety
     /// `env` must be the calling thread's JNI environment.
     unsafe fn open(env: *mut JNIEnv, layer: &Layer) -> Result<Target, Failure> {
         let (width, height) = layer.size();
-        let window = Window::open(&layer.name, width, height)
-            .map_err(|error| Failure::Message(format!("cannot open a window: {error}")))?;
-        let (width, height) = (window.width(), window.height());
+        let window = if layer.parent().is_some() {
+            if !(1..=MAX_CHILD_DIMENSION).contains(&width)
+                || !(1..=MAX_CHILD_DIMENSION).contains(&height)
+            {
+                return Err(Failure::Message(format!("bad layer size {width}x{height}")));
+            }
+            None
+        } else {
+            Some(
+                Window::open(&layer.name, width, height)
+                    .map_err(|error| Failure::Message(format!("cannot open a window: {error}")))?,
+            )
+        };
+        let (width, height) = window
+            .as_ref()
+            .map_or((width, height), |window| (window.width(), window.height()));
         // SAFETY: as above.
         unsafe {
             let class = java::find_class(env, c"android/graphics/Bitmap")?;
@@ -390,15 +583,72 @@ unsafe fn lock(
     Ok(())
 }
 
+fn placed(content: &Content, x: i32, y: i32) -> Placed<'_> {
+    Placed {
+        pixels: &content.pixels,
+        width: content.width,
+        height: content.height,
+        x,
+        y,
+    }
+}
+
+/// Composes the root layer's window from its own last frame and its children's, and shows it.
+fn present(target: &mut Target, root: &Layer) -> Result<(), Failure> {
+    let Some(window) = target.window.as_mut() else {
+        return Ok(());
+    };
+    let mut found = Vec::new();
+    root.descendants(0, 0, false, &mut found);
+    let contents: Vec<(MutexGuard<'_, Content>, i32, i32, bool)> = found
+        .iter()
+        .map(|(layer, x, y, below)| {
+            (
+                layer.content.lock().unwrap_or_else(|p| p.into_inner()),
+                *x,
+                *y,
+                *below,
+            )
+        })
+        .collect();
+    let below: Vec<Placed<'_>> = contents
+        .iter()
+        .filter(|(_, _, _, below)| *below)
+        .map(|(content, x, y, _)| placed(content, *x, *y))
+        .collect();
+    let above: Vec<Placed<'_>> = contents
+        .iter()
+        .filter(|(_, _, _, below)| !*below)
+        .map(|(content, x, y, _)| placed(content, *x, *y))
+        .collect();
+    {
+        let own = root.content.lock().unwrap_or_else(|p| p.into_inner());
+        let frame = window.frame();
+        let (width, height) = (frame.width, frame.height);
+        compose(
+            frame.pixels,
+            width,
+            height,
+            &placed(&own, 0, 0),
+            &below,
+            &above,
+        );
+    }
+    drop(contents);
+    window
+        .present()
+        .map_err(|error| Failure::Message(format!("cannot present a frame: {error}")))
+}
+
 /// # Safety
 /// `env` must be the calling thread's JNI environment, and `canvas` the Canvas `lock` prepared.
-unsafe fn post(env: *mut JNIEnv, layer: &Layer, canvas: jobject) -> Result<(), Failure> {
-    let mut target = layer.target();
-    let Some(target) = target.as_mut() else {
+unsafe fn post(env: *mut JNIEnv, layer: &Arc<Layer>, canvas: jobject) -> Result<(), Failure> {
+    let mut guard = layer.target();
+    let Some(target) = guard.as_mut() else {
         return Err(Failure::Message(format!("{} was never locked", layer.name)));
     };
     let (width, height) = (target.width, target.height);
-    // SAFETY: as above. The window's frame holds `width * height` pixels, the same as the array.
+    // SAFETY: as above. The content holds `width * height` pixels, the same as the array.
     unsafe {
         let args = [
             jvalue { l: target.colors },
@@ -410,14 +660,15 @@ unsafe fn post(env: *mut JNIEnv, layer: &Layer, canvas: jobject) -> Result<(), F
             jvalue { i: height },
         ];
         java::call_void(env, target.bitmap, c"getPixels", c"([IIIIIII)V", &args)?;
-        let frame = target.window.frame();
-        let count = frame.pixels.len().min((width * height) as usize);
+        let mut content = layer.content.lock().unwrap_or_else(|p| p.into_inner());
+        content.pixels.resize((width * height) as usize, 0);
+        (content.width, content.height) = (width, height);
         ((**env).v1_1.GetIntArrayRegion)(
             env,
             target.colors,
             0,
-            count as jint,
-            frame.pixels.as_mut_ptr().cast::<jint>(),
+            width * height,
+            content.pixels.as_mut_ptr().cast::<jint>(),
         );
         java::call_void(
             env,
@@ -429,10 +680,19 @@ unsafe fn post(env: *mut JNIEnv, layer: &Layer, canvas: jobject) -> Result<(), F
             }],
         )?;
     }
-    target
-        .window
-        .present()
-        .map_err(|error| Failure::Message(format!("cannot present a frame: {error}")))?;
+    if target.window.is_some() {
+        present(target, layer)?;
+    } else {
+        // A child shows through its root's window, which may belong to another thread right now.
+        drop(guard);
+        let root = layer.root();
+        if !Arc::ptr_eq(&root, layer) {
+            let mut root_target = root.target();
+            if let Some(root_target) = root_target.as_mut() {
+                present(root_target, &root)?;
+            }
+        }
+    }
     if !layer.posted.swap(true, Ordering::Relaxed) {
         let since = LOADED.get().map_or(0, |start| start.elapsed().as_millis());
         eprintln!(
@@ -502,7 +762,7 @@ unsafe extern "system" fn surface_unlock_and_post(
 /// # Safety
 /// `env` must be the calling thread's JNI environment.
 pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
-    let control: [Method; 5] = [
+    let control: [Method; 10] = [
         (
             c"nativeCreate",
             c"(Landroid/view/SurfaceSession;Ljava/lang/String;IIIIJLandroid/os/Parcel;)J",
@@ -520,6 +780,15 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
             c"(JII)V",
             f!(control_buffer_size),
         ),
+        (c"nativeReparent", c"(JJJ)V", f!(control_reparent)),
+        (c"nativeSetPosition", c"(JJFF)V", f!(control_position)),
+        (c"nativeSetLayer", c"(JJI)V", f!(control_layer)),
+        (
+            c"nativeSetRelativeLayer",
+            c"(JJJI)V",
+            f!(control_relative_layer),
+        ),
+        (c"nativeSetFlags", c"(JJII)V", f!(control_flags)),
     ];
     let queue: [Method; 5] = [
         (c"nativeCreate", c"(Ljava/lang/String;Z)J", f!(queue_create)),

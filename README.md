@@ -2,7 +2,7 @@
 
 Run Android APKs as native Linux processes, with no emulator, no container and no Android system image.
 
-**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Real apps do not run yet: they need far more of the `android.*` API than the few classes that exist. See [the architecture](docs/architecture.md) for the design and roadmap.
+**Status: milestone 3.** `uxdroid run` opens the launcher Activity of a simple test APK in a Wayland window, joining its DEX and its bionic libraries in one process. Milestone 4, AOSP's own framework below real apps, is in progress: RustDesk's x86_64 build shows its first Flutter screen through `dev.uxdroid.system.Launcher`, with no input yet. See [the architecture](docs/architecture.md) for the design and roadmap.
 
 ## Quick path
 
@@ -84,6 +84,9 @@ docker compose run --rm -T dev bash /work/runtime/framework/app_smoke.sh
 docker compose run --rm -T dev bash /work/runtime/framework/window_smoke.sh
 # An NDK-built library using liblog, libandroid, libjnigraphics, EGL, GLES and OpenSL ES.
 docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
+# RustDesk 1.5.1's x86_64 build (Flutter) to its first frame. Its code is untrusted: sandbox only.
+docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
+UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_smoke.sh
 
 # Build uxdroid, then run an APK with a Wayland compositor available.
 docker compose run --rm dev cargo build --release -p uxdroid-cli -p uxdroid-nativebridge -p uxdroid-platform
@@ -100,6 +103,14 @@ uxdroid run app.apk --runtime /runtime/art
 The first run of an APK compiles its DEX and extracts its native libraries into `$XDG_CACHE_HOME/uxdroid/<package>/<id>`. The id comes from the APK's archive directory and the runtime, so a changed APK installs fresh and an older one does not run a newer one's code. Only a crafted APK that copies another's CRC values could match it. A version in use keeps its files until it exits. The compiled runtime must stay at the path where it was compiled; a copy elsewhere works, but without compiled code. The app's current directory is `$XDG_CACHE_HOME/uxdroid/<package>/data`. APKs with native code only for another CPU are refused, because translation does not exist yet.
 
 Exit codes: `1` it cannot start, `2` wrong usage. Once started, the process is the app and exits with the app's status.
+
+### Install for the framework launcher
+
+`dev.uxdroid.system.Launcher`, which starts an APK on AOSP's framework, reads app files where Android's installer leaves them. `uxdroid install` does the installer's part before the first start: it extracts the APK's native libraries for this CPU into `<data>/data/<package>/lib`, the directory `ApplicationInfo.nativeLibraryDir` names, and records the chosen ABI in `<data>/data/<package>/abi`. `<data>` is the absolute directory the launcher gets as `ANDROID_DATA`. Installing again replaces the libraries, and APKs with native code only for another CPU are refused.
+
+```sh
+uxdroid install app.apk --data /path/to/android-data
+```
 
 ## Tests
 

@@ -59,6 +59,14 @@ public final class Launcher {
         // A window looks the input method service up; with no keyboard yet, every call is counted.
         Services.register("input_method", com.android.internal.view.IInputMethodManager.class, null);
         Services.register("input", android.hardware.input.IInputManager.class, new InputService());
+        // Content observers, such as Settings watchers, register here; with no other process to
+        // notify them, every call is counted.
+        Services.register("content", android.content.IContentService.class, null);
+        // Flutter's platform plugin holds the ClipboardManager, which needs the service to exist.
+        Services.register("clipboard", android.content.IClipboard.class, null);
+        Services.register("mount", android.os.storage.IStorageManager.class, new StorageService(dataRoot()));
+        Services.register("device_identifiers", android.os.IDeviceIdentifiersPolicyService.class,
+                new DeviceIdentifiers());
         // The framework's own switch for devices without GPU rendering: ViewRootImpl then draws in
         // software, through Surface.lockCanvas, which libuxdroid_system.so shows on Wayland.
         android.view.ThreadedRenderer.sRendererEnabled = false;
@@ -105,11 +113,7 @@ public final class Launcher {
             String path = apk.getAbsolutePath();
             application.sourceDir = path;
             application.publicSourceDir = path;
-            String root = System.getenv("ANDROID_DATA");
-            if (root == null || !new File(root).isAbsolute()) {
-                throw new IllegalStateException("ANDROID_DATA must be an absolute directory, not " + root);
-            }
-            File data = new File(root, "data/" + application.packageName);
+            File data = new File(dataRoot(), "data/" + application.packageName);
             File libraries = new File(data, "lib");
             if (!libraries.isDirectory() && !libraries.mkdirs()) {
                 throw new IllegalStateException("cannot create " + libraries);
@@ -125,6 +129,15 @@ public final class Launcher {
         ComponentName component() {
             return new ComponentName(activity.packageName, activity.name);
         }
+    }
+
+    /** Android's /data: where the installer put the app, and where its data goes. */
+    static String dataRoot() {
+        String root = System.getenv("ANDROID_DATA");
+        if (root == null || !new File(root).isAbsolute()) {
+            throw new IllegalStateException("ANDROID_DATA must be an absolute directory, not " + root);
+        }
+        return root;
     }
 
     /** The handler of IActivityManager: attaching the process is what starts the app. */
@@ -223,11 +236,26 @@ public final class Launcher {
     public static final class UserManager {
         public boolean isUserUnlocked(int userId) { return userId == 0; }
         public boolean isUserRunning(int userId) { return userId == 0; }
+        // Credential-protected storage, such as SharedPreferences, opens only once this is true.
+        public boolean isUserUnlockingOrUnlocked(int userId) { return userId == 0; }
     }
 
-    /** What an Activity asks about its task and window. Nothing is handled yet: every call is counted. */
+    /** What an Activity asks about its task and window. Other calls are counted. */
     private static final IActivityClientController CLIENT_CONTROLLER =
-            Services.local(IActivityClientController.class, null);
+            Services.local(IActivityClientController.class, new ActivityClientController());
+
+    /** The handler of IActivityClientController. */
+    public static final class ActivityClientController {
+        /**
+         * Activity.reportFullyDrawn: an app's own signal that its first full frame is on screen. Flutter's
+         * activity sends it once its first frame is rendered, so tests wait for this line.
+         */
+        public void reportActivityFullyDrawn(IBinder token, boolean restoredFromBundle) {
+            Activity activity = ActivityThread.currentActivityThread().getActivity(token);
+            System.err.println("uxdroid: activity fully drawn: "
+                    + (activity == null ? "unknown" : activity.getComponentName().flattenToShortString()));
+        }
+    }
 
     /** The handler of IActivityTaskManager. */
     public static final class ActivityTaskManager {
@@ -271,8 +299,25 @@ public final class Launcher {
             return info;
         }
 
+        /** Installed from a file, as adb would: no installer, initiator or origin. */
+        public android.content.pm.InstallSourceInfo getInstallSourceInfo(String packageName, int userId) {
+            if (!packageName.equals(app.application.packageName)) return null;
+            return new android.content.pm.InstallSourceInfo(null, null, null, null);
+        }
+
         public String[] getPackagesForUid(int uid) {
             return uid == app.application.uid ? new String[] {app.application.packageName} : null;
+        }
+    }
+
+    /**
+     * The handler of IDeviceIdentifiersPolicyService. An app without the privileged phone permission
+     * gets {@code Build.UNKNOWN} as the serial number on Android too.
+     */
+    public static final class DeviceIdentifiers {
+        public String getSerial() { return android.os.Build.UNKNOWN; }
+        public String getSerialForPackage(String callingPackage, String callingFeatureId) {
+            return android.os.Build.UNKNOWN;
         }
     }
 
