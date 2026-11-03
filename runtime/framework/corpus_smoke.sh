@@ -16,9 +16,9 @@ set -u -o pipefail
 TARGET="${CARGO_TARGET_DIR:-/cache/target}/release"
 SAMPLES="${SAMPLES_DIR:-/samples}"
 # package, APK file name pattern, what its first screen is.
-CORPUS="org.isoron.uhabits org.isoron.uhabits_*.apk Loop Habit Tracker's habit list
-net.gsantner.markor net.gsantner.markor_*.apk Markor's file browser
-com.beemdevelopment.aegis com.beemdevelopment.aegis_*.apk Aegis' vault setup
+CORPUS="org.isoron.uhabits org.isoron.uhabits_*.apk Loop Habit Tracker's welcome screen
+net.gsantner.markor net.gsantner.markor_*.apk Markor's introduction
+com.beemdevelopment.aegis com.beemdevelopment.aegis_*.apk Aegis' welcome screen
 com.ichi2.anki com.ichi2.anki_*.apk AnkiDroid's deck list
 io.anuke.mindustry io.anuke.mindustry_*.apk Mindustry's main menu"
 
