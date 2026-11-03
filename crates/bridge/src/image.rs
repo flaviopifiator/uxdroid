@@ -109,7 +109,22 @@ impl Image {
                     )
                 };
                 if mapped == libc::MAP_FAILED {
-                    return Err(os_error("cannot map segment"));
+                    let denied = matches!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::EPERM | libc::EACCES)
+                    );
+                    // A noexec mount refuses executable file mappings; such a segment is read
+                    // into anonymous memory instead, which costs its sharing between processes.
+                    if !(denied && protection & libc::PROT_EXEC != 0) {
+                        return Err(os_error("cannot map segment"));
+                    }
+                    self.copy_segment(
+                        file,
+                        page_start,
+                        mapped_file_end - page_start,
+                        page_floor(load.offset),
+                        protection,
+                    )?;
                 }
             }
 
@@ -143,6 +158,52 @@ impl Image {
                     return Err(os_error("cannot map zeroed segment"));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Maps `len` bytes at `vaddr` as anonymous memory holding the file's bytes from `offset`, the
+    /// part past the end of the file zeroed, then gives it its final protection.
+    fn copy_segment(
+        &self,
+        file: &File,
+        vaddr: u64,
+        len: u64,
+        offset: u64,
+        protection: i32,
+    ) -> Result<(), ElfError> {
+        use std::os::unix::fs::FileExt;
+
+        let address = self.bias.wrapping_add(vaddr as usize);
+        // SAFETY: the target lies inside this image's reservation, as for the file mapping it
+        // replaces, and MAP_FIXED replaces only that reservation.
+        let mapped = unsafe {
+            libc::mmap(
+                address as *mut _,
+                len as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_FIXED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            return Err(os_error("cannot map segment"));
+        }
+        // SAFETY: the anonymous mapping just made is `len` writable bytes that nothing else uses.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(address as *mut u8, len as usize) };
+        let mut filled = 0;
+        while filled < bytes.len() {
+            match file.read_at(&mut bytes[filled..], offset + filled as u64) {
+                Ok(0) => break,
+                Ok(count) => filled += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(os_error("cannot read segment")),
+            }
+        }
+        // SAFETY: the same range, mapped above; only its protection changes.
+        if unsafe { libc::mprotect(address as *mut _, len as usize, protection) } != 0 {
+            return Err(os_error("cannot protect segment"));
         }
         Ok(())
     }

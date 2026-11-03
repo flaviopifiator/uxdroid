@@ -9,6 +9,7 @@ mod image;
 mod shims;
 mod liblog;
 mod loader;
+mod paths;
 pub mod table;
 
 pub use loader::{Error, Library, load};

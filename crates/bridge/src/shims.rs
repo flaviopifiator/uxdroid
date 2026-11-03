@@ -188,7 +188,11 @@ fn table() -> &'static HashMap<&'static str, Target> {
     static TABLE: OnceLock<HashMap<&'static str, Target>> = OnceLock::new();
     TABLE.get_or_init(|| {
         let mut table = HashMap::new();
-        for &(name, address) in TRAPS.iter().chain(STREAM_FUNCTIONS) {
+        for &(name, address) in TRAPS
+            .iter()
+            .chain(STREAM_FUNCTIONS)
+            .chain(crate::paths::PATH_FUNCTIONS)
+        {
             table.insert(name, Target::Function(address));
         }
         table.insert(

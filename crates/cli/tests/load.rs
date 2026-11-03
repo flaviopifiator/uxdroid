@@ -628,3 +628,60 @@ fn truncated_libraries_fail_with_an_error_never_a_crash() {
         );
     }
 }
+
+/// Where an installer put the libraries can forbid executable file mappings, as the sandbox's
+/// `/tmp` does; the libraries must still load. `/dev/shm` is mounted that way in the dev image.
+#[test]
+fn libraries_on_a_noexec_mount_still_load() {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+    let noexec = mounts.lines().any(|line| {
+        let fields: Vec<&str> = line.split(' ').collect();
+        fields.get(1) == Some(&"/dev/shm")
+            && fields
+                .get(3)
+                .is_some_and(|options| options.split(',').any(|option| option == "noexec"))
+    });
+    assert!(
+        noexec,
+        "this test needs /dev/shm mounted noexec, as in the dev image"
+    );
+    let dir = Path::new("/dev/shm").join(format!("uxdroid-noexec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["libbasic.so", "libdep.so"] {
+        std::fs::copy(plain_dir().join(name), dir.join(name)).unwrap();
+    }
+
+    let output = load_and_call(&dir.join("libbasic.so"), "answer");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("call answer: 42\n"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// Android's system partition is the runtime root that `ANDROID_ROOT` names.
+#[test]
+fn system_partition_paths_resolve_under_the_runtime_root() {
+    let dir = build_root().join("system-path");
+    ndk_build(&dir, "libsystempath.so", MIN_SDK, &["system_path.c"], &[]);
+    let root = dir.join("root");
+    std::fs::create_dir_all(root.join("etc")).unwrap();
+    std::fs::write(root.join("etc/uxdroid-probe"), "7").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+        .args(["load", dir.join("libsystempath.so").to_str().unwrap()])
+        .args(["--call", "read_system_probe"])
+        .env("ANDROID_ROOT", &root)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("call read_system_probe: 0\n"),
+        "{}",
+        stdout(&output)
+    );
+}
