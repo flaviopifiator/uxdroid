@@ -241,6 +241,36 @@ unsafe extern "system" fn write_defaults(
     })
 }
 
+/// `static native String defaultsProblem(String library)`: why a library from `writeDefaults` cannot
+/// be loaded as code, or null. On a `noexec` file system glibc cannot map it, and the native bridge
+/// would copy it into private memory before `attachDefaults` refused it.
+unsafe extern "system" fn defaults_problem(
+    env: *mut JNIEnv,
+    _class: jclass,
+    library: jstring,
+) -> jstring {
+    // SAFETY: ART passes a valid environment and a string or null.
+    let library = unsafe { java_string(env, library) }.unwrap_or_default();
+    let problem = std::ffi::CString::new(library.as_str())
+        .map_err(|_| "its path holds a NUL".to_string())
+        .and_then(|path| {
+            // SAFETY: a zeroed statvfs is a valid output buffer, and the path is a C string.
+            let mut info: libc::statvfs = unsafe { std::mem::zeroed() };
+            if unsafe { libc::statvfs(path.as_ptr(), &mut info) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            if info.f_flag & libc::ST_NOEXEC != 0 {
+                return Err("its file system does not allow running code".to_string());
+            }
+            Ok(())
+        });
+    match problem {
+        Ok(()) => std::ptr::null_mut(),
+        // SAFETY: as above.
+        Err(problem) => unsafe { new_string(env, &problem) },
+    }
+}
+
 /// `static native int attachDefaults(String library, String list)`: connects a library from
 /// `writeDefaults`, which `System.load` loaded, to this one, and returns how many bodies it holds.
 unsafe extern "system" fn attach_defaults(
@@ -307,7 +337,12 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
         if ((**vm).v1_2.GetEnv)(vm, &mut env, JNI_VERSION_1_6) != JNI_OK {
             return JNI_ERR;
         }
-        let methods: [Method; 4] = [
+        let methods: [Method; 5] = [
+            (
+                c"defaultsProblem",
+                c"(Ljava/lang/String;)Ljava/lang/String;",
+                defaults_problem as *mut c_void,
+            ),
             (
                 c"bindDefaults",
                 c"(Ljava/lang/String;)I",

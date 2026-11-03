@@ -118,12 +118,18 @@ public final class Boot {
         if (defaults < 0) {
             String list = root + "/framework/natives.txt";
             if (defaultsLibrary != null) {
+                String problem = Natives.defaultsProblem(defaultsLibrary);
                 try {
-                    System.load(defaultsLibrary);
-                    defaults = Natives.attachDefaults(defaultsLibrary, list);
+                    if (problem == null) {
+                        System.load(defaultsLibrary);
+                        defaults = Natives.attachDefaults(defaultsLibrary, list);
+                    }
                 } catch (UnsatisfiedLinkError | IllegalStateException e) {
+                    problem = e.getMessage();
+                }
+                if (problem != null) {
                     System.err.println("uxdroid: default bodies of " + defaultsLibrary + " not used, made now instead: "
-                            + e.getMessage());
+                            + problem);
                 }
             }
             if (defaults < 0) defaults = Natives.bindDefaults(list);

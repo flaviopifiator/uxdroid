@@ -10,6 +10,9 @@ final class Natives {
     /** Writes the library of default bodies for the natives in the list, at install time. Returns how many. */
     static native int writeDefaults(String list, String library);
 
+    /** Why a library from writeDefaults cannot be loaded as code, such as a noexec mount, or null. */
+    static native String defaultsProblem(String library);
+
     /** Connects a library from writeDefaults, already loaded with System.load, to this one. Returns its size. */
     static native int attachDefaults(String library, String list);
 
