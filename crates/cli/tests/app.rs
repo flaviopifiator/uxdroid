@@ -82,6 +82,7 @@ impl Handler for App {
                 Ok(json!({"pid": self.pid, "finished": 2}))
             }
             Request::Hello => unreachable!("answered by the server"),
+            other => Ok(json!({"unexpected": other.name()})),
         }
     }
 }

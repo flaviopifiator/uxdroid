@@ -4,7 +4,10 @@ use std::io::BufReader;
 
 use serde_json::json;
 
-use super::protocol::{self, Command, Failure, Intent, MAX_LINE};
+use super::protocol::{
+    self, Command, Condition, Failure, Intent, MAX_LINE, Place, Screenshot, Scroll, Typing, Ui,
+    Wait,
+};
 
 fn failure(line: &[u8]) -> Failure {
     protocol::parse_request(line).unwrap_err().1
@@ -106,7 +109,7 @@ fn unknown_versions_are_refused_naming_the_supported_one() {
 #[test]
 fn unknown_commands_and_fields_are_refused() {
     assert_eq!(
-        failure(br#"{"v":1,"cmd":"screenshot"}"#).code,
+        failure(br#"{"v":1,"cmd":"teleport"}"#).code,
         protocol::UNKNOWN_COMMAND
     );
     assert_eq!(failure(br#"{"v":1,"cmd":5}"#).code, protocol::BAD_REQUEST);
@@ -238,5 +241,210 @@ fn responses_are_read_back_and_hostile_ones_refused() {
         br#"{"v":1,"ok":false,"error":{"code":1}}"#,
     ] {
         assert!(protocol::parse_response(hostile).is_err(), "{hostile:?}");
+    }
+}
+
+// Agent commands
+
+fn command(line: &str) -> Command {
+    protocol::parse_request(line.as_bytes())
+        .unwrap_or_else(|(_, failure)| panic!("{line}: {failure:?}"))
+        .command
+}
+
+#[test]
+fn agent_commands_take_their_arguments_with_defaults() {
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"ui"}"#),
+        Command::Ui(Ui {
+            max_nodes: protocol::DEFAULT_NODES,
+            max_depth: protocol::DEFAULT_DEPTH,
+        })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"ui","max_nodes":10,"max_depth":3}"#),
+        Command::Ui(Ui {
+            max_nodes: 10,
+            max_depth: 3
+        })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"screenshot","window":1,"max_size":640}"#),
+        Command::Screenshot(Screenshot {
+            window: Some(1),
+            max_size: 640
+        })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"screenshot"}"#),
+        Command::Screenshot(Screenshot {
+            window: None,
+            max_size: protocol::DEFAULT_SHOT_SIZE
+        })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"tap","x":10,"y":20}"#),
+        Command::Tap(Place::Point { x: 10, y: 20 })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"tap","node":4,"snapshot":2}"#),
+        Command::Tap(Place::Node {
+            node: 4,
+            snapshot: Some(2)
+        })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"type","text":"Hi\nthere"}"#),
+        Command::Type(Typing {
+            text: "Hi\nthere".into(),
+            node: None
+        })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"type","text":"x","node":3}"#),
+        Command::Type(Typing {
+            text: "x".into(),
+            node: Some(Place::Node {
+                node: 3,
+                snapshot: None
+            })
+        })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"scroll","x":5,"y":6,"dy":-3}"#),
+        Command::Scroll(Scroll {
+            at: Place::Point { x: 5, y: 6 },
+            dx: 0,
+            dy: -3
+        })
+    );
+    assert_eq!(command(r#"{"v":1,"cmd":"back"}"#), Command::Back);
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"key","key":"ENTER"}"#),
+        Command::Key("ENTER".into())
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"wait","text":"Done","timeout_ms":500}"#),
+        Command::Wait(Wait {
+            condition: Condition::Text("Done".into()),
+            timeout_ms: 500
+        })
+    );
+    assert_eq!(
+        command(r#"{"v":1,"cmd":"wait","idle":true}"#),
+        Command::Wait(Wait {
+            condition: Condition::Idle,
+            timeout_ms: protocol::DEFAULT_WAIT_MS
+        })
+    );
+}
+
+#[test]
+fn agent_commands_survive_their_round_trip() {
+    for sent in [
+        Command::Ui(Ui {
+            max_nodes: 7,
+            max_depth: 2,
+        }),
+        Command::Screenshot(Screenshot {
+            window: Some(0),
+            max_size: 100,
+        }),
+        Command::Tap(Place::Node {
+            node: 9,
+            snapshot: Some(4),
+        }),
+        Command::Type(Typing {
+            text: "a \"quoted\"\tline\n".into(),
+            node: Some(Place::Point { x: 1, y: 2 }),
+        }),
+        Command::Scroll(Scroll {
+            at: Place::Point { x: 0, y: 0 },
+            dx: 2,
+            dy: 0,
+        }),
+        Command::Back,
+        Command::Key("DPAD_DOWN".into()),
+        Command::Wait(Wait {
+            condition: Condition::Idle,
+            timeout_ms: 1,
+        }),
+    ] {
+        let line = protocol::request_line(None, &sent);
+        assert!(!line[..line.len() - 1].contains('\n'), "{line}");
+        assert_eq!(command(line.trim_end()), sent, "{line}");
+    }
+}
+
+#[test]
+fn agent_arguments_are_bounded_and_checked() {
+    for line in [
+        r#"{"v":1,"cmd":"ui","max_nodes":0}"#,
+        r#"{"v":1,"cmd":"ui","max_nodes":5001}"#,
+        r#"{"v":1,"cmd":"ui","max_depth":129}"#,
+        r#"{"v":1,"cmd":"ui","max_depth":"3"}"#,
+        r#"{"v":1,"cmd":"screenshot","max_size":15}"#,
+        r#"{"v":1,"cmd":"screenshot","max_size":4097}"#,
+        r#"{"v":1,"cmd":"screenshot","window":64}"#,
+        r#"{"v":1,"cmd":"tap"}"#,
+        r#"{"v":1,"cmd":"tap","x":1}"#,
+        r#"{"v":1,"cmd":"tap","x":-1,"y":0}"#,
+        r#"{"v":1,"cmd":"tap","x":16384,"y":0}"#,
+        r#"{"v":1,"cmd":"tap","x":1.5,"y":0}"#,
+        r#"{"v":1,"cmd":"tap","node":0}"#,
+        r#"{"v":1,"cmd":"tap","node":1,"x":1,"y":1}"#,
+        r#"{"v":1,"cmd":"tap","snapshot":1,"x":1,"y":1}"#,
+        r#"{"v":1,"cmd":"type"}"#,
+        r#"{"v":1,"cmd":"type","text":""}"#,
+        r#"{"v":1,"cmd":"type","text":"a\u0000b"}"#,
+        r#"{"v":1,"cmd":"type","text":"\u001b[2J"}"#,
+        r#"{"v":1,"cmd":"scroll","x":1,"y":1}"#,
+        r#"{"v":1,"cmd":"scroll","x":1,"y":1,"dy":51}"#,
+        r#"{"v":1,"cmd":"scroll","dy":1}"#,
+        r#"{"v":1,"cmd":"key"}"#,
+        r#"{"v":1,"cmd":"key","key":"enter; rm -rf /"}"#,
+        r#"{"v":1,"cmd":"key","key":""}"#,
+        r#"{"v":1,"cmd":"wait"}"#,
+        r#"{"v":1,"cmd":"wait","text":"a","idle":true}"#,
+        r#"{"v":1,"cmd":"wait","idle":false}"#,
+        r#"{"v":1,"cmd":"wait","text":"a","timeout_ms":0}"#,
+        r#"{"v":1,"cmd":"wait","text":"a","timeout_ms":60001}"#,
+        r#"{"v":1,"cmd":"back","x":1}"#,
+        r#"{"v":1,"cmd":"status","text":"a"}"#,
+        r#"{"v":1,"cmd":"ui","intent":{}}"#,
+    ] {
+        assert_eq!(
+            failure(line.as_bytes()).code,
+            protocol::BAD_REQUEST,
+            "{line}"
+        );
+    }
+    let long = "a".repeat(protocol::MAX_TEXT + 1);
+    let line = format!(r#"{{"v":1,"cmd":"type","text":"{long}"}}"#);
+    assert_eq!(failure(line.as_bytes()).code, protocol::BAD_REQUEST);
+    let fits = "a".repeat(protocol::MAX_TEXT);
+    let line = format!(r#"{{"v":1,"cmd":"type","text":"{fits}"}}"#);
+    assert!(matches!(command(&line), Command::Type(_)));
+}
+
+#[test]
+fn hello_lists_the_agent_commands_and_internal_ones_stay_hidden() {
+    for name in [
+        "ui",
+        "screenshot",
+        "tap",
+        "type",
+        "scroll",
+        "back",
+        "key",
+        "wait",
+    ] {
+        assert!(Command::NAMES.contains(&name), "{name}");
+    }
+    // Commands the app's agent support sends to its own main thread are not part of the protocol.
+    for name in ["commit", "release"] {
+        assert!(!Command::NAMES.contains(&name), "{name}");
+        let line = format!(r#"{{"v":1,"cmd":"{name}"}}"#);
+        assert_eq!(failure(line.as_bytes()).code, protocol::UNKNOWN_COMMAND);
     }
 }
