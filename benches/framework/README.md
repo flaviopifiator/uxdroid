@@ -52,6 +52,17 @@ docker compose run --rm -T dev bash /work/benches/framework/service.sh
 
 "From the APK" starts the launcher on the APK file, as every start did before `uxdroid install` prepared apps: it parses the manifest, makes a stub for every framework native, and runs the app's DEX uncompiled. "Installed" starts it on `<data>/app/<package>/base.apk` after `uxdroid install` with the framework, which compiled the DEX, recorded the manifest and wrote the default bodies' library.
 
+## Compatibility corpus fixes
+
+2026-11-03, base a8addb1 against the branch with the corpus fixes (application uid, services, PendingIntents, the kept stderr, the Java GL bindings registered at startup), each in its own runtime copy mounted at `/runtime/art`, 15 runs per row, from ext4, warm, medians. The machine was otherwise idle.
+
+| Workload | Base | Branch |
+|----------|------|--------|
+| Framework sample to first frame, installed | 137.5 ms, PSS 128.2 MiB, private dirty 19.1 MiB | 138.0 ms, PSS 128.9 MiB, private dirty 19.2 MiB |
+| RustDesk to first Flutter frame, installed | 211.8 ms, private dirty 80.7 MiB | 212.9 ms, private dirty 81.9 MiB |
+
+RustDesk's PSS read 260.4 MiB on the base and 291.8 MiB on the branch in that run, with the same RSS and private dirty memory; a second run of 5, base and branch back to back, read 291.3 and 291.5 MiB, so the first base figure counted pages shared with another process and is not a difference of the branch. Cold times were within each other's ranges. No competitor was measured.
+
 ## Install-time preparation
 
 2026-11-03, 30 runs per row, from ext4, the same method as below, measured in the `art-prep` runtime copy (its boot image, framework and system odex recompiled at that path, so ART runs with its image). Median, interquartile range in brackets. Memory is from the warm rows. The machine was not idle: other builds and tests ran beside these (load average 2 to 6), so cold times are wider than in the table below, and three runs of the same unchanged row, `FrameworkSmoke` warm, read 74.0, 84.6 and 84.2 ms.
