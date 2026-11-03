@@ -1,0 +1,13 @@
+[package]
+name = "uxdroid-system"
+description = "What Android's system provides below its framework: natives, properties and default bodies"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni-sys = "0.4"
+libc = "0.2"

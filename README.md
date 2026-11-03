@@ -75,6 +75,9 @@ docker compose --profile art run --rm -T art-builder bash /work/runtime/art/buil
 # AOSP's Android 16 framework, pinned by checksum: 355 MB of download, 205 MB installed.
 docker compose --profile art run --rm -T art-builder bash /work/runtime/framework/fetch.sh
 docker compose --profile art run --rm -T art-builder bash /work/runtime/framework/build.sh
+docker compose --profile art run --rm -T art-builder bash /work/runtime/framework/build_system.sh
+# Check it: the framework draws, writes text and reads its resources.
+docker compose run --rm -T dev bash /work/runtime/framework/smoke.sh
 
 # Build uxdroid, then run an APK with a Wayland compositor available.
 docker compose run --rm dev cargo build --release -p uxdroid-cli -p uxdroid-nativebridge -p uxdroid-platform

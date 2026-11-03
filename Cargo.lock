@@ -336,6 +336,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "uxdroid-system"
+version = "0.1.0"
+dependencies = [
+ "jni-sys",
+ "libc",
+]
+
+[[package]]
 name = "uxdroid-testkit"
 version = "0.1.0"
 dependencies = [

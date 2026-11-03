@@ -31,6 +31,15 @@ find "$W/classes" -name '*.class' > "$W/list"
 python3 "$TOOLS/assets.py" aligned-jar "$W/framework-dex.jar" "$RUNTIME/framework/framework.jar"
 python3 "$TOOLS/assets.py" framework-res "$ALL" "$RUNTIME/framework/framework-res.apk"
 
+# Every framework native, listed once here so startup binds default bodies without reflection.
+/aosp/out/host/linux-x86/bin/dexlist "$RUNTIME"/javalib/*.jar | awk '!/^#/ {print $3}' | sort -u > "$W/boot-classes"
+(cd "$W/classes" && find . -name '*.class' | sed 's|^\./||; s|\.class$||; s|/|.|g') > "$W/class-names"
+split -l 2000 "$W/class-names" "$W/names."
+for part in "$W"/names.*; do
+    xargs -a "$part" "$JDK/bin/javap" -p -s -cp "$W/classes"
+done > "$W/javap.txt"
+python3 "$TOOLS/natives_list.py" "$W/javap.txt" "$W/boot-classes" "$RUNTIME/framework/natives.txt"
+
 # The native half of the framework, built by AOSP for a glibc host, and the data it reads.
 unzip -q -j "$ALL" native/linux/x86_64/libandroid_runtime.so -d "$RUNTIME/lib64"
 unzip -q -j "$ALL" 'icu/icudt*.dat' -d "$RUNTIME/usr/icu"
