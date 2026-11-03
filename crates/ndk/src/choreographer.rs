@@ -60,6 +60,8 @@ struct State {
     /// Refresh rate callbacks registered since the last vsync, which hear the rate once.
     refresh_due: Vec<(RefreshRateCallback, *mut c_void)>,
     armed: bool,
+    /// When the armed timer wakes for a delayed callback, or 0 when it waits for a vsync.
+    wake: i64,
     frame: i64,
 }
 
@@ -87,31 +89,36 @@ struct Clock {
 
 fn clock() -> Option<&'static Clock> {
     static CLOCK: OnceLock<usize> = OnceLock::new();
-    let address = *CLOCK.get_or_init(|| {
-        let Some(jni) = Jni::current() else {
-            return 0;
-        };
-        let Ok(class) = jni.find_class(c"dev/uxdroid/system/VsyncListener") else {
-            jni.quietly();
-            return 0;
-        };
-        // SAFETY: a live class and a static method taking nothing and returning a long.
-        let address = unsafe { jni.call_static(class, c"clock", c"()J", &[]) };
-        jni.delete_local(class);
-        match address {
-            // SAFETY: a long was returned.
-            Ok(value) => (unsafe { value.j }) as usize,
-            Err(_) => {
-                jni.quietly();
-                0
-            }
-        }
-    });
+    let address = match CLOCK.get() {
+        Some(address) => *address,
+        // Without a VM yet the answer is not known; it is asked again once one exists.
+        None => look_up_clock().map_or(0, |address| *CLOCK.get_or_init(|| address)),
+    };
     // SAFETY: a non-zero address is the system library's static `Clock`, which lives as long as
     // the process; version 1 has these fields.
     (address != 0)
         .then(|| unsafe { &*(address as *const Clock) })
         .filter(|clock| clock.version >= 1)
+}
+
+/// The clock's address, 0 when the framework has none, or `None` without a VM to ask.
+fn look_up_clock() -> Option<usize> {
+    let jni = Jni::current()?;
+    let Ok(class) = jni.find_class(c"dev/uxdroid/system/VsyncListener") else {
+        jni.quietly();
+        return Some(0);
+    };
+    // SAFETY: a live class and a static method taking nothing and returning a long.
+    let address = unsafe { jni.call_static(class, c"clock", c"()J", &[]) };
+    jni.delete_local(class);
+    Some(match address {
+        // SAFETY: a long was returned.
+        Ok(value) => (unsafe { value.j }) as usize,
+        Err(_) => {
+            jni.quietly();
+            0
+        }
+    })
 }
 
 fn monotonic_nanos() -> i64 {
@@ -144,19 +151,27 @@ impl Choreographer {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Arms the timer for the next vsync, at or after the earliest due callback.
+    /// Arms the timer for the next vsync, at or after the earliest due callback. A timer armed for a
+    /// delayed callback is armed again when a callback due sooner is posted.
     fn schedule(&self, state: &mut State) {
-        if state.armed || (state.posted.is_empty() && state.refresh_due.is_empty()) {
+        if state.posted.is_empty() && state.refresh_due.is_empty() {
             return;
         }
         let now = monotonic_nanos();
         let earliest = state.posted.iter().map(|posted| posted.due).min();
+        let wake = earliest
+            .filter(|due| *due > now.saturating_add(FRAME_INTERVAL_NANOS))
+            .map(|due| due - FRAME_INTERVAL_NANOS);
+        if state.armed && (state.wake == 0 || wake.is_some_and(|wake| wake >= state.wake)) {
+            return;
+        }
         let fd = self.timer.as_raw_fd();
-        state.armed = match (earliest, clock()) {
+        state.wake = wake.unwrap_or(0);
+        state.armed = match (wake, clock()) {
             // Delayed: wake when due, then wait for the vsync after it.
-            (Some(due), _) if due > now + FRAME_INTERVAL_NANOS => {
+            (Some(wake), _) => {
                 self.tick.store(0, Ordering::Release);
-                set_timer(fd, due - FRAME_INTERVAL_NANOS)
+                set_timer(fd, wake)
             }
             // SAFETY: the tick lives as long as the process, as the choreographer does.
             (_, Some(clock)) => unsafe { (clock.arm)(fd, &self.tick) == 0 },
@@ -193,6 +208,7 @@ impl Choreographer {
         let (ready, refresh, frame) = {
             let mut state = self.state();
             state.armed = false;
+            state.wake = 0;
             if tick == 0 {
                 // The wake-up of a delayed callback: now wait for its vsync.
                 self.schedule(&mut state);
@@ -614,6 +630,34 @@ mod tests {
                 let seen = mine();
                 assert_eq!(seen.len(), 1);
                 assert!(seen[0].1 >= before + 100_000_000, "ran early: {seen:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn a_callback_posted_after_a_delayed_one_still_runs_on_the_next_vsync() {
+        on_a_looper_thread(|| {
+            // SAFETY: as above.
+            unsafe {
+                let choreographer = get_instance();
+                post_frame_callback_delayed64(
+                    choreographer,
+                    Some(frame64),
+                    std::ptr::null_mut(),
+                    500,
+                );
+                let before = monotonic_nanos();
+                post_frame_callback(choreographer, Some(frame), std::ptr::null_mut());
+                poll_until(1);
+                let seen = mine();
+                assert_eq!(seen.first().map(|(kind, _)| *kind), Some("frame"));
+                assert!(
+                    seen[0].1 - before <= FRAME_INTERVAL_NANOS,
+                    "waited for the delayed one: {seen:?}"
+                );
+                poll_until(2);
+                assert_eq!(mine().len(), 2, "the delayed one still runs");
+                assert!(mine()[1].1 >= before + 450_000_000);
             }
         });
     }

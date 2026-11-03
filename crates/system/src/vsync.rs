@@ -110,8 +110,9 @@ pub fn arm(fd: RawFd, tick: &AtomicI64) -> std::io::Result<()> {
     let when = deadline(now, LAST_VSYNC.load(Ordering::Acquire), waiting);
     tick.store(when, Ordering::Release);
     armed.retain(|entry| entry.fd != fd);
+    set_timer(fd, when)?;
     armed.push(Armed { fd, tick, waiting });
-    set_timer(fd, when)
+    Ok(())
 }
 
 /// Forgets the timer `fd`: it fired, or it is about to close.
@@ -582,6 +583,22 @@ mod tests {
         assert_eq!(on_frame(late, last), late);
         // It came early (a fast or eager compositor): not before 60 Hz allows.
         assert_eq!(on_frame(last + 1000, last), last + FRAME_INTERVAL_NANOS);
+    }
+
+    #[test]
+    fn a_timer_that_cannot_be_armed_leaves_no_entry() {
+        // A pipe is no timer: arming it fails, and no later frame event may set it.
+        let mut fds = [0; 2];
+        // SAFETY: a valid array of two descriptors.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let tick = AtomicI64::new(0);
+        assert!(arm(fds[0], &tick).is_err());
+        assert!(!armed().iter().any(|entry| entry.fd == fds[0]));
+        // SAFETY: the pipe's own descriptors, closed once.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
     }
 
     #[test]

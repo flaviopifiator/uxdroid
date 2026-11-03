@@ -91,7 +91,48 @@ struct State {
     discrete: bool,
     events: Vec<(Target, Event)>,
     /// Surfaces waiting for a frame callback.
-    frames: Vec<u32>,
+    frames: Frames,
+}
+
+/// The frame callbacks windows wait for. Each commit asks for one, so a callback the compositor
+/// never answers, such as one asked before the surface was hidden, is replaced by the next frame's
+/// instead of pinning the surface; the vsync counts each surface once and follows its newest.
+#[derive(Default)]
+struct Frames(Vec<(u32, u32)>);
+
+impl Frames {
+    /// A callback for `surface` was asked: its number, and whether the surface waits anew.
+    fn request(&mut self, surface: u32) -> (u32, bool) {
+        match self.0.iter_mut().find(|(key, _)| *key == surface) {
+            Some((_, number)) => {
+                *number = number.wrapping_add(1);
+                (*number, false)
+            }
+            None => {
+                self.0.push((surface, 0));
+                (0, true)
+            }
+        }
+    }
+
+    /// The compositor answered callback `number` of `surface`: true when the surface stops waiting,
+    /// which only its newest callback does.
+    fn answer(&mut self, surface: u32, number: u32) -> bool {
+        match self.0.iter().position(|entry| *entry == (surface, number)) {
+            Some(at) => {
+                self.0.remove(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The surface is gone: true when it was waiting.
+    fn forget(&mut self, surface: u32) -> bool {
+        let before = self.0.len();
+        self.0.retain(|(key, _)| *key != surface);
+        self.0.len() != before
+    }
 }
 
 impl State {
@@ -580,9 +621,9 @@ impl Window {
             .buffer;
         with_display(|display| {
             let key = self.key();
-            if !display.state.frames.contains(&key) {
-                self.surface.frame(&display.queue.handle(), key);
-                display.state.frames.push(key);
+            let (number, waits) = display.state.frames.request(key);
+            self.surface.frame(&display.queue.handle(), (key, number));
+            if waits {
                 vsync::frame_requested();
             }
             self.surface.attach(Some(buffer), 0, 0);
@@ -604,13 +645,7 @@ impl Drop for Window {
             return;
         };
         let key = self.key();
-        if let Some(at) = display
-            .state
-            .frames
-            .iter()
-            .position(|surface| *surface == key)
-        {
-            display.state.frames.remove(at);
+        if display.state.frames.forget(key) {
             vsync::frame_dropped();
         }
         display.windows = display.windows.saturating_sub(1);
@@ -964,19 +999,18 @@ impl Dispatch<wl_touch::WlTouch, ()> for State {
     }
 }
 
-impl Dispatch<wl_callback::WlCallback, u32> for State {
+impl Dispatch<wl_callback::WlCallback, (u32, u32)> for State {
     fn event(
         state: &mut Self,
         _: &wl_callback::WlCallback,
         event: wl_callback::Event,
-        surface: &u32,
+        &(surface, number): &(u32, u32),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         if let wl_callback::Event::Done { .. } = event
-            && let Some(at) = state.frames.iter().position(|key| key == surface)
+            && state.frames.answer(surface, number)
         {
-            state.frames.remove(at);
             vsync::frame_done();
         }
     }
@@ -993,6 +1027,22 @@ delegate_noop!(State: ignore wl_subsurface::WlSubsurface);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_commit_asks_for_a_frame_and_the_newest_ends_the_wait() {
+        let mut frames = Frames::default();
+        assert_eq!(frames.request(7), (0, true));
+        // A second frame before the first was answered asks again, and the surface counts once.
+        assert_eq!(frames.request(7), (1, false));
+        assert_eq!(frames.request(9), (0, true));
+        // The stale callback, never answered or answered late, does not end the wait.
+        assert!(!frames.answer(7, 0));
+        assert!(frames.answer(7, 1));
+        assert!(!frames.answer(7, 1), "answered once");
+        assert!(frames.forget(9));
+        assert!(!frames.forget(9));
+        assert_eq!(frames.request(7), (0, true));
+    }
 
     #[test]
     fn the_toplevel_outlives_its_window_while_other_windows_show_on_it() {
