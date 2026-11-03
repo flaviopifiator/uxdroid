@@ -5,7 +5,10 @@
 
 pub mod elf;
 mod image;
-mod loader;
+#[macro_use]
 mod shims;
+mod liblog;
+mod loader;
+pub mod table;
 
 pub use loader::{Error, Library, load};

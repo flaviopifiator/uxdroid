@@ -137,11 +137,11 @@ fn host_symbol(name: &CStr) -> Option<usize> {
     (!address.is_null()).then_some(address as usize)
 }
 
-fn write_stderr(message: std::fmt::Arguments<'_>) {
+pub(crate) fn write_stderr(message: std::fmt::Arguments<'_>) {
     let _ = std::io::stderr().write_fmt(message);
 }
 
-fn die(message: std::fmt::Arguments<'_>) -> ! {
+pub(crate) fn die(message: std::fmt::Arguments<'_>) -> ! {
     write_stderr(message);
     // SAFETY: abort takes no arguments and never returns.
     unsafe { libc::abort() }
@@ -229,11 +229,6 @@ functions! {
     "__FD_CLR_chk" => fd_clr_chk,
     "__FD_ISSET_chk" => fd_isset_chk,
     "__FD_SET_chk" => fd_set_chk,
-    "__android_log_assert" => uxdroid_android_log_assert,
-    "__android_log_buf_write" => android_log_buf_write,
-    "__android_log_print" => uxdroid_android_log_print,
-    "__android_log_vprint" => android_log_vprint,
-    "__android_log_write" => android_log_write,
     "__assert" => assert_failed,
     "__assert2" => assert2_failed,
     "__pthread_cleanup_pop" => pthread_cleanup_pop,
@@ -337,17 +332,15 @@ functions! {
     "vsyslog" => vsyslog,
 }
 
-// --- Logging ---
+// --- Formatted output entry points ---
 
 unsafe extern "C" {
-    fn vsnprintf(
+    pub(crate) fn vsnprintf(
         buffer: *mut c_char,
         size: usize,
         format: *const c_char,
         args: *mut c_void,
     ) -> c_int;
-    fn uxdroid_android_log_print();
-    fn uxdroid_android_log_assert();
     fn uxdroid_fprintf();
     fn uxdroid_fscanf();
     fn uxdroid_fwprintf();
@@ -445,13 +438,6 @@ macro_rules! variadic_entry {
     };
 }
 
-variadic_entry!("uxdroid_android_log_print", android_log_vprint, "24", "rcx");
-variadic_entry!(
-    "uxdroid_android_log_assert",
-    android_log_vassert,
-    "24",
-    "rcx"
-);
 variadic_entry!("uxdroid_fprintf", vfprintf, "16", "rdx");
 variadic_entry!("uxdroid_fscanf", vfscanf, "16", "rdx");
 variadic_entry!("uxdroid_fwprintf", vfwprintf, "16", "rdx");
@@ -499,7 +485,7 @@ fn reject_long_double(format: impl Iterator<Item = u32>, function: &str) {
 
 /// # Safety
 /// `format` must be a C string.
-unsafe fn check_format(format: *const c_char, function: &str) {
+pub(crate) unsafe fn check_format(format: *const c_char, function: &str) {
     // SAFETY: the caller promises a C string.
     let bytes = unsafe { CStr::from_ptr(format) }.to_bytes();
     reject_long_double(bytes.iter().map(|&byte| u32::from(byte)), function);
@@ -1106,86 +1092,14 @@ stream_functions! {
     vfwscanf(; format: *const i32, args: *mut c_void) -> c_int;
 }
 
-fn priority_letter(priority: c_int) -> char {
-    match priority {
-        2 => 'V',
-        3 => 'D',
-        4 => 'I',
-        5 => 'W',
-        6 => 'E',
-        7 => 'F',
-        _ => '?',
-    }
-}
-
 /// # Safety
 /// Strings must be null or valid C strings.
-unsafe fn lossy<'a>(text: *const c_char) -> std::borrow::Cow<'a, str> {
+pub(crate) unsafe fn lossy<'a>(text: *const c_char) -> std::borrow::Cow<'a, str> {
     if text.is_null() {
         return "".into();
     }
     // SAFETY: the caller passes a valid C string.
     unsafe { CStr::from_ptr(text) }.to_string_lossy()
-}
-
-unsafe extern "C" fn android_log_write(
-    priority: c_int,
-    tag: *const c_char,
-    message: *const c_char,
-) -> c_int {
-    // SAFETY: the NDK contract makes these C strings.
-    let (tag, message) = unsafe { (lossy(tag), lossy(message)) };
-    write_stderr(format_args!(
-        "{}/{tag}: {message}\n",
-        priority_letter(priority)
-    ));
-    1
-}
-
-unsafe extern "C" fn android_log_buf_write(
-    _buffer: c_int,
-    priority: c_int,
-    tag: *const c_char,
-    message: *const c_char,
-) -> c_int {
-    // SAFETY: the NDK contract makes these C strings.
-    unsafe { android_log_write(priority, tag, message) }
-}
-
-const LOG_LINE_MAX: usize = 4096;
-
-unsafe extern "C" fn android_log_vprint(
-    priority: c_int,
-    tag: *const c_char,
-    format: *const c_char,
-    args: *mut c_void,
-) -> c_int {
-    // SAFETY: the NDK contract makes `format` a C string.
-    unsafe { check_format(format, "__android_log_print") };
-    let mut line = [0 as c_char; LOG_LINE_MAX];
-    // SAFETY: the buffer size is passed along, and `args` is the caller's valid va_list.
-    unsafe {
-        vsnprintf(line.as_mut_ptr(), LOG_LINE_MAX, format, args);
-        android_log_write(priority, tag, line.as_ptr())
-    }
-}
-
-unsafe extern "C" fn android_log_vassert(
-    condition: *const c_char,
-    tag: *const c_char,
-    format: *const c_char,
-    args: *mut c_void,
-) -> ! {
-    const ANDROID_LOG_FATAL: c_int = 7;
-    if format.is_null() {
-        // SAFETY: the NDK contract makes these C strings.
-        unsafe { android_log_write(ANDROID_LOG_FATAL, tag, condition) };
-    } else {
-        // SAFETY: the NDK contract makes these valid, and `args` is the caller's va_list.
-        unsafe { android_log_vprint(ANDROID_LOG_FATAL, tag, format, args) };
-    }
-    // SAFETY: abort takes no arguments and never returns.
-    unsafe { libc::abort() }
 }
 
 unsafe extern "C" fn assert_failed(file: *const c_char, line: c_int, message: *const c_char) -> ! {

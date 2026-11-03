@@ -19,15 +19,11 @@ use crate::elf::{
 };
 use crate::image::Image;
 use crate::shims;
+use crate::table::{self, Table};
 
-/// libraries that uxdroid provides from glibc and the shims instead of loading a file.
-const SYSTEM_LIBRARIES: &[&str] = &[
-    "libc.so",
-    "libdl.so",
-    "liblog.so",
-    "libm.so",
-    "libstdc++.so",
-];
+/// libraries that uxdroid provides from glibc and the shims instead of loading a file. The other
+/// Android system libraries, such as `liblog.so` or `libandroid.so`, are signature tables.
+const SYSTEM_LIBRARIES: &[&str] = &["libc.so", "libdl.so", "libm.so", "libstdc++.so"];
 /// Stops a crafted dependency graph from exhausting memory or the stack.
 const MAX_LIBRARIES_PER_LOAD: usize = 1024;
 const MAX_REPORTED_SYMBOLS: usize = 4096;
@@ -95,6 +91,8 @@ pub struct Library {
     raw_headers: Box<[u64]>,
     dynamic: Dynamic,
     dependencies: OnceLock<Vec<&'static Library>>,
+    /// The signature tables among this library's dependencies, in `DT_NEEDED` order.
+    tables: OnceLock<Vec<&'static Table>>,
 }
 
 impl Library {
@@ -417,8 +415,14 @@ fn map_and_link(
             .needed_names()
             .map_err(|error| library.invalid(error))?;
         let mut dependencies = Vec::new();
+        let mut tables = Vec::new();
         for name in needed {
             if SYSTEM_LIBRARIES.contains(&name.as_str()) {
+                continue;
+            }
+            // Android's own libraries come from the host even when an app ships a file of that name.
+            if let Some(table) = table::find(&name) {
+                tables.push(table);
                 continue;
             }
             let known = registry
@@ -446,10 +450,11 @@ fn map_and_link(
             dependencies.push(dependency);
         }
         let _ = library.dependencies.set(dependencies);
+        let _ = library.tables.set(tables);
     }
 
     let root = pending[0];
-    let scope = breadth_first(root);
+    let scope = Scope::of(root);
     let ordered = dependencies_first(root, pending);
     let mut unresolved = Vec::new();
     for library in &ordered {
@@ -555,7 +560,34 @@ fn map_library(path: &Path) -> Result<&'static Library, Error> {
         raw_headers,
         dynamic,
         dependencies: OnceLock::new(),
+        tables: OnceLock::new(),
     })))
+}
+
+/// Where a library's symbols are searched: loaded libraries first, then the tables they need.
+struct Scope {
+    libraries: Vec<&'static Library>,
+    tables: Vec<&'static Table>,
+}
+
+impl Scope {
+    fn of(root: &'static Library) -> Scope {
+        let libraries = breadth_first(root);
+        let mut tables: Vec<&'static Table> = Vec::new();
+        for library in &libraries {
+            for &needed in library.tables.get().map_or(&[][..], Vec::as_slice) {
+                if !tables.iter().any(|seen| std::ptr::eq(*seen, needed)) {
+                    tables.push(needed);
+                }
+            }
+        }
+        // On Android, app_process links liblog, which makes its symbols global to every library.
+        let liblog = table::liblog();
+        if !tables.iter().any(|seen| std::ptr::eq(*seen, liblog)) {
+            tables.push(liblog);
+        }
+        Scope { libraries, tables }
+    }
 }
 
 fn breadth_first(root: &'static Library) -> Vec<&'static Library> {
@@ -602,14 +634,16 @@ fn dependencies_first(
 }
 
 /// A symbol's address, searching `scope` in order, then the shims and glibc.
-fn resolve(
-    scope: &[&'static Library],
-    name: &[u8],
-    is_data: bool,
-) -> Result<Option<u64>, ElfError> {
-    for library in scope {
+fn resolve(scope: &Scope, name: &[u8], is_data: bool) -> Result<Option<u64>, ElfError> {
+    for library in &scope.libraries {
         if let Some(symbol) = library.find(name) {
             return library.symbol_address(&symbol).map(Some);
+        }
+    }
+    for table in &scope.tables {
+        if let Some(export) = table.find(name) {
+            // A host library may lack an export, which then counts as missing.
+            return Ok(export.bind().map(|address| address as u64));
         }
     }
     let mut owned = Vec::with_capacity(name.len() + 1);
@@ -633,7 +667,7 @@ unsafe fn call_resolver(address: u64) -> u64 {
 
 fn relocate(
     library: &'static Library,
-    scope: &[&'static Library],
+    scope: &Scope,
     missing: &mut BTreeSet<String>,
 ) -> Result<(), ElfError> {
     let image = &library.image;
@@ -690,7 +724,7 @@ fn relocate(
 
 fn apply_relocation(
     library: &'static Library,
-    scope: &[&'static Library],
+    scope: &Scope,
     rela: Rela,
     cache: &mut HashMap<u32, u64>,
     ifuncs: &mut Vec<(u64, u64)>,
@@ -727,7 +761,7 @@ fn apply_relocation(
 
 fn symbol_address(
     library: &'static Library,
-    scope: &[&'static Library],
+    scope: &Scope,
     rela: Rela,
     missing: &mut BTreeSet<String>,
 ) -> Result<u64, ElfError> {
@@ -801,6 +835,9 @@ pub unsafe extern "C" fn dlopen(name: *const c_char, _flags: c_int) -> *mut c_vo
     if plain_name && SYSTEM_LIBRARIES.contains(&path.to_string_lossy().as_ref()) {
         return SYSTEM_HANDLE;
     }
+    if plain_name && let Some(table) = table::find(&path.to_string_lossy()) {
+        return std::ptr::from_ref(table).cast_mut().cast();
+    }
     let target = if plain_name {
         let mut guard = lock();
         let registry = guard.get();
@@ -845,15 +882,26 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
     let symbol = unsafe { CStr::from_ptr(name) };
     let libraries = snapshot();
     let scope = if handle == RTLD_DEFAULT {
-        libraries
+        Scope {
+            libraries,
+            tables: table::all(),
+        }
     } else if let Some(library) = libraries
         .iter()
         .find(|library| std::ptr::from_ref(**library).cast::<c_void>() == handle.cast_const())
     {
-        breadth_first(library)
+        Scope::of(library)
+    } else if let Some(table) = table::from_handle(handle) {
+        Scope {
+            libraries: Vec::new(),
+            tables: vec![table],
+        }
     } else {
         // SYSTEM_HANDLE or RTLD_NEXT: only the host remains to search.
-        Vec::new()
+        Scope {
+            libraries: Vec::new(),
+            tables: Vec::new(),
+        }
     };
     match resolve(&scope, symbol.to_bytes(), false) {
         Ok(Some(address)) => address as *mut c_void,
