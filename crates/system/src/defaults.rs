@@ -144,7 +144,7 @@ extern "C" fn first_call(index: u32) {
     {
         // One write, so a line other threads print at the same time cannot land inside it.
         let line = format!("uxdroid: unimplemented native {name} returned its default\n");
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        uxdroid_bridge::output::write_all(uxdroid_bridge::output::stderr_fd(), line.as_bytes());
     }
 }
 

@@ -212,7 +212,7 @@ unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: 
     // A class that does not load cannot call its natives either, so this only matters when debugging.
     if !skipped.is_empty() && natives::min_priority() <= natives::DEBUG {
         let names: Vec<_> = skipped.iter().map(|c| c.to_string_lossy()).collect();
-        eprintln!(
+        uxdroid_bridge::report!(
             "uxdroid: no default bodies for {} classes: {}",
             names.len(),
             names.join(" ")
@@ -409,7 +409,7 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
         match register(env as *mut JNIEnv, c"dev/uxdroid/system/Natives", &methods) {
             Ok(()) => JNI_VERSION_1_6,
             Err(error) => {
-                eprintln!("uxdroid: {error}");
+                uxdroid_bridge::report!("uxdroid: {error}");
                 JNI_ERR
             }
         }

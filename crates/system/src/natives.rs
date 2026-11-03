@@ -47,7 +47,7 @@ unsafe extern "system" fn log_println(
         tag.unwrap_or_default(),
         message.unwrap_or_default()
     );
-    eprint!("{line}");
+    uxdroid_bridge::output::write_stderr(format_args!("{line}"));
     line.len() as jint
 }
 

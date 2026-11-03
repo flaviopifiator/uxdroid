@@ -78,7 +78,7 @@ App libraries name `liblog.so`, `libandroid.so`, `libjnigraphics.so`, `libEGL.so
 
 | Library | Served by |
 |---------|-----------|
-| `liblog` | stderr, with the minimum priority, default tag, logger and aborter an app may set |
+| `liblog` | The stderr the process started with, with the minimum priority, default tag, logger and aborter an app may set |
 | `libandroid` assets | The framework's `AssetManager`: each asset is read into memory when it opens, and stored entries also open as file descriptors |
 | `libandroid` looper | One epoll set per thread. On a thread with a Java `Looper`, `MessageQueue.addOnFileDescriptorEventListener` watches that set, so the app's callbacks run inside `Looper.loop` |
 | `libandroid` choreographer | `AChoreographer`: one per thread with an `ALooper`, a timer on that looper armed by the same frame clock as the framework's `Choreographer`, which `libuxdroid_system.so` hands over by address through `VsyncListener.clock()` (a 60 Hz clock of its own without it). Frame callbacks, 32- and 64-bit and delayed, vsync callbacks with one frame timeline, and refresh rate callbacks, which hear 60 Hz once. Flutter's engine finds it and paces its frames by it |
@@ -88,6 +88,8 @@ App libraries name `liblog.so`, `libandroid.so`, `libjnigraphics.so`, `libEGL.so
 | `libGLESv2`, `libGLESv3` | Mesa's own functions, at no added cost |
 | `libOpenSLES` | An engine, output mixes, PCM buffer-queue audio players and recorders over `crates/audio` streams. Interface pointers are resolved back to their object and checked as live. Players of URIs and file descriptors, which need a decoder, are refused. The interface IDs are data, bound on purpose: each is a pointer to a GUID of ours, and apps compare the pointers |
 | `libaaudio` | AAudio streams over `crates/audio`: data callbacks on the stream's thread, adapted to the size the app asks for, and blocking reads and writes with timeouts |
+
+The log is not the app's descriptor 2, as Android's is a daemon: an app may point its stdout and stderr at a pipe and copy what it reads into the log, as AnkiDroid's Rust backend does, which looped every line back into the pipe, uxdroid's own messages included. Each of uxdroid's libraries keeps a duplicate of descriptor 2 as it loads, before any app code runs (`uxdroid_bridge::output`), and `liblog`, `android.util.Log` and uxdroid's messages write there; `Boot` points `System.out` and `System.err` at duplicates of their own descriptors too, as Android sends them to the log rather than to the app's descriptors.
 
 Pixels cross into Java as `int` arrays, because AOSP's host graphics library cannot take NIO buffers on ART: it looks up OpenJDK's `FileDescriptor.fd`. A native window frame is therefore copied three times before it reaches Wayland, and an EGL frame once more for the readback. A buffer shared with the Wayland window, and an EGL window on its `wl_surface`, would remove those copies.
 

@@ -412,6 +412,7 @@ dependencies = [
  "libc",
  "serde_json",
  "uxdroid-audio",
+ "uxdroid-bridge",
  "wayland-client",
  "wayland-protocols",
 ]

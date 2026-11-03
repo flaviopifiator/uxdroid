@@ -644,7 +644,7 @@ unsafe extern "system" fn receiver_finish(
         }
     }
     if !receiver.reported.swap(true, Ordering::Relaxed) {
-        eprintln!(
+        uxdroid_bridge::report!(
             "uxdroid: first input event finished on {}, handled {}",
             receiver.channel.name(),
             handled

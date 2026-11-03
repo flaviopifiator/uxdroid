@@ -184,7 +184,9 @@ fn surfaceless() -> Display {
     static DISPLAY: OnceLock<usize> = OnceLock::new();
     *DISPLAY.get_or_init(|| {
         let Some(mesa) = mesa() else {
-            eprintln!("uxdroid: EGL needs the host's Mesa (libEGL.so.1, libGLESv2.so.2)");
+            uxdroid_bridge::report!(
+                "uxdroid: EGL needs the host's Mesa (libEGL.so.1, libGLESv2.so.2)"
+            );
             return 0;
         };
         // SAFETY: Mesa's function; the surfaceless platform takes no native display.
@@ -470,7 +472,7 @@ pub unsafe extern "C" fn swap_buffers(display: Display, surface: Surface) -> Boo
     if let Some(window) = window
         && present(mesa, display, surface, &window).is_err()
     {
-        eprintln!(
+        uxdroid_bridge::report!(
             "uxdroid: eglSwapBuffers could not post a frame of a surface that is not current"
         );
     }

@@ -135,7 +135,7 @@ pub fn frame_requested() {
         entry.waiting = true;
         tick.store(when, Ordering::Release);
         if let Err(error) = set_timer(entry.fd, when) {
-            eprintln!("uxdroid: cannot move a vsync timer: {error}");
+            uxdroid_bridge::report!("uxdroid: cannot move a vsync timer: {error}");
         }
     }
 }
@@ -155,7 +155,7 @@ pub fn frame_done() {
         // SAFETY: the owner keeps the tick alive until it disarms, which waits for this lock.
         unsafe { (*entry.tick).store(when, Ordering::Release) };
         if let Err(error) = set_timer(entry.fd, when) {
-            eprintln!("uxdroid: cannot fire a vsync timer: {error}");
+            uxdroid_bridge::report!("uxdroid: cannot fire a vsync timer: {error}");
         }
     }
 }

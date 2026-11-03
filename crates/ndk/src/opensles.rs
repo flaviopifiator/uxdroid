@@ -154,7 +154,7 @@ fn unimplemented_once(name: &'static str) {
     let mut seen = lock(&SEEN);
     if !seen.contains(&name) {
         seen.push(name);
-        eprintln!("uxdroid: unimplemented {name}");
+        uxdroid_bridge::report!("uxdroid: unimplemented {name}");
     }
 }
 
@@ -1087,7 +1087,7 @@ impl Kind for Player {
                 SUCCESS
             }
             Err(error) => {
-                eprintln!("uxdroid: OpenSL ES audio player: {error}");
+                uxdroid_bridge::report!("uxdroid: OpenSL ES audio player: {error}");
                 RESOURCE_ERROR
             }
         }
@@ -1487,7 +1487,7 @@ impl Kind for Recorder {
                 SUCCESS
             }
             Err(error) => {
-                eprintln!("uxdroid: OpenSL ES audio recorder: {error}");
+                uxdroid_bridge::report!("uxdroid: OpenSL ES audio recorder: {error}");
                 RESOURCE_ERROR
             }
         }
@@ -1645,7 +1645,7 @@ unsafe extern "C" fn create_audio_recorder(
         }
     };
     if !may_record() {
-        eprintln!(
+        uxdroid_bridge::report!(
             "uxdroid: OpenSL ES recorder refused: the app does not request android.permission.RECORD_AUDIO"
         );
         return PERMISSION_DENIED;

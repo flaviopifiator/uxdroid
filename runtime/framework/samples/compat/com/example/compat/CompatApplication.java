@@ -17,6 +17,34 @@ public class CompatApplication extends Application {
         network();
         services();
         device();
+        redirect();
+    }
+
+    /**
+     * AnkiDroid's Rust backend points stderr at a pipe and writes what it reads to the log, which must
+     * not come back into the pipe; the log and System.err still reach the console.
+     */
+    private void redirect() {
+        try {
+            java.io.FileDescriptor[] pipe = android.system.Os.pipe();
+            android.system.Os.dup2(pipe[1], 2);
+            Thread reader = new Thread(() -> {
+                try (java.io.BufferedReader lines = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(new java.io.FileInputStream(pipe[0])))) {
+                    for (String line = lines.readLine(); line != null; line = lines.readLine()) {
+                        android.util.Log.i("compat", "STDERR: " + line);
+                    }
+                } catch (java.io.IOException e) {
+                    android.util.Log.e("compat", "stderr pipe", e);
+                }
+            });
+            reader.setDaemon(true);
+            reader.start();
+        } catch (android.system.ErrnoException e) {
+            throw new IllegalStateException(e);
+        }
+        android.util.Log.i("compat", "log after redirect");
+        System.err.println("err after redirect");
     }
 
     /** What the app learns of the device: not a Robolectric test, and the GL classes of the platform. */

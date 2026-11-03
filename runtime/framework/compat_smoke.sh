@@ -68,6 +68,12 @@ expect "^device fingerprint uxdroid/uxdroid/uxdroid:16/[A-Z0-9.]+/1:user/release
 expect "^khronos javax\.microedition\.khronos\.opengles\.GL10 javax\.microedition\.khronos\.egl\.EGLContext$" \
     "the javax.microedition.khronos classes are missing"
 
+# 8. The log and the console stay where the process started even after the app points its stderr
+# at a pipe it copies to the log, as AnkiDroid's backend does: otherwise each line loops back.
+expect "^I compat: log after redirect$" "the log went into the app's own stderr pipe"
+expect "^err after redirect$" "System.err went into the app's own stderr pipe"
+grep -q "STDERR: .*STDERR: " "$WORK/out" && fail "the log loops through the app's stderr pipe"
+
 # 4. The app's own startActivity reaches its task: by class and by action, and an intent no activity
 # takes fails with ActivityNotFoundException, as on Android.
 expect "^activity created com\.example\.compat\.SecondActivity by class$" "an activity the app started by class was not made"

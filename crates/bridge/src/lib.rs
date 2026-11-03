@@ -9,6 +9,7 @@ mod image;
 mod shims;
 mod liblog;
 mod loader;
+pub mod output;
 mod paths;
 pub mod table;
 
