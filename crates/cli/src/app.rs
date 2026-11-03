@@ -37,7 +37,7 @@ pub(crate) const APP_USAGE: &str = "usage: uxdroid app list\n       \
      uxdroid app <package> back|key <name> [--profile <name>]\n       \
      uxdroid app <package> wait --text <text> | --idle [--timeout <ms>] [--profile <name>]";
 /// `status` and `intent` of an app that is not running.
-const EXIT_NOT_RUNNING: u8 = 3;
+pub(crate) const EXIT_NOT_RUNNING: u8 = 3;
 /// Above the 10 s the app's main thread is given to answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const LIST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -373,13 +373,13 @@ pub fn run_app(args: &[OsString]) -> ExitCode {
     }
 }
 
-enum Done {
+pub(crate) enum Done {
     Printed(String),
     NotRunning(String, u8),
 }
 
 /// App strings are escaped so they cannot forge lines of the report.
-fn field<'a>(result: &'a Value, key: &str) -> std::borrow::Cow<'a, str> {
+pub(crate) fn field<'a>(result: &'a Value, key: &str) -> std::borrow::Cow<'a, str> {
     match result.get(key) {
         Some(Value::String(text)) => text.escape_debug().to_string().into(),
         Some(Value::Number(number)) => number.to_string().into(),
@@ -421,7 +421,7 @@ pub(crate) fn call_running(
     call(dir, app, request, timeout)
 }
 
-fn status(dir: &Path, app: &Instance) -> Result<Done, String> {
+pub(crate) fn status(dir: &Path, app: &Instance) -> Result<Done, String> {
     let Some(result) = call_running(dir, app, &Request::Status, CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(app.package.clone(), EXIT_NOT_RUNNING));
     };
@@ -446,7 +446,7 @@ fn status(dir: &Path, app: &Instance) -> Result<Done, String> {
     Ok(Done::Printed(report))
 }
 
-fn send_intent(dir: &Path, app: &Instance, intent: Intent) -> Result<Done, String> {
+pub(crate) fn send_intent(dir: &Path, app: &Instance, intent: Intent) -> Result<Done, String> {
     let Some(result) = call_running(dir, app, &Request::Intent(intent), CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(app.package.clone(), EXIT_NOT_RUNNING));
     };
@@ -577,7 +577,7 @@ pub(crate) fn installed(
     Ok((data, apk, runtime))
 }
 
-fn start(
+pub(crate) fn start(
     dir: &Path,
     app: &Instance,
     intent: Intent,
@@ -723,7 +723,7 @@ fn alive(pid: i32) -> bool {
     !zombie && unsafe { libc::kill(pid, 0) } == 0
 }
 
-fn stop(dir: &Path, app: &Instance) -> Result<Done, String> {
+pub(crate) fn stop(dir: &Path, app: &Instance) -> Result<Done, String> {
     let package = &app.package;
     let Some(result) = call_running(dir, app, &Request::Stop, CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(package.clone(), 0));
@@ -750,7 +750,7 @@ fn stop(dir: &Path, app: &Instance) -> Result<Done, String> {
     )))
 }
 
-fn list(dir: &Path) -> Result<Done, String> {
+pub(crate) fn list(dir: &Path) -> Result<Done, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
     let mut names: Vec<String> = entries
