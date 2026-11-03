@@ -17,7 +17,61 @@ public class CompatApplication extends Application {
         network();
         services();
         device();
+        graphics();
         redirect();
+    }
+
+    /**
+     * What GLSurfaceView and Mindustry's renderer do, offscreen: EGL10 finds an ES 2 config, makes a
+     * context current on a pbuffer, and GLES20 clears it, compiles a shader and reads a pixel back.
+     */
+    private void graphics() {
+        javax.microedition.khronos.egl.EGL10 egl =
+                (javax.microedition.khronos.egl.EGL10) javax.microedition.khronos.egl.EGLContext.getEGL();
+        javax.microedition.khronos.egl.EGLDisplay display = egl.eglGetDisplay(javax.microedition.khronos.egl.EGL10.EGL_DEFAULT_DISPLAY);
+        int[] version = new int[2];
+        boolean initialized = egl.eglInitialize(display, version);
+        int[] count = new int[1];
+        javax.microedition.khronos.egl.EGLConfig[] configs = new javax.microedition.khronos.egl.EGLConfig[1];
+        int[] wanted = {javax.microedition.khronos.egl.EGL10.EGL_RED_SIZE, 8, javax.microedition.khronos.egl.EGL10.EGL_GREEN_SIZE, 8,
+                javax.microedition.khronos.egl.EGL10.EGL_BLUE_SIZE, 8, javax.microedition.khronos.egl.EGL10.EGL_RENDERABLE_TYPE, 4,
+                javax.microedition.khronos.egl.EGL10.EGL_SURFACE_TYPE, javax.microedition.khronos.egl.EGL10.EGL_PBUFFER_BIT,
+                javax.microedition.khronos.egl.EGL10.EGL_NONE};
+        egl.eglChooseConfig(display, wanted, configs, 1, count);
+        if (!initialized || count[0] < 1) {
+            System.out.println("graphics no EGL config, initialized " + initialized);
+            return;
+        }
+        javax.microedition.khronos.egl.EGLContext context = egl.eglCreateContext(display, configs[0],
+                javax.microedition.khronos.egl.EGL10.EGL_NO_CONTEXT, new int[] {0x3098, 2, javax.microedition.khronos.egl.EGL10.EGL_NONE});
+        javax.microedition.khronos.egl.EGLSurface surface = egl.eglCreatePbufferSurface(display, configs[0],
+                new int[] {javax.microedition.khronos.egl.EGL10.EGL_WIDTH, 4, javax.microedition.khronos.egl.EGL10.EGL_HEIGHT, 4,
+                        javax.microedition.khronos.egl.EGL10.EGL_NONE});
+        boolean current = egl.eglMakeCurrent(display, surface, surface, context);
+        android.opengl.GLES20.glClearColor(1f, 0.5f, 0f, 1f);
+        android.opengl.GLES20.glClear(android.opengl.GLES20.GL_COLOR_BUFFER_BIT);
+        java.nio.ByteBuffer pixel = java.nio.ByteBuffer.allocateDirect(4);
+        android.opengl.GLES20.glReadPixels(1, 1, 1, 1, android.opengl.GLES20.GL_RGBA, android.opengl.GLES20.GL_UNSIGNED_BYTE, pixel);
+        int shader = android.opengl.GLES20.glCreateShader(android.opengl.GLES20.GL_VERTEX_SHADER);
+        android.opengl.GLES20.glShaderSource(shader, "void main() { gl_Position = vec4(0.0); }");
+        android.opengl.GLES20.glCompileShader(shader);
+        int[] compiled = new int[1];
+        android.opengl.GLES20.glGetShaderiv(shader, android.opengl.GLES20.GL_COMPILE_STATUS, compiled, 0);
+        String refused;
+        try {
+            android.opengl.GLES20.glGenTextures(4, new int[2], 0);
+            refused = "nothing";
+        } catch (IllegalArgumentException e) {
+            refused = "a short array";
+        }
+        System.out.println("graphics EGL " + version[0] + "." + version[1] + " current " + current
+                + " GL " + (android.opengl.GLES20.glGetString(android.opengl.GLES20.GL_VERSION) != null)
+                + " pixel " + String.format("%02x%02x%02x%02x", pixel.get(0), pixel.get(1), pixel.get(2), pixel.get(3))
+                + " shader " + compiled[0] + " refused " + refused);
+        egl.eglMakeCurrent(display, javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE,
+                javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE, javax.microedition.khronos.egl.EGL10.EGL_NO_CONTEXT);
+        egl.eglDestroySurface(display, surface);
+        egl.eglDestroyContext(display, context);
     }
 
     /**

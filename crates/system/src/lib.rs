@@ -17,6 +17,7 @@ mod compose;
 pub mod control;
 pub mod default_library;
 pub mod defaults;
+mod gl;
 mod handles;
 pub mod identity;
 pub mod input;
@@ -122,6 +123,70 @@ unsafe fn register(env: *mut JNIEnv, class: &CStr, methods: &[Method]) -> Result
                 "registering natives of {} failed",
                 class.to_string_lossy()
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Registers `methods` on the class named `name` (with dots), loaded through the system class
+/// loader without being initialized, so its static initializer does not run now: it may call one of
+/// these natives, and runs when the app first uses the class.
+///
+/// # Safety
+/// `env` must be the calling thread's JNI environment, and each function must match its signature.
+unsafe fn register_uninitialized(
+    env: *mut JNIEnv,
+    name: &CStr,
+    methods: &[Method],
+) -> Result<(), String> {
+    let table: Vec<JNINativeMethod> = methods
+        .iter()
+        .map(|(method, signature, function)| JNINativeMethod {
+            name: method.as_ptr() as *mut _,
+            signature: signature.as_ptr() as *mut _,
+            fnPtr: *function,
+        })
+        .collect();
+    let failed = |what: &str| format!("{what} {}", name.to_string_lossy());
+    // SAFETY: as above; Class and ClassLoader are in the boot class path, with these methods.
+    unsafe {
+        let jni = &**env;
+        let class_class = (jni.v1_1.FindClass)(env, c"java/lang/Class".as_ptr());
+        let loader_class = (jni.v1_1.FindClass)(env, c"java/lang/ClassLoader".as_ptr());
+        let for_name = (jni.v1_1.GetStaticMethodID)(
+            env,
+            class_class,
+            c"forName".as_ptr(),
+            c"(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;".as_ptr(),
+        );
+        let system_loader = (jni.v1_1.GetStaticMethodID)(
+            env,
+            loader_class,
+            c"getSystemClassLoader".as_ptr(),
+            c"()Ljava/lang/ClassLoader;".as_ptr(),
+        );
+        if for_name.is_null() || system_loader.is_null() {
+            clear_exception(env);
+            return Err(failed("cannot look up"));
+        }
+        let loader =
+            (jni.v1_1.CallStaticObjectMethodA)(env, loader_class, system_loader, std::ptr::null());
+        let arguments = [
+            jni_sys::jvalue {
+                l: (jni.v1_1.NewStringUTF)(env, name.as_ptr()),
+            },
+            jni_sys::jvalue { z: false },
+            jni_sys::jvalue { l: loader },
+        ];
+        let class =
+            (jni.v1_1.CallStaticObjectMethodA)(env, class_class, for_name, arguments.as_ptr());
+        if class.is_null() || (jni.v1_2.ExceptionCheck)(env) {
+            clear_exception(env);
+            return Err(failed("class not found:"));
+        }
+        if (jni.v1_1.RegisterNatives)(env, class, table.as_ptr(), table.len() as jint) != 0 {
+            clear_exception(env);
+            return Err(failed("registering natives failed:"));
         }
     }
     Ok(())
@@ -327,7 +392,8 @@ unsafe extern "system" fn bind_system(env: *mut JNIEnv, _class: jclass, build_pr
         }
     }
     // SAFETY: as above, and every table matches its Java declarations.
-    if let Err(error) = unsafe { natives::register_all(env) } {
+    // SAFETY: as above, and every table matches its Java declarations.
+    if let Err(error) = unsafe { natives::register_all(env).and_then(|()| gl::register(env)) } {
         // SAFETY: as above.
         unsafe { throw(env, c"java/lang/IllegalStateException", &error) };
     }

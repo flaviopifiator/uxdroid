@@ -201,6 +201,9 @@ fn surfaceless() -> Display {
 }
 
 /// `EGLDisplay eglGetDisplay(EGLNativeDisplayType)`: Android has one display, the default.
+///
+/// # Safety
+/// The arguments must meet the contract of the C function of the same name.
 pub unsafe extern "C" fn get_display(_native: *mut c_void) -> Display {
     surfaceless()
 }
@@ -222,6 +225,9 @@ pub unsafe extern "C" fn get_platform_display(
 }
 
 /// `EGLBoolean eglChooseConfig(...)`: a window, which EGL asks for by default, is a pbuffer here.
+///
+/// # Safety
+/// The arguments must meet the contract of the C function of the same name.
 pub unsafe extern "C" fn choose_config(
     display: Display,
     list: *const i32,
@@ -262,6 +268,9 @@ pub unsafe extern "C" fn choose_config(
 }
 
 /// `EGLBoolean eglGetConfigAttrib(...)`.
+///
+/// # Safety
+/// The arguments must meet the contract of the C function of the same name.
 pub unsafe extern "C" fn get_config_attrib(
     display: Display,
     config: Config,
@@ -313,6 +322,9 @@ pub unsafe extern "C" fn get_config_attrib(
 }
 
 /// `EGLSurface eglCreateWindowSurface(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint*)`.
+///
+/// # Safety
+/// The arguments must meet the contract of the C function of the same name.
 pub unsafe extern "C" fn create_window_surface(
     display: Display,
     config: Config,
@@ -381,6 +393,9 @@ fn window_surface(
 }
 
 /// `EGLBoolean eglDestroySurface(EGLDisplay, EGLSurface)`.
+///
+/// # Safety
+/// The arguments must meet the contract of the C function of the same name.
 pub unsafe extern "C" fn destroy_surface(display: Display, surface: Surface) -> Boolean {
     let Some(mesa) = mesa() else {
         return FALSE;
@@ -461,6 +476,9 @@ fn present(mesa: &Mesa, display: Display, surface: Surface, window: &Window) -> 
 }
 
 /// `EGLBoolean eglSwapBuffers(EGLDisplay, EGLSurface)`.
+///
+/// # Safety
+/// The arguments must meet the contract of the C function of the same name.
 pub unsafe extern "C" fn swap_buffers(display: Display, surface: Surface) -> Boolean {
     let Some(mesa) = mesa() else {
         return FALSE;

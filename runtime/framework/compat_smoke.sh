@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|pending|activity|no activity|launched) " "$WORK/out"
+grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|pending|activity|no activity|launched) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -67,6 +67,12 @@ expect "^device fingerprint uxdroid/uxdroid/uxdroid:16/[A-Z0-9.]+/1:user/release
     "Build does not describe uxdroid"
 expect "^khronos javax\.microedition\.khronos\.opengles\.GL10 javax\.microedition\.khronos\.egl\.EGLContext$" \
     "the javax.microedition.khronos classes are missing"
+
+# 9. EGL10 and GLES20 of the framework reach the host's EGL and GLES: an ES 2 context on a pbuffer is
+# cleared to orange and read back, a shader compiles, and an array too short for what GL would write
+# is refused. GLSurfaceView apps such as Mindustry need all of it.
+expect "^graphics EGL 1\.[0-9]+ current true GL true pixel ff(7f|80)00ff shader 1 refused a short array$" \
+    "EGL10 or GLES20 does not reach the host's GL"
 
 # 8. The log and the console stay where the process started even after the app points its stderr
 # at a pipe it copies to the log, as AnkiDroid's backend does: otherwise each line loops back.
