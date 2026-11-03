@@ -10,7 +10,7 @@ set -u -o pipefail
 WORK=$(mktemp -d)
 RUNS="${RUNS:-30}"
 TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
-BIN=/cache/target/release
+BIN="${CARGO_TARGET_DIR:-/cache/target}/release"
 MEASURE=(python3 -I /work/benches/framework/measure.py)
 fail() { echo "FAIL: $*"; exit 1; }
 

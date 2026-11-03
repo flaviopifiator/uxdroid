@@ -40,6 +40,8 @@ public class InputActivity extends Activity {
         EditText field = new EditText(this);
         field.setHint("Type here");
         field.setTextColor(Color.BLACK);
+        // A blinking cursor changes frames by itself, which input latency measurements would count.
+        field.setCursorVisible(false);
         field.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
