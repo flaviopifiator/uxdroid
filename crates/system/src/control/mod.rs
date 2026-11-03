@@ -13,6 +13,7 @@
 mod activation_tests;
 pub mod client;
 mod java;
+pub mod png;
 pub mod protocol;
 #[cfg(test)]
 mod protocol_tests;

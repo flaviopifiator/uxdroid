@@ -184,6 +184,34 @@ impl Translator {
         events
     }
 
+    /// Wheel steps at a point, as a mouse moved there and scrolled: hovers to the point, scrolls,
+    /// and leaves again, or for a pointer already in the window, stays where it was.
+    pub fn wheel_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        vertical: f32,
+        horizontal: f32,
+        now: i64,
+    ) -> Vec<Event> {
+        if vertical == 0.0 && horizontal == 0.0 {
+            return Vec::new();
+        }
+        let before = self.pointer.replace((x, y));
+        let hover = if before.is_some() {
+            ACTION_HOVER_MOVE
+        } else {
+            ACTION_HOVER_ENTER
+        };
+        let mut events = self.mouse(hover, 0, now);
+        events.extend(self.pointer_scroll(vertical, horizontal, now));
+        if before.is_none() {
+            events.extend(self.mouse(ACTION_HOVER_EXIT, 0, now));
+        }
+        self.pointer = before;
+        events
+    }
+
     fn touch_event(&self, action: i32, now: i64) -> Vec<Event> {
         vec![Event::Motion(Motion {
             down_time: self.touch_down_time,
@@ -465,6 +493,34 @@ mod tests {
         let leave = seat.pointer_leave(2);
         assert_eq!(motions(&leave)[0].action, ACTION_CANCEL);
         assert!(seat.pointer_button(BTN_LEFT, false, 3).is_empty());
+    }
+
+    #[test]
+    fn a_wheel_at_a_point_hovers_there_and_leaves_the_pointer_as_it_was() {
+        let mut seat = Translator::default();
+        let events = seat.wheel_at(30.0, 40.0, 3.0, 0.0, 5);
+        let events = motions(&events);
+        let actions: Vec<i32> = events.iter().map(|m| m.action).collect();
+        assert_eq!(
+            actions,
+            [ACTION_HOVER_ENTER, ACTION_SCROLL, ACTION_HOVER_EXIT]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|m| m.pointers[0].x == 30.0 && m.pointers[0].y == 40.0)
+        );
+        assert_eq!(events[1].vscroll, -3.0);
+        // No pointer before, none after: motion without an enter is still ignored.
+        assert!(seat.pointer_motion(1.0, 1.0, 6).is_empty());
+        // A pointer that was in the window stays where it was.
+        seat.pointer_enter(5.0, 6.0, 7);
+        let events = seat.wheel_at(30.0, 40.0, 0.0, 1.0, 8);
+        let actions: Vec<i32> = motions(&events).iter().map(|m| m.action).collect();
+        assert_eq!(actions, [ACTION_HOVER_MOVE, ACTION_SCROLL]);
+        let moved = seat.pointer_motion(5.0, 6.0, 9);
+        assert_eq!(motions(&moved)[0].pointers[0].x, 5.0);
+        assert!(seat.wheel_at(1.0, 1.0, 0.0, 0.0, 10).is_empty());
     }
 
     #[test]
