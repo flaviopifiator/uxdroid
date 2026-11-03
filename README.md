@@ -175,7 +175,7 @@ stopped com.example.app (process 4242, 2 activities finished)
 | `intent` | Sends an intent to the running app, which must name an activity, an action or data |
 | `status` | The process, its data directory, and its activities from bottom to top, `resumed` or `paused` |
 | `stop` | Finishes every activity, and returns once the process has exited |
-| `list` | Each running app: package, process and data directory |
+| `list` | Each running app: package, followed by `@<profile>` for a profile other than `default`, process and data directory |
 
 The outcome of an intent is `launched`, `new_intent` (the activity's `onNewIntent`) or `brought_forward`, by the activity's launch mode and the intent's flags, as on Android; see [the architecture](docs/architecture.md). A launch of an app that is already running, through `uxdroid app` or the launcher itself, starts no second process.
 
@@ -185,10 +185,21 @@ The outcome of an intent is `launched`, `new_intent` (the activity's `onNewInten
 | `--action <action>`, `--data <uri>` | The intent's action and data |
 | `--extra <key>=<value>` | A string extra. Can repeat |
 | `--flags <n>` | `Intent.setFlags`, decimal or `0x` hexadecimal, such as `0x24000000` for `CLEAR_TOP` and `SINGLE_TOP` |
-| `--data-dir <dir>` | `start` only: the absolute data directory given to `uxdroid install`. Otherwise `$XDG_DATA_HOME/uxdroid/data` |
+| `--profile <name>` | The profile, an instance of the app over its own data directory with its own control socket. Named as a package is, by letters, digits, `.` and `_`. Otherwise `default` |
+| `--data-dir <dir>` | `start` only: the absolute data directory given to `uxdroid install`. Otherwise the profile's: `$XDG_DATA_HOME/uxdroid/data` for `default`, `$XDG_DATA_HOME/uxdroid/profiles/<name>` for any other |
 | `--runtime <dir>` | `start` only: the runtime, found otherwise as for `uxdroid install` |
 
 Exit codes: `0` success, also for `stop` of an app that is not running; `1` the command failed or the app refused it, with its reason; `2` wrong usage; `3` for `status` and `intent`, the app is not running, printed as `<package> is not running`.
+
+Profiles run one package several times at once, each over its own data directory, as separate users of one phone would. The default profile keeps the names above; profile `work` of `com.example.app` has the socket `com.example.app@work.sock` and the log `com.example.app@work.log`, and the launcher learns its profile from `UXDROID_PROFILE`. Install into a profile by naming its directory:
+
+```sh
+uxdroid install app.apk --data ~/.local/share/uxdroid/profiles/work
+uxdroid app com.example.app start --profile work
+uxdroid app com.example.app status --profile work
+```
+
+Two profiles must not share a data directory: the second finds the instance lock taken and hands its launch to the first one's socket, which is not its own, so it waits 30 s and fails.
 
 ## Tests
 

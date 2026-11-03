@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 use super::client::{self, CallError};
 use super::protocol::{Command, Failure, MAX_LINE};
 use super::server::{self, Bound, Handler, Info};
-use super::{claim_instance, control_dir_in, socket_path};
+use super::{
+    DEFAULT_PROFILE, claim_instance, control_dir_in, instance_name, instance_socket, socket_path,
+    valid_profile,
+};
 
 fn scratch(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -60,6 +63,54 @@ fn socket_paths_are_for_valid_packages_only() {
     }
     // A Unix socket path holds at most 107 bytes.
     assert!(socket_path(dir, &"a".repeat(100)).is_err());
+}
+
+#[test]
+fn each_profile_has_its_own_socket_and_the_default_keeps_the_package_name() {
+    let dir = Path::new("/run/user/1000/uxdroid");
+    assert_eq!(
+        instance_socket(dir, "com.example.app", DEFAULT_PROFILE).unwrap(),
+        dir.join("com.example.app.sock")
+    );
+    assert_eq!(
+        instance_socket(dir, "com.example.app", "work").unwrap(),
+        dir.join("com.example.app@work.sock")
+    );
+    assert_eq!(
+        instance_name("com.example.app", "work"),
+        "com.example.app@work"
+    );
+    assert_eq!(
+        instance_name("com.example.app", "default"),
+        "com.example.app"
+    );
+    for bad in ["", "../x", "a/b", ".hidden", "a b", "a@b"] {
+        assert!(!valid_profile(bad), "{bad}");
+        assert!(
+            instance_socket(dir, "com.example.app", bad).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn two_profiles_of_one_package_are_served_at_once() {
+    let dir = scratch("profiles");
+    let Bound::Listening(first) =
+        server::bind_instance(&dir, "com.example.app", "default").unwrap()
+    else {
+        panic!("the default profile's socket is taken");
+    };
+    let Bound::Listening(second) = server::bind_instance(&dir, "com.example.app", "work").unwrap()
+    else {
+        panic!("a second profile must get its own socket");
+    };
+    assert_eq!(first.path(), dir.join("com.example.app.sock"));
+    assert_eq!(second.path(), dir.join("com.example.app@work.sock"));
+    assert!(matches!(
+        server::bind_instance(&dir, "com.example.app", "work").unwrap(),
+        Bound::Owned
+    ));
 }
 
 #[test]

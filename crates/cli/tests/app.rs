@@ -13,10 +13,10 @@ use uxdroid_system::control::protocol::{Command as Request, Failure, Intent};
 use uxdroid_system::control::server::{self, Bound, Handler, Info, Server};
 
 const APP_USAGE: &str = "usage: uxdroid app list\n       \
-     uxdroid app <package> status\n       \
-     uxdroid app <package> start [--activity <class>] [--action <action>] [--data <uri>] [--extra <key>=<value>]... [--flags <n>] [--data-dir <dir>] [--runtime <dir>]\n       \
-     uxdroid app <package> intent [--activity <class>] [--action <action>] [--data <uri>] [--extra <key>=<value>]... [--flags <n>]\n       \
-     uxdroid app <package> stop\n";
+     uxdroid app <package> status [--profile <name>]\n       \
+     uxdroid app <package> start [--activity <class>] [--action <action>] [--data <uri>] [--extra <key>=<value>]... [--flags <n>] [--profile <name>] [--data-dir <dir>] [--runtime <dir>]\n       \
+     uxdroid app <package> intent [--activity <class>] [--action <action>] [--data <uri>] [--extra <key>=<value>]... [--flags <n>] [--profile <name>]\n       \
+     uxdroid app <package> stop [--profile <name>]\n";
 
 /// A private runtime directory, as `$XDG_RUNTIME_DIR` is, and a home.
 fn scratch(name: &str) -> PathBuf {
@@ -100,8 +100,13 @@ fn app(pid: u32) -> App {
 }
 
 fn serve(dir: &Path, package: &str, app: App) -> (Server, Arc<App>) {
+    serve_profile(dir, package, "default", app)
+}
+
+fn serve_profile(dir: &Path, package: &str, profile: &str, app: App) -> (Server, Arc<App>) {
     let control = uxdroid_system::control::control_dir_in(&dir.join("run")).unwrap();
-    let Bound::Listening(listener) = server::bind(&control, package).unwrap() else {
+    let Bound::Listening(listener) = server::bind_instance(&control, package, profile).unwrap()
+    else {
         panic!("the socket is taken");
     };
     let app = Arc::new(app);
@@ -355,6 +360,142 @@ fn list_shows_each_running_app() {
     second.shutdown();
 }
 
+#[test]
+fn two_profiles_of_one_package_run_at_once_each_through_its_own_socket() {
+    let dir = scratch("profiles");
+    let (default, first) = serve(&dir, "com.example.app", app(1));
+    let (work, second) = serve_profile(&dir, "com.example.app", "work", app(2));
+    let output = uxdroid(&dir, &["app", "com.example.app", "status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("package: com.example.app\npid: 1\n"));
+    let output = uxdroid(
+        &dir,
+        &["app", "com.example.app", "status", "--profile", "work"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("package: com.example.app\npid: 2\n"));
+    let output = uxdroid(
+        &dir,
+        &[
+            "app",
+            "com.example.app",
+            "intent",
+            "--profile",
+            "work",
+            "--action",
+            "a.b",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "com.example.app (process 2): new_intent com.example.app/.MainActivity\n"
+    );
+    let intent = Intent {
+        action: Some("a.b".into()),
+        ..Intent::default()
+    };
+    assert_eq!(
+        second.received.lock().unwrap().last(),
+        Some(&Request::Intent(intent))
+    );
+    assert_eq!(*first.received.lock().unwrap(), vec![Request::Status]);
+    let output = uxdroid(&dir, &["app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "com.example.app 1 /srv/android data\ncom.example.app@work 2 /srv/android data\n"
+    );
+    let output = uxdroid(
+        &dir,
+        &["app", "com.example.app", "status", "--profile", "home"],
+    );
+    assert_eq!(
+        (output.status.code(), stdout(&output)),
+        (Some(3), "com.example.app is not running\n".to_string())
+    );
+    default.shutdown();
+    work.shutdown();
+}
+
+#[test]
+fn bad_profiles_are_refused() {
+    let dir = scratch("bad-profiles");
+    for profile in ["../x", "a@b", ".hidden", ""] {
+        let output = uxdroid(
+            &dir,
+            &["app", "com.example.app", "status", "--profile", profile],
+        );
+        assert_eq!(output.status.code(), Some(2), "{profile}");
+        assert_eq!(
+            stderr(&output),
+            format!("error: {profile:?} is not a profile name\n")
+        );
+    }
+    let output = uxdroid(
+        &dir,
+        &[
+            "app",
+            "com.example.app",
+            "stop",
+            "--profile",
+            "a",
+            "--profile",
+            "b",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).ends_with(APP_USAGE), "{}", stderr(&output));
+}
+
+#[test]
+fn start_with_a_profile_uses_the_profile_data_and_socket() {
+    let dir = scratch("start-profile");
+    let runtime = fake_runtime(&dir);
+    let data = dir.join("home/.local/share/uxdroid/profiles/work");
+    std::fs::create_dir_all(data.join("app/com.example.app")).unwrap();
+    std::fs::write(data.join("app/com.example.app/base.apk"), b"").unwrap();
+    let output = uxdroid(
+        &dir,
+        &[
+            "app",
+            "com.example.app",
+            "start",
+            "--profile",
+            "work",
+            "--runtime",
+            runtime.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let printed = stdout(&output);
+    let log = dir.join("run/uxdroid/com.example.app@work.log");
+    assert!(
+        printed.ends_with(&format!(
+            ": com.example.app/.MainActivity, log in {}\n",
+            log.display()
+        )),
+        "{printed}"
+    );
+    let calls = std::fs::read_to_string(dir.join("calls.log")).unwrap();
+    assert!(
+        calls.contains(&format!("ANDROID_DATA={}\n", data.display())),
+        "{calls}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("profile.log")).unwrap(),
+        "work\n"
+    );
+    assert!(dir.join("run/uxdroid/com.example.app@work.sock").exists());
+    let pid: i32 = printed
+        .strip_prefix("started com.example.app as process ")
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("{printed}"));
+    // SAFETY: a plain signal to the fake app's process.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+}
+
 /// A runtime whose dalvikvm64 logs how it was started, then serves the control socket as the
 /// launcher does, answering every request with its status, until it is killed.
 fn fake_runtime(dir: &Path) -> PathBuf {
@@ -367,9 +508,12 @@ fn fake_runtime(dir: &Path) -> PathBuf {
         &script,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > {log}\necho \"ANDROID_DATA=$ANDROID_DATA\" >> {log}\n\
+             echo \"$UXDROID_PROFILE\" > {profile}\n\
+             case \"$UXDROID_PROFILE\" in default) name=com.example.app;; *) name=\"com.example.app@$UXDROID_PROFILE\";; esac\n\
              echo \"launcher says hello\"\n\
-             exec python3 -I -c '{server}' \"$XDG_RUNTIME_DIR/uxdroid/com.example.app.sock\"\n",
+             exec python3 -I -c '{server}' \"$XDG_RUNTIME_DIR/uxdroid/$name.sock\"\n",
             log = dir.join("calls.log").display(),
+            profile = dir.join("profile.log").display(),
             server = "import json, os, socket, sys\n\
                       s = socket.socket(socket.AF_UNIX)\n\
                       s.bind(sys.argv[1])\n\

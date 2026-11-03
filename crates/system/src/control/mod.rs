@@ -76,11 +76,56 @@ fn private_dir(dir: &Path) -> Result<PathBuf, String> {
     Ok(dir.to_path_buf())
 }
 
+/// The profile an app runs as when none is named. Its socket and lock keep the package's own name.
+pub const DEFAULT_PROFILE: &str = "default";
+
+/// The variable through which a launcher learns the profile it runs as; unset is the default.
+pub const PROFILE_VARIABLE: &str = "UXDROID_PROFILE";
+
+/// Profiles become file and unit names, so they follow the rule of package names.
+pub fn valid_profile(profile: &str) -> bool {
+    valid_package(profile)
+}
+
+/// The name of one instance of a package: the package for the default profile, else
+/// `<package>@<profile>`. `@` is in neither name, so the two parts never blur.
+pub fn instance_name(package: &str, profile: &str) -> String {
+    if profile == DEFAULT_PROFILE {
+        package.to_string()
+    } else {
+        format!("{package}@{profile}")
+    }
+}
+
+/// The profile named by `UXDROID_PROFILE`, or the default when it is unset or empty.
+pub fn profile_from_env() -> Result<String, String> {
+    match std::env::var(PROFILE_VARIABLE) {
+        Ok(profile) if profile.is_empty() => Ok(DEFAULT_PROFILE.into()),
+        Ok(profile) if valid_profile(&profile) => Ok(profile),
+        Ok(profile) => Err(format!(
+            "{PROFILE_VARIABLE}={} is not a profile name",
+            profile.escape_debug()
+        )),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_PROFILE.into()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("{PROFILE_VARIABLE} is not a profile name"))
+        }
+    }
+}
+
 pub fn socket_path(dir: &Path, package: &str) -> Result<PathBuf, String> {
+    instance_socket(dir, package, DEFAULT_PROFILE)
+}
+
+/// `<dir>/<instance>.sock` for one profile of a package.
+pub fn instance_socket(dir: &Path, package: &str, profile: &str) -> Result<PathBuf, String> {
     if !valid_package(package) {
         return Err(format!("{} is not a package name", package.escape_debug()));
     }
-    let path = dir.join(format!("{package}.sock"));
+    if !valid_profile(profile) {
+        return Err(format!("{} is not a profile name", profile.escape_debug()));
+    }
+    let path = dir.join(format!("{}.sock", instance_name(package, profile)));
     if path.as_os_str().len() > MAX_SOCKET_PATH {
         return Err(format!(
             "{} is longer than a socket address can be",

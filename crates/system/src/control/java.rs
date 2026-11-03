@@ -155,13 +155,15 @@ fn start(package: &str) -> Result<jint, String> {
     if control.is_some() {
         return Err("the control socket is already served".into());
     }
+    let profile = super::profile_from_env()?;
     let dir = super::control_dir()?;
-    let listener = match server::bind(&dir, package)? {
+    let listener = match server::bind_instance(&dir, package, &profile)? {
         Bound::Listening(listener) => listener,
         Bound::Owned => {
             return Err(format!(
-                "{} is served by another instance of {package}, over another data directory",
-                super::socket_path(&dir, package)?.display()
+                "{} is served by another instance of {package}, over another data directory; \
+                 give each data directory its own profile",
+                super::instance_socket(&dir, package, &profile)?.display()
             ));
         }
     };
@@ -348,7 +350,8 @@ fn call_running(package: &str, intent: &str, deadline: Instant) -> Result<Value,
     let intent = serde_json::from_str::<Value>(intent)
         .map_err(|error| error.to_string())
         .and_then(|value| Intent::from_json(&value).map_err(|failure| failure.message))?;
-    let path = super::socket_path(&super::control_dir()?, package)?;
+    let profile = super::profile_from_env()?;
+    let path = super::instance_socket(&super::control_dir()?, package, &profile)?;
     let stream = loop {
         match client::connect(&path) {
             Ok(stream) => break stream,

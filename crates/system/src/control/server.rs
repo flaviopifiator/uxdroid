@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::protocol::{self, Command, Failure, LineError};
-use super::{claim_instance, socket_path};
+use super::{DEFAULT_PROFILE, claim_instance, instance_name, instance_socket};
 
 /// Connections served at once; one more is told the app is busy.
 const MAX_CONNECTIONS: usize = 16;
@@ -59,8 +59,14 @@ pub enum Bound {
 /// socket is served; a socket file nobody holds the lock of was left by a process that died, and is
 /// replaced.
 pub fn bind(dir: &Path, package: &str) -> Result<Bound, String> {
-    let path = socket_path(dir, package)?;
-    let lock = dir.join(format!("{package}.lock"));
+    bind_instance(dir, package, DEFAULT_PROFILE)
+}
+
+/// As `bind`, for one profile of the package: `<dir>/<package>@<profile>.sock` and its lock, or the
+/// package's own names for the default profile.
+pub fn bind_instance(dir: &Path, package: &str, profile: &str) -> Result<Bound, String> {
+    let path = instance_socket(dir, package, profile)?;
+    let lock = dir.join(format!("{}.lock", instance_name(package, profile)));
     let owner = match claim_instance(&lock) {
         Ok(Some(owner)) => owner,
         Ok(None) => return Ok(Bound::Owned),
