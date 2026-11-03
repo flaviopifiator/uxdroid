@@ -15,6 +15,7 @@ macro_rules! f {
 mod compose;
 pub mod defaults;
 mod handles;
+pub mod input;
 mod java;
 mod natives;
 mod process;
