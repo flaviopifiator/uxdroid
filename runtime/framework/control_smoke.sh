@@ -101,4 +101,11 @@ app start --data-dir "$ANDROID_DATA" || fail "start after a crash: exit $?"
 expect "^started $PACKAGE as process [0-9]+: " "the app did not start again after a crash"
 grep -q "process $CRASHED:" "$WORK/out" && fail "the crashed process answered"
 app stop || fail "stop: exit $?"
+
+# 6. A start that names another activity, by its name relative to the package, launches it first.
+app start --activity .DetailActivity --extra k=v --data-dir "$ANDROID_DATA" || fail "start of an activity: exit $?"
+expect "^started $PACKAGE as process [0-9]+: $PACKAGE/\.DetailActivity, " "start did not launch the named activity"
+logged "^activity created com\.example\.framework\.DetailActivity action android\.intent\.action\.MAIN data null k=v$" \
+    "the named activity did not get the intent"
+app stop || fail "stop: exit $?"
 echo "ok: one process per app and data directory; a second launch, start, intents, status, list and stop reach it through its control socket"

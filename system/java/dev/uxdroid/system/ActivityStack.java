@@ -89,7 +89,7 @@ final class ActivityStack {
     ActivityInfo resolve(Intent intent, String named) throws Refusal {
         String packageName = app.application.packageName;
         if (named != null) {
-            String name = named.startsWith(".") ? packageName + named : named.contains(".") ? named : packageName + "." + named;
+            String name = Launcher.className(packageName, named);
             if (name.equals(app.activity.name)) return app.activity;
             for (PackageParser.Activity declared : app.parsed().activities) {
                 if (declared.className.equals(name)) return app.activityInfo(declared);

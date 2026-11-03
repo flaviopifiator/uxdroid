@@ -167,7 +167,8 @@ public final class Launcher {
 
         /** From the install record, or null if the record holds another Activity than the one asked for. */
         static App recorded(File apk, Record.Contents record, String activityName) {
-            if (record.activity == null || (activityName != null && !activityName.equals(record.activity.name))) {
+            if (record.activity == null || (activityName != null
+                    && !className(record.application.packageName, activityName).equals(record.activity.name))) {
                 return null;
             }
             place(record.application, apk, true);
@@ -202,7 +203,7 @@ public final class Launcher {
         static ActivityInfo activity(PackageParser.Package parsed, ApplicationInfo application, String activityName) {
             for (PackageParser.Activity candidate : parsed.activities) {
                 boolean chosen = activityName != null
-                        ? candidate.className.equals(activityName)
+                        ? candidate.className.equals(className(parsed.packageName, activityName))
                         : candidate.intents.stream().anyMatch(filter -> filter.hasAction(Intent.ACTION_MAIN)
                                 && filter.hasCategory(Intent.CATEGORY_LAUNCHER));
                 if (chosen) {
@@ -261,6 +262,11 @@ public final class Launcher {
         ComponentName component() {
             return new ComponentName(activity.packageName, activity.name);
         }
+    }
+
+    /** A class name as a manifest gives it: {@code .Name} and {@code Name} are in the package. */
+    static String className(String packageName, String name) {
+        return name.startsWith(".") ? packageName + name : name.contains(".") ? name : packageName + "." + name;
     }
 
     /** Android's /data: where the installer put the app, and where its data goes. */
