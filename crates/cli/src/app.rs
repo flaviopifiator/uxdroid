@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use uxdroid_system::control::client::{self, CallError};
-use uxdroid_system::control::protocol::{Command as Request, Failure, Intent};
+use uxdroid_system::control::png;
+use uxdroid_system::control::protocol::{
+    self, Command as Request, Condition, Failure, Intent, Place, Screenshot, Scroll, Typing, Ui,
+    Wait,
+};
 use uxdroid_system::control::{
     DEFAULT_PROFILE, PROFILE_VARIABLE, control_dir, instance_name, instance_socket, served,
     valid_package, valid_profile,
@@ -24,9 +28,16 @@ pub(crate) const APP_USAGE: &str = "usage: uxdroid app list\n       \
      uxdroid app <package> status [--profile <name>]\n       \
      uxdroid app <package> start [--activity <class>] [--action <action>] [--data <uri>] [--extra <key>=<value>]... [--flags <n>] [--profile <name>] [--data-dir <dir>] [--runtime <dir>]\n       \
      uxdroid app <package> intent [--activity <class>] [--action <action>] [--data <uri>] [--extra <key>=<value>]... [--flags <n>] [--profile <name>]\n       \
-     uxdroid app <package> stop [--profile <name>]";
+     uxdroid app <package> stop [--profile <name>]\n       \
+     uxdroid app <package> ui [--max-nodes <n>] [--max-depth <n>] [--profile <name>]\n       \
+     uxdroid app <package> screenshot <file.png> [--window <n>] [--max-size <n>] [--profile <name>]\n       \
+     uxdroid app <package> tap <x> <y> | --node <id> [--snapshot <n>] [--profile <name>]\n       \
+     uxdroid app <package> type <text> [--node <id> [--snapshot <n>]] [--profile <name>]\n       \
+     uxdroid app <package> scroll <x> <y> | --node <id> [--snapshot <n>] [--dx <steps>] [--dy <steps>] [--profile <name>]\n       \
+     uxdroid app <package> back|key <name> [--profile <name>]\n       \
+     uxdroid app <package> wait --text <text> | --idle [--timeout <ms>] [--profile <name>]";
 /// `status` and `intent` of an app that is not running.
-const EXIT_NOT_RUNNING: u8 = 3;
+pub(crate) const EXIT_NOT_RUNNING: u8 = 3;
 /// Above the 10 s the app's main thread is given to answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const LIST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -53,6 +64,8 @@ enum Action {
     Start(Instance, Intent, Option<PathBuf>, Option<PathBuf>),
     Intent(Instance, Intent),
     Stop(Instance),
+    /// An agent command, and for a screenshot, the file it goes to.
+    Agent(Instance, Request, Option<PathBuf>),
 }
 
 /// Wrong usage, with what was wrong when there is more to say than the usage.
@@ -88,6 +101,18 @@ fn parse(args: &[OsString]) -> Result<Action, Usage> {
             } else {
                 Action::Stop(instance)
             });
+        }
+        [
+            package,
+            command @ ("ui" | "screenshot" | "tap" | "type" | "scroll" | "back" | "key" | "wait"),
+            ref rest @ ..,
+        ] => {
+            let (request, file, profile) = agent_options(command, rest)?;
+            let instance = Instance {
+                package: package.into(),
+                profile,
+            };
+            return Ok(Action::Agent(instance, request, file));
         }
         [package, command @ ("start" | "intent"), ..] => {
             let starting = command == "start";
@@ -177,6 +202,140 @@ fn options(mut rest: &[&str], starting: bool) -> Result<Options, Usage> {
     Ok((checked, profile, data, runtime))
 }
 
+/// The options of an agent command: its positional words, then flags with values, `--idle` alone.
+pub(crate) fn agent_options(
+    command: &str,
+    rest: &[&str],
+) -> Result<(Request, Option<PathBuf>, String), Usage> {
+    let (mut words, mut flags) = (Vec::new(), Vec::new());
+    let mut idle = false;
+    let mut rest = rest;
+    while let [first, remaining @ ..] = rest {
+        match (*first, remaining) {
+            ("--idle", _) if command == "wait" && !idle => {
+                idle = true;
+                rest = remaining;
+            }
+            (flag, [value, remaining @ ..]) if flag.starts_with("--") => {
+                if flags.iter().any(|(known, _)| *known == flag) {
+                    return Err(Usage(None));
+                }
+                flags.push((flag, *value));
+                rest = remaining;
+            }
+            (flag, []) if flag.starts_with("--") => return Err(Usage(None)),
+            (word, _) => {
+                words.push(word);
+                rest = remaining;
+            }
+        }
+    }
+    let mut take = |name: &str| {
+        flags
+            .iter()
+            .position(|(flag, _)| *flag == name)
+            .map(|at| flags.remove(at).1)
+    };
+    let profile = match take("--profile") {
+        Some(profile) => checked_profile(profile)?.to_string(),
+        None => DEFAULT_PROFILE.to_string(),
+    };
+    let number = |value: Option<&str>| -> Result<Option<i64>, Usage> {
+        value
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .map_err(|_| Usage(Some(format!("{value:?} is not a number"))))
+            })
+            .transpose()
+    };
+    let node = number(take("--node"))?;
+    let snapshot = number(take("--snapshot"))?;
+    let place = |words: &[&str]| -> Result<Option<Place>, Usage> {
+        match (words, node) {
+            ([], Some(node)) => Ok(Some(Place::Node {
+                node: u32::try_from(node).map_err(|_| Usage(None))?,
+                snapshot: snapshot
+                    .map(|snapshot| u64::try_from(snapshot).map_err(|_| Usage(None)))
+                    .transpose()?,
+            })),
+            ([x, y], None) if snapshot.is_none() => Ok(Some(Place::Point {
+                x: number(Some(x))?
+                    .and_then(|x| i32::try_from(x).ok())
+                    .ok_or(Usage(None))?,
+                y: number(Some(y))?
+                    .and_then(|y| i32::try_from(y).ok())
+                    .ok_or(Usage(None))?,
+            })),
+            ([], None) if snapshot.is_none() => Ok(None),
+            _ => Err(Usage(None)),
+        }
+    };
+    let mut file = None;
+    let request = match (command, &words[..]) {
+        ("ui", []) => Request::Ui(Ui {
+            max_nodes: number(take("--max-nodes"))?.map_or(Ok(protocol::DEFAULT_NODES), |n| {
+                u32::try_from(n).map_err(|_| Usage(None))
+            })?,
+            max_depth: number(take("--max-depth"))?.map_or(Ok(protocol::DEFAULT_DEPTH), |n| {
+                u32::try_from(n).map_err(|_| Usage(None))
+            })?,
+        }),
+        ("screenshot", [path]) => {
+            file = Some(PathBuf::from(path));
+            Request::Screenshot(Screenshot {
+                window: number(take("--window"))?
+                    .map(|n| u32::try_from(n).map_err(|_| Usage(None)))
+                    .transpose()?,
+                max_size: number(take("--max-size"))?
+                    .map_or(Ok(protocol::DEFAULT_SHOT_SIZE), |n| {
+                        u32::try_from(n).map_err(|_| Usage(None))
+                    })?,
+            })
+        }
+        ("tap", words) => Request::Tap(place(words)?.ok_or(Usage(None))?),
+        ("type", [text]) => Request::Type(Typing {
+            text: text.to_string(),
+            node: place(&[])?,
+        }),
+        ("scroll", words) => {
+            let at = place(words)?.ok_or(Usage(None))?;
+            let steps = |value: Option<i64>| {
+                value.map_or(Ok(0), |n| i32::try_from(n).map_err(|_| Usage(None)))
+            };
+            let dx = steps(number(take("--dx"))?)?;
+            let dy = steps(number(take("--dy"))?)?;
+            Request::Scroll(Scroll { at, dx, dy })
+        }
+        ("back", []) => Request::Back,
+        ("key", [name]) => Request::Key(name.to_string()),
+        ("wait", []) => {
+            let condition = match (take("--text"), idle) {
+                (Some(text), false) => Condition::Text(text.to_string()),
+                (None, true) => Condition::Idle,
+                _ => return Err(Usage(None)),
+            };
+            let timeout_ms = number(take("--timeout"))?
+                .map_or(Ok(protocol::DEFAULT_WAIT_MS), |n| {
+                    u32::try_from(n).map_err(|_| Usage(None))
+                })?;
+            Request::Wait(Wait {
+                condition,
+                timeout_ms,
+            })
+        }
+        _ => return Err(Usage(None)),
+    };
+    if !flags.is_empty() || (idle && command != "wait") {
+        return Err(Usage(None));
+    }
+    // The checks the app applies, so a request it would refuse is wrong usage here.
+    let line = protocol::request_line(None, &request);
+    protocol::parse_request(line.trim_end().as_bytes())
+        .map_err(|(_, failure)| Usage(Some(failure.message)))?;
+    Ok((request, file, profile))
+}
+
 pub fn run_app(args: &[OsString]) -> ExitCode {
     let action = match parse(args) {
         Ok(action) => action,
@@ -198,6 +357,7 @@ pub fn run_app(args: &[OsString]) -> ExitCode {
         Action::Start(app, intent, data, runtime) => start(&dir, &app, intent, data, runtime),
         Action::Intent(app, intent) => send_intent(&dir, &app, intent),
         Action::Stop(app) => stop(&dir, &app),
+        Action::Agent(app, request, file) => agent(&dir, &app, request, file.as_deref()),
     };
     match result {
         Ok(Done::Printed(report)) => print(&report),
@@ -213,13 +373,13 @@ pub fn run_app(args: &[OsString]) -> ExitCode {
     }
 }
 
-enum Done {
+pub(crate) enum Done {
     Printed(String),
     NotRunning(String, u8),
 }
 
 /// App strings are escaped so they cannot forge lines of the report.
-fn field<'a>(result: &'a Value, key: &str) -> std::borrow::Cow<'a, str> {
+pub(crate) fn field<'a>(result: &'a Value, key: &str) -> std::borrow::Cow<'a, str> {
     match result.get(key) {
         Some(Value::String(text)) => text.escape_debug().to_string().into(),
         Some(Value::Number(number)) => number.to_string().into(),
@@ -261,7 +421,7 @@ pub(crate) fn call_running(
     call(dir, app, request, timeout)
 }
 
-fn status(dir: &Path, app: &Instance) -> Result<Done, String> {
+pub(crate) fn status(dir: &Path, app: &Instance) -> Result<Done, String> {
     let Some(result) = call_running(dir, app, &Request::Status, CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(app.package.clone(), EXIT_NOT_RUNNING));
     };
@@ -286,7 +446,7 @@ fn status(dir: &Path, app: &Instance) -> Result<Done, String> {
     Ok(Done::Printed(report))
 }
 
-fn send_intent(dir: &Path, app: &Instance, intent: Intent) -> Result<Done, String> {
+pub(crate) fn send_intent(dir: &Path, app: &Instance, intent: Intent) -> Result<Done, String> {
     let Some(result) = call_running(dir, app, &Request::Intent(intent), CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(app.package.clone(), EXIT_NOT_RUNNING));
     };
@@ -297,6 +457,81 @@ fn send_intent(dir: &Path, app: &Instance, intent: Intent) -> Result<Done, Strin
         field(&result, "outcome"),
         field(&result, "activity")
     )))
+}
+
+/// How long an agent command may take: a wait's own timeout and the main thread's answer on top.
+pub(crate) fn agent_timeout(request: &Request) -> Duration {
+    match request {
+        Request::Wait(wait) => Duration::from_millis(u64::from(wait.timeout_ms)) + CALL_TIMEOUT,
+        _ => CALL_TIMEOUT,
+    }
+}
+
+/// The PNG a screenshot answer carries.
+pub(crate) fn screenshot_png(result: &Value) -> Result<Vec<u8>, String> {
+    result
+        .get("png")
+        .and_then(Value::as_str)
+        .and_then(png::base64_decode)
+        .filter(|data| data.starts_with(b"\x89PNG\r\n\x1a\n"))
+        .ok_or_else(|| "the app's screenshot is not a PNG".to_string())
+}
+
+fn agent(
+    dir: &Path,
+    app: &Instance,
+    request: Request,
+    file: Option<&Path>,
+) -> Result<Done, String> {
+    let timeout = agent_timeout(&request);
+    let Some(result) = call_running(dir, app, &request, timeout)? else {
+        return Ok(Done::NotRunning(app.package.clone(), EXIT_NOT_RUNNING));
+    };
+    let report = match (&request, file) {
+        (Request::Screenshot(_), Some(file)) => {
+            let data = screenshot_png(&result)?;
+            std::fs::write(file, data)
+                .map_err(|error| format!("cannot write {}: {error}", file.display()))?;
+            format!(
+                "wrote {} ({}x{})\n",
+                file.display(),
+                field(&result, "width"),
+                field(&result, "height")
+            )
+        }
+        (Request::Tap(Place::Node { node, .. }), _) => format!(
+            "tapped node {node} at {},{}\n",
+            field(&result, "x"),
+            field(&result, "y")
+        ),
+        (Request::Tap(_), _) => format!("tapped {},{}\n", field(&result, "x"), field(&result, "y")),
+        (Request::Type(_), _) => format!(
+            "typed {} characters: {} keys, {} committed\n",
+            field(&result, "typed"),
+            field(&result, "keys"),
+            field(&result, "committed")
+        ),
+        (Request::Scroll(_), _) => {
+            format!(
+                "scrolled at {},{}\n",
+                field(&result, "x"),
+                field(&result, "y")
+            )
+        }
+        (Request::Back | Request::Key(_), _) => format!("pressed {}\n", field(&result, "key")),
+        (
+            Request::Wait(Wait {
+                condition: Condition::Idle,
+                ..
+            }),
+            _,
+        ) => {
+            format!("idle after {} ms\n", field(&result, "waited_ms"))
+        }
+        // A snapshot, or the node a wait found, as one line of JSON, which escapes the app's text.
+        _ => format!("{result}\n"),
+    };
+    Ok(Done::Printed(report))
 }
 
 /// Where a profile's apps are installed when no data directory is named: the default profile keeps
@@ -342,7 +577,7 @@ pub(crate) fn installed(
     Ok((data, apk, runtime))
 }
 
-fn start(
+pub(crate) fn start(
     dir: &Path,
     app: &Instance,
     intent: Intent,
@@ -488,7 +723,7 @@ fn alive(pid: i32) -> bool {
     !zombie && unsafe { libc::kill(pid, 0) } == 0
 }
 
-fn stop(dir: &Path, app: &Instance) -> Result<Done, String> {
+pub(crate) fn stop(dir: &Path, app: &Instance) -> Result<Done, String> {
     let package = &app.package;
     let Some(result) = call_running(dir, app, &Request::Stop, CALL_TIMEOUT)? else {
         return Ok(Done::NotRunning(package.clone(), 0));
@@ -515,7 +750,7 @@ fn stop(dir: &Path, app: &Instance) -> Result<Done, String> {
     )))
 }
 
-fn list(dir: &Path) -> Result<Done, String> {
+pub(crate) fn list(dir: &Path) -> Result<Done, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
     let mut names: Vec<String> = entries

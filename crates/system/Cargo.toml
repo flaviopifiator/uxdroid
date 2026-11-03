@@ -9,6 +9,9 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+crc32fast = "1.5"
+# The same deflate the APK reader's zip uses, so no new crate enters the build.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 jni-sys = "0.4"
 libc = "0.2"
 serde_json = "1.0.154"

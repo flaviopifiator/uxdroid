@@ -408,6 +408,8 @@ dependencies = [
 name = "uxdroid-system"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "jni-sys",
  "libc",
  "serde_json",

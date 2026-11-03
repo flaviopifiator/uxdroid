@@ -14,7 +14,9 @@ const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
                      uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]\n       \
                      uxdroid install <apk> --data <dir>\n       \
                      uxdroid service enable|disable|status|run <package> [<options>]\n       \
+                     uxdroid mcp\n       \
                      uxdroid app <package> status|start|intent|stop [<options>]\n       \
+                     uxdroid app <package> ui|screenshot|tap|type|scroll|back|key|wait [<options>]\n       \
                      uxdroid app list";
 const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
@@ -29,6 +31,7 @@ fn main() -> ExitCode {
         Some((command, rest)) if command == "install" => install::run_install(rest),
         Some((command, rest)) if command == "app" => app_command(rest),
         Some((command, rest)) if command == "service" => service_command(rest),
+        Some((command, rest)) if command == "mcp" => mcp_command(rest),
         _ => fail(USAGE, EXIT_USAGE),
     }
 }
@@ -36,9 +39,24 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 mod app;
 mod install;
+#[cfg(target_os = "linux")]
+mod mcp;
 mod runtime;
 #[cfg(target_os = "linux")]
 mod service;
+
+#[cfg(target_os = "linux")]
+fn mcp_command(args: &[OsString]) -> ExitCode {
+    if !args.is_empty() {
+        return fail("usage: uxdroid mcp", EXIT_USAGE);
+    }
+    mcp::run_mcp()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mcp_command(_args: &[OsString]) -> ExitCode {
+    fail("error: uxdroid mcp needs a Linux host", EXIT_FAILURE)
+}
 
 #[cfg(target_os = "linux")]
 fn app_command(args: &[OsString]) -> ExitCode {

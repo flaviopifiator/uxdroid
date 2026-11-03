@@ -19,6 +19,29 @@ pub const MAX_VALUE: usize = 4096;
 /// The most extras one intent carries.
 pub const MAX_EXTRAS: usize = 64;
 const MAX_ID: usize = 64;
+/// `ui`: nodes and depth of one snapshot.
+pub const DEFAULT_NODES: u32 = 1000;
+pub const MAX_NODES: u32 = 5000;
+pub const DEFAULT_DEPTH: u32 = 64;
+pub const MAX_DEPTH: u32 = 128;
+/// `screenshot`: the longest side of the image, which a larger display is scaled down to.
+pub const DEFAULT_SHOT_SIZE: u32 = 2048;
+pub const MIN_SHOT_SIZE: u32 = 16;
+pub const MAX_SHOT_SIZE: u32 = 4096;
+/// `screenshot`: the most windows a display holds that one can be picked from.
+pub const MAX_WINDOWS: u32 = 64;
+/// Display coordinates, as Wayland surfaces measure them.
+pub const MAX_COORDINATE: i64 = 16383;
+/// `type`: bytes of text; `wait`: bytes of the text waited for.
+pub const MAX_TEXT: usize = 4096;
+pub const MAX_WAIT_TEXT: usize = 1024;
+/// `scroll`: wheel steps on each axis.
+pub const MAX_SCROLL: i64 = 50;
+/// `wait`: how long it waits, in milliseconds.
+pub const DEFAULT_WAIT_MS: u32 = 10_000;
+pub const MAX_WAIT_MS: u32 = 60_000;
+/// `key`: a key's name, as `KeyEvent.KEYCODE_<name>` spells it.
+const MAX_KEY_NAME: usize = 32;
 
 pub const BAD_REQUEST: &str = "bad_request";
 pub const UNSUPPORTED_VERSION: &str = "unsupported_version";
@@ -27,6 +50,14 @@ pub const TOO_LONG: &str = "too_long";
 pub const NOT_ALLOWED: &str = "not_allowed";
 pub const BUSY: &str = "busy";
 pub const FAILED: &str = "failed";
+/// `tap`, `type` and `scroll` name a node the last `ui` snapshot does not hold.
+pub const NO_SUCH_NODE: &str = "no_such_node";
+/// They name a snapshot that is no longer the last one.
+pub const STALE_SNAPSHOT: &str = "stale_snapshot";
+/// The app shows no window, or not the one named.
+pub const NO_WINDOW: &str = "no_window";
+/// `wait` ran out of time.
+pub const TIMEOUT: &str = "timeout";
 
 /// What a client asks of a running app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +72,77 @@ pub enum Command {
     Intent(Intent),
     /// Finishes every activity, then the process exits.
     Stop,
+    /// The windows' view hierarchy and accessibility nodes, as a snapshot.
+    Ui(Ui),
+    /// The composed display, or one window, as PNG.
+    Screenshot(Screenshot),
+    /// A finger down and up, through the seat.
+    Tap(Place),
+    /// Key presses that type text into the focused field, or into a node tapped first.
+    Type(Typing),
+    /// Wheel steps at a point.
+    Scroll(Scroll),
+    /// The back key.
+    Back,
+    /// One key, by its `KeyEvent.KEYCODE_` name.
+    Key(String),
+    /// Waits until a node shows text, or until no window draws.
+    Wait(Wait),
+    /// Internal, never read from a request: text the seat's keymap cannot type, committed through
+    /// the focused view's `InputConnection`.
+    Commit(String),
+    /// Internal, never read from a request: the last agent left, so accessibility turns off.
+    Release,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ui {
+    pub max_nodes: u32,
+    pub max_depth: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Screenshot {
+    /// One window, by its place in the display's stack, bottom first; none for the whole display.
+    pub window: Option<u32>,
+    pub max_size: u32,
+}
+
+/// Where an action happens: a node of a `ui` snapshot, at its center, or a point on the display.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    Node { node: u32, snapshot: Option<u64> },
+    Point { x: i32, y: i32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Typing {
+    /// Data only: each character becomes key presses, nothing is ever evaluated.
+    pub text: String,
+    /// Tapped first, to focus it.
+    pub node: Option<Place>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scroll {
+    pub at: Place,
+    /// Wheel steps: positive is right and down.
+    pub dx: i32,
+    pub dy: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Condition {
+    /// A visible node whose text, description or hint holds this.
+    Text(String),
+    /// No window posted a frame for a while.
+    Idle,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wait {
+    pub condition: Condition,
+    pub timeout_ms: u32,
 }
 
 impl Command {
@@ -51,11 +153,181 @@ impl Command {
             Command::Start(_) => "start",
             Command::Intent(_) => "intent",
             Command::Stop => "stop",
+            Command::Ui(_) => "ui",
+            Command::Screenshot(_) => "screenshot",
+            Command::Tap(_) => "tap",
+            Command::Type(_) => "type",
+            Command::Scroll(_) => "scroll",
+            Command::Back => "back",
+            Command::Key(_) => "key",
+            Command::Wait(_) => "wait",
+            Command::Commit(_) => "commit",
+            Command::Release => "release",
         }
     }
 
     /// The commands of version 1, as `hello` lists them.
-    pub const NAMES: [&'static str; 5] = ["hello", "status", "start", "intent", "stop"];
+    pub const NAMES: [&'static str; 13] = [
+        "hello",
+        "status",
+        "start",
+        "intent",
+        "stop",
+        "ui",
+        "screenshot",
+        "tap",
+        "type",
+        "scroll",
+        "back",
+        "key",
+        "wait",
+    ];
+
+    /// The fields a request of this command holds besides `v`, `id` and `cmd`.
+    pub fn fields(&self) -> Map<String, Value> {
+        let mut fields = Map::new();
+        let mut put = |key: &str, value: Value| {
+            fields.insert(key.into(), value);
+        };
+        match self {
+            Command::Start(intent) | Command::Intent(intent) => put("intent", intent.to_json()),
+            Command::Ui(ui) => {
+                put("max_nodes", ui.max_nodes.into());
+                put("max_depth", ui.max_depth.into());
+            }
+            Command::Screenshot(shot) => {
+                if let Some(window) = shot.window {
+                    put("window", window.into());
+                }
+                put("max_size", shot.max_size.into());
+            }
+            Command::Tap(place) => place.put(&mut put),
+            Command::Type(typing) => {
+                put("text", typing.text.clone().into());
+                if let Some(place) = &typing.node {
+                    place.put(&mut put);
+                }
+            }
+            Command::Scroll(scroll) => {
+                scroll.at.put(&mut put);
+                put("dx", scroll.dx.into());
+                put("dy", scroll.dy.into());
+            }
+            Command::Key(key) => put("key", key.clone().into()),
+            Command::Wait(wait) => {
+                match &wait.condition {
+                    Condition::Text(text) => put("text", text.clone().into()),
+                    Condition::Idle => put("idle", true.into()),
+                }
+                put("timeout_ms", wait.timeout_ms.into());
+            }
+            Command::Commit(text) => put("text", text.clone().into()),
+            Command::Hello | Command::Status | Command::Stop | Command::Back | Command::Release => {
+            }
+        }
+        fields
+    }
+}
+
+impl Place {
+    fn put(&self, put: &mut impl FnMut(&str, Value)) {
+        match self {
+            Place::Node { node, snapshot } => {
+                put("node", (*node).into());
+                if let Some(snapshot) = snapshot {
+                    put("snapshot", (*snapshot).into());
+                }
+            }
+            Place::Point { x, y } => {
+                put("x", (*x).into());
+                put("y", (*y).into());
+            }
+        }
+    }
+}
+
+/// The arguments of one request, each taken once, so what is left over can be refused.
+struct Arguments<'a> {
+    name: &'a str,
+    object: &'a Map<String, Value>,
+    taken: Vec<&'static str>,
+}
+
+impl Arguments<'_> {
+    fn get(&mut self, key: &'static str) -> Option<&Value> {
+        self.taken.push(key);
+        self.object.get(key)
+    }
+
+    fn integer(
+        &mut self,
+        key: &'static str,
+        range: std::ops::RangeInclusive<i64>,
+    ) -> Result<Option<i64>, Failure> {
+        let name = self.name;
+        let Some(value) = self.get(key) else {
+            return Ok(None);
+        };
+        value
+            .as_i64()
+            .filter(|number| range.contains(number))
+            .map(Some)
+            .ok_or_else(|| {
+                bad(&format!(
+                    "{name}'s {key} must be an integer from {} to {}",
+                    range.start(),
+                    range.end()
+                ))
+            })
+    }
+
+    fn string(
+        &mut self,
+        key: &'static str,
+        max: usize,
+        lines: bool,
+    ) -> Result<Option<String>, Failure> {
+        let name = self.name;
+        let Some(value) = self.get(key) else {
+            return Ok(None);
+        };
+        let text = value
+            .as_str()
+            .ok_or_else(|| bad(&format!("{name}'s {key} must be a string")))?;
+        if text.is_empty() || text.len() > max {
+            return Err(bad(&format!("{name}'s {key} holds 1 to {max} bytes")));
+        }
+        let allowed = |c: char| !c.is_control() || (lines && (c == '\n' || c == '\t'));
+        if !text.chars().all(allowed) {
+            return Err(bad(&format!(
+                "{name}'s {key} must not hold control characters"
+            )));
+        }
+        Ok(Some(text.to_string()))
+    }
+
+    /// A node, or a point, or neither when `optional`.
+    fn place(&mut self, optional: bool) -> Result<Option<Place>, Failure> {
+        let name = self.name;
+        let node = self.integer("node", 1..=u32::MAX as i64)?;
+        let snapshot = self.integer("snapshot", 0..=i64::MAX)?;
+        let x = self.integer("x", 0..=MAX_COORDINATE)?;
+        let y = self.integer("y", 0..=MAX_COORDINATE)?;
+        match (node, snapshot, x, y) {
+            (Some(node), snapshot, None, None) => Ok(Some(Place::Node {
+                node: node as u32,
+                snapshot: snapshot.map(|snapshot| snapshot as u64),
+            })),
+            (None, None, Some(x), Some(y)) => Ok(Some(Place::Point {
+                x: x as i32,
+                y: y as i32,
+            })),
+            (None, None, None, None) if optional => Ok(None),
+            _ => Err(bad(&format!(
+                "{name} takes a node (and its snapshot), or x and y"
+            ))),
+        }
+    }
 }
 
 /// An intent for one of the app's own activities: only names and strings, so nothing in it can make
@@ -233,10 +505,9 @@ pub fn parse_request(line: &[u8]) -> Result<Request, (Option<Value>, Failure)> {
             &format!("this app speaks version {VERSION}: requests must hold \"v\":{VERSION}"),
         )));
     }
-    if let Some(key) = object
-        .keys()
-        .find(|key| !matches!(key.as_str(), "v" | "id" | "cmd" | "intent"))
-    {
+    if let Some(key) = object.keys().find(|key| {
+        !matches!(key.as_str(), "v" | "id" | "cmd") && !ARGUMENTS.contains(&key.as_str())
+    }) {
         return Err(refuse(bad(&format!(
             "unknown field {}",
             key.escape_debug()
@@ -246,28 +517,145 @@ pub fn parse_request(line: &[u8]) -> Result<Request, (Option<Value>, Failure)> {
         .get("cmd")
         .and_then(Value::as_str)
         .ok_or_else(|| refuse(bad("cmd must be a string")))?;
-    let intent = |required: bool| match object.get("intent") {
-        Some(intent) => Intent::from_json(intent).map_err(refuse),
-        None if required => Err(refuse(bad(&format!("{name} needs an intent")))),
+    if !Command::NAMES.contains(&name) {
+        return Err(refuse(Failure::new(
+            UNKNOWN_COMMAND,
+            &format!("no command {} in version {VERSION}", name.escape_debug()),
+        )));
+    }
+    let mut arguments = Arguments {
+        name,
+        object: &object,
+        taken: vec!["v", "id", "cmd"],
+    };
+    let command = command(name, &mut arguments).map_err(refuse)?;
+    if let Some(key) = object
+        .keys()
+        .find(|key| !arguments.taken.contains(&key.as_str()))
+    {
+        return Err(refuse(bad(&format!("{name} takes no {key}"))));
+    }
+    Ok(Request { id, command })
+}
+
+/// Every field some command takes.
+const ARGUMENTS: [&str; 15] = [
+    "intent",
+    "max_nodes",
+    "max_depth",
+    "window",
+    "max_size",
+    "node",
+    "snapshot",
+    "x",
+    "y",
+    "text",
+    "dx",
+    "dy",
+    "key",
+    "idle",
+    "timeout_ms",
+];
+
+fn command(name: &str, arguments: &mut Arguments) -> Result<Command, Failure> {
+    let mut intent = |required: bool| match arguments.get("intent") {
+        Some(intent) => Intent::from_json(intent),
+        None if required => Err(bad(&format!("{name} needs an intent"))),
         None => Ok(Intent::default()),
     };
-    let command = match name {
+    Ok(match name {
         "hello" => Command::Hello,
         "status" => Command::Status,
         "start" => Command::Start(intent(false)?),
         "intent" => Command::Intent(intent(true)?),
         "stop" => Command::Stop,
+        "ui" => Command::Ui(Ui {
+            max_nodes: arguments
+                .integer("max_nodes", 1..=MAX_NODES as i64)?
+                .map_or(DEFAULT_NODES, |n| n as u32),
+            max_depth: arguments
+                .integer("max_depth", 1..=MAX_DEPTH as i64)?
+                .map_or(DEFAULT_DEPTH, |n| n as u32),
+        }),
+        "screenshot" => Command::Screenshot(Screenshot {
+            window: arguments
+                .integer("window", 0..=MAX_WINDOWS as i64 - 1)?
+                .map(|n| n as u32),
+            max_size: arguments
+                .integer("max_size", MIN_SHOT_SIZE as i64..=MAX_SHOT_SIZE as i64)?
+                .map_or(DEFAULT_SHOT_SIZE, |n| n as u32),
+        }),
+        "tap" => Command::Tap(
+            arguments
+                .place(false)?
+                .ok_or_else(|| bad("tap needs a place"))?,
+        ),
+        "type" => {
+            let text = arguments
+                .string("text", MAX_TEXT, true)?
+                .ok_or_else(|| bad("type needs a text"))?;
+            Command::Type(Typing {
+                text,
+                node: arguments.place(true)?,
+            })
+        }
+        "scroll" => {
+            let at = arguments
+                .place(false)?
+                .ok_or_else(|| bad("scroll needs a place"))?;
+            let dx = arguments
+                .integer("dx", -MAX_SCROLL..=MAX_SCROLL)?
+                .unwrap_or(0) as i32;
+            let dy = arguments
+                .integer("dy", -MAX_SCROLL..=MAX_SCROLL)?
+                .unwrap_or(0) as i32;
+            if (dx, dy) == (0, 0) {
+                return Err(bad("scroll needs dx or dy, in wheel steps"));
+            }
+            Command::Scroll(Scroll { at, dx, dy })
+        }
+        "back" => Command::Back,
+        "key" => {
+            let key = arguments
+                .string("key", MAX_KEY_NAME, false)?
+                .ok_or_else(|| bad("key needs a key name"))?;
+            if !key
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            {
+                return Err(bad(
+                    "a key is named as KeyEvent.KEYCODE_ names it, such as ENTER",
+                ));
+            }
+            Command::Key(key)
+        }
+        "wait" => {
+            let text = arguments.string("text", MAX_WAIT_TEXT, false)?;
+            let idle = match arguments.get("idle") {
+                None => false,
+                Some(Value::Bool(true)) => true,
+                Some(_) => return Err(bad("wait's idle must be true")),
+            };
+            let condition = match (text, idle) {
+                (Some(text), false) => Condition::Text(text),
+                (None, true) => Condition::Idle,
+                _ => return Err(bad("wait takes a text or idle, one of them")),
+            };
+            let timeout_ms = arguments
+                .integer("timeout_ms", 1..=MAX_WAIT_MS as i64)?
+                .map_or(DEFAULT_WAIT_MS, |n| n as u32);
+            Command::Wait(Wait {
+                condition,
+                timeout_ms,
+            })
+        }
         other => {
-            return Err(refuse(Failure::new(
+            return Err(Failure::new(
                 UNKNOWN_COMMAND,
                 &format!("no command {} in version {VERSION}", other.escape_debug()),
-            )));
+            ));
         }
-    };
-    if !matches!(command, Command::Start(_) | Command::Intent(_)) && object.contains_key("intent") {
-        return Err(refuse(bad(&format!("{name} takes no intent"))));
-    }
-    Ok(Request { id, command })
+    })
 }
 
 /// A request as one line, newline included.
@@ -278,9 +666,7 @@ pub fn request_line(id: Option<&Value>, command: &Command) -> String {
         object.insert("id".into(), id.clone());
     }
     object.insert("cmd".into(), command.name().into());
-    if let Command::Start(intent) | Command::Intent(intent) = command {
-        object.insert("intent".into(), intent.to_json());
-    }
+    object.extend(command.fields());
     format!("{}\n", Value::Object(object))
 }
 

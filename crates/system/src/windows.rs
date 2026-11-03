@@ -108,6 +108,11 @@ fn moved(motion: &Motion, dx: f32, dy: f32) -> Motion {
 }
 
 impl<K: Copy + PartialEq> Stack<K> {
+    /// The windows and where they are, bottom first.
+    pub fn windows(&self) -> Vec<(K, Placement)> {
+        self.windows.clone()
+    }
+
     pub fn placement(&self, key: K) -> Option<Placement> {
         self.windows
             .iter()

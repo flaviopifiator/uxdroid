@@ -107,6 +107,10 @@ docker compose run --rm -T dev bash /work/runtime/framework/compose_smoke.sh
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
 UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_smoke.sh
 UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_input_smoke.sh
+# An agent drives an app: ui, tap, type, wait, screenshot, through uxdroid app and uxdroid mcp; then
+# the same on RustDesk's Flutter widgets in the sandbox.
+docker compose run --rm -T dev bash /work/runtime/framework/agent_smoke.sh
+UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_agent_smoke.sh
 
 # Apps play to the host's PulseAudio or PipeWire server, else ALSA. UXDROID_AUDIO=null plays into
 # silence, and UXDROID_AUDIO=file:<dir> writes each stream's samples to a file.
@@ -199,7 +203,7 @@ The outcome of an intent is `launched`, `new_intent` (the activity's `onNewInten
 | `--data-dir <dir>` | `start` only: the absolute data directory given to `uxdroid install`. Otherwise the profile's: `$XDG_DATA_HOME/uxdroid/data` for `default`, `$XDG_DATA_HOME/uxdroid/profiles/<name>` for any other |
 | `--runtime <dir>` | `start` only: the runtime, found otherwise as for `uxdroid install` |
 
-Exit codes: `0` success, also for `stop` of an app that is not running; `1` the command failed or the app refused it, with its reason; `2` wrong usage; `3` for `status` and `intent`, the app is not running, printed as `<package> is not running`.
+Exit codes: `0` success, also for `stop` of an app that is not running; `1` the command failed or the app refused it, with its reason; `2` wrong usage; `3` for `status`, `intent` and the agent commands below, the app is not running, printed as `<package> is not running`.
 
 Profiles run one package several times at once, each over its own data directory, as separate users of one phone would. The default profile keeps the names above; profile `work` of `com.example.app` has the socket `com.example.app@work.sock` and the log `com.example.app@work.log`, and the launcher learns its profile from `UXDROID_PROFILE`. Install into a profile by naming its directory:
 
@@ -210,6 +214,52 @@ uxdroid app com.example.app status --profile work
 ```
 
 Two profiles must not share a data directory: the second finds the instance lock taken and hands its launch to the first one's socket, which is not its own, so it waits 30 s and fails.
+
+### Drive a running app as an agent
+
+The same socket lets a program, such as an AI agent, read the screen and act on it. `ui` reads every window's views and accessibility nodes in the app, on its main thread; `screenshot` reads the frames the compositor shows; `tap`, `type`, `scroll`, `back` and `key` go through the Wayland seat's own translation, so the app sees a finger and key presses, as from a user:
+
+```sh
+uxdroid app com.example.app ui                     # one line of JSON, below
+uxdroid app com.example.app tap --node 5           # the node's center, from the last ui
+uxdroid app com.example.app type "Hello" --node 6  # taps the field, then types
+uxdroid app com.example.app wait --text "Hello" --timeout 5000
+uxdroid app com.example.app screenshot shot.png
+uxdroid app com.example.app key ENTER
+```
+
+```text
+{"accessibility":true,"nodes":11,"snapshot":3,"truncated":false,"windows":[{"bounds":[0,0,400,700],"focused":true,"index":0,"root":{"bounds":[0,0,400,700],"children":[...{"bounds":[0,56,400,176],"class":"android.widget.Button","clickable":true,"enabled":true,"focusable":true,"id":5,"text":"TAP","visible":true}...],"class":"android.widget.FrameLayout","enabled":true,"id":1,"visible":true},"title":"com.example.app/com.example.app.MainActivity","type":1}]}
+tapped node 5 at 200,116
+typed 5 characters: 5 keys, 0 committed
+{"node":{"bounds":[0,176,400,296],"class":"android.widget.EditText","editable":true,...,"id":6,"text":"Hello","visible":true},"snapshot":4,"waited_ms":12}
+wrote shot.png (400x700)
+pressed ENTER
+```
+
+| Command | Does |
+|---------|------|
+| `ui [--max-nodes <n>] [--max-depth <n>]` | Every window, bottom first, and its tree of nodes: `id` (valid for this snapshot), `class`, `resource_id`, `text`, `description`, `hint`, `bounds` on the display as `[left, top, right, bottom]`, and the flags `visible`, `enabled`, `clickable`, `long_clickable`, `focusable`, `focused`, `checkable`, `checked`, `selected`, `scrollable`, `editable`, `password`, `heading`, present only when true. At most 1000 nodes (5000 asked) and 64 levels (128); `truncated` says when more were left out; text is cut at 1000 characters |
+| `screenshot <file.png> [--window <n>] [--max-size <n>]` | The display as the compositor shows it, or one window by its index in `ui`, as PNG; a longer side than `--max-size` (default 2048, 16 to 4096) is scaled down by a whole factor |
+| `tap <x> <y>`, `tap --node <id> [--snapshot <n>]` | A finger down and up, 40 ms apart, at a display point or a node's center. With `--snapshot`, a node of an older snapshot is refused (`stale_snapshot`) |
+| `type <text> [--node <id>]` | Key presses of the compositor's keymap, with shift where a character needs it, into the focused view, or into a node tapped first. Newline is Enter, tab is Tab. Characters the keymap cannot type are committed through the focused view's `InputConnection`, as an input method does. At most 4096 bytes; other control characters are refused |
+| `scroll <x> <y> \| --node <id> [--dx <n>] [--dy <n>]` | Wheel steps at the point, positive down and right, at most 50 a call |
+| `back`, `key <name>` | The back key, or a key named as `KeyEvent.KEYCODE_<name>`: `ENTER`, `DEL`, `TAB`, `DPAD_DOWN`, `ESCAPE` |
+| `wait --text <text> \| --idle [--timeout <ms>]` | Until a visible node's text, description or hint holds the text, printing it as JSON, or until no window drew for 500 ms. Default 10 s, at most 60 s; past it, the app refuses with `timeout` |
+
+All take `--profile`, and exit `3` when the app is not running.
+
+Nothing an agent sends runs code: text is only typed, nodes are only read, and the commands reach only the app the socket belongs to, as the same user. Some apps report their widgets only while accessibility is on, as Flutter does through its accessibility bridge, so the app's process registers an in-process `IAccessibilityManager` the first time an agent asks for `ui` and tells the app that accessibility is on, with touch exploration off; when the last connection that asked closes, it is off again. The first `ui` on a connection waits up to 3 s for the nodes to settle (about 300 ms on the samples). One-shot `uxdroid app` commands each open their own connection, so each `ui` turns it on anew; `uxdroid mcp` keeps one connection per app.
+
+#### An MCP server for agents
+
+`uxdroid mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio whose tools are these commands: `list`, `status`, `start`, `stop`, `intent`, `ui`, `screenshot`, `tap`, `type`, `scroll`, `back`, `key` and `wait`, each taking the app's `package` (and `profile`) besides the arguments of the protocol command (`node`, `snapshot`, `x`, `y`, `text`, `dx`, `dy`, `key`, `idle`, `timeout_ms`, `max_nodes`, `max_depth`, `window`, `max_size`, and the intent fields with `data_dir` for `start`). `screenshot` returns image content. One server serves every app, so a client is set up once and an agent can move between apps. It speaks MCP from 2024-11-05 to 2025-11-25 through `initialize`, and 2026-07-28 through `server/discover`. To add it to Claude Code:
+
+```sh
+claude mcp add uxdroid -- uxdroid mcp
+```
+
+Other clients take the same command, `uxdroid mcp`, as a stdio server. `uxdroid` must be the installed program, next to `libuxdroid_system.so`, with `XDG_RUNTIME_DIR` set as for `uxdroid app`.
 
 ### Run an app as a systemd user service
 

@@ -24,9 +24,24 @@ const IDLE: Duration = Duration::from_secs(30);
 /// How long a shutdown waits for connections to finish what they are answering.
 const DRAIN: Duration = Duration::from_secs(2);
 
+/// What a server knows of one connection while it lasts.
+#[derive(Debug, Default)]
+pub struct Session {
+    /// The connection asked for the app's accessibility nodes, which stay on while it is open.
+    pub agent: bool,
+}
+
 /// Runs the commands a server reads. Called on connection threads, so it must be shareable.
 pub trait Handler: Send + Sync {
     fn handle(&self, command: Command) -> Result<Value, Failure>;
+
+    /// `handle`, for a command read on the connection of `session`.
+    fn handle_in(&self, _session: &mut Session, command: Command) -> Result<Value, Failure> {
+        self.handle(command)
+    }
+
+    /// The connection of `session` closed.
+    fn ended(&self, _session: &Session) {}
 }
 
 /// What `hello` reports without asking the app.
@@ -519,12 +534,20 @@ pub(super) fn send_all(stream: &UnixStream, mut bytes: &[u8]) -> std::io::Result
 }
 
 fn serve_connection(stream: UnixStream, info: &Info, allowed_uid: u32, handler: &dyn Handler) {
-    converse(&stream, info, allowed_uid, handler);
+    let mut session = Session::default();
+    converse(&stream, info, allowed_uid, handler, &mut session);
+    handler.ended(&session);
     // The server keeps a copy of this socket to interrupt it, so closing ours would not end it.
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-fn converse(stream: &UnixStream, info: &Info, allowed_uid: u32, handler: &dyn Handler) {
+fn converse(
+    stream: &UnixStream,
+    info: &Info,
+    allowed_uid: u32,
+    handler: &dyn Handler,
+    session: &mut Session,
+) {
     if peer_uid(stream) != Some(allowed_uid) {
         let failure = Failure::new(
             protocol::NOT_ALLOWED,
@@ -537,7 +560,7 @@ fn converse(stream: &UnixStream, info: &Info, allowed_uid: u32, handler: &dyn Ha
     let mut reader = BufReader::new(stream);
     loop {
         let answer = match protocol::read_line(&mut reader) {
-            Ok(Some(line)) => answer(&line, info, handler),
+            Ok(Some(line)) => answer(&line, info, handler, session),
             Ok(None) | Err(LineError::Io(_)) => return,
             Err(LineError::TooLong) => {
                 let failure = Failure::new(
@@ -554,7 +577,7 @@ fn converse(stream: &UnixStream, info: &Info, allowed_uid: u32, handler: &dyn Ha
     }
 }
 
-fn answer(line: &[u8], info: &Info, handler: &dyn Handler) -> String {
+fn answer(line: &[u8], info: &Info, handler: &dyn Handler, session: &mut Session) -> String {
     let request = match protocol::parse_request(line) {
         Ok(request) => request,
         Err((id, failure)) => return protocol::response_error(id.as_ref(), &failure),
@@ -567,7 +590,7 @@ fn answer(line: &[u8], info: &Info, handler: &dyn Handler) -> String {
             "package": info.package,
             "pid": info.pid,
         })),
-        command => handler.handle(command),
+        command => handler.handle_in(session, command),
     };
     match result {
         Ok(result) => protocol::response_ok(id, result),

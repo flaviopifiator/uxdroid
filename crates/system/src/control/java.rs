@@ -13,9 +13,11 @@ use std::time::{Duration, Instant};
 use jni_sys::{JNIEnv, jboolean, jclass, jint, jlong, jobjectArray, jstring};
 use serde_json::Value;
 
+use super::agent::Agent;
 use super::client::{self, CallError};
 use super::protocol::{self, Command, Failure, Intent};
 use super::server::{self, Bound, Handler, Info, Server};
+use crate::surface::DisplaySeat;
 use crate::{Method, java_string, new_string, register, throw};
 
 /// How long a command waits for the main thread, which may be busy drawing or stuck.
@@ -200,14 +202,17 @@ fn start(package: &str) -> Result<jint, String> {
         package: package.to_string(),
         pid: std::process::id(),
     };
-    let server = server::serve(listener, info, super::euid(), queue.clone())
+    // Agent commands act through the display's seat; the rest, and `ui`, go to the main Looper.
+    let agent = Arc::new(Agent::new(queue.clone(), Arc::new(DisplaySeat)));
+    let server = server::serve(listener, info, super::euid(), agent)
         .map_err(|error| format!("cannot start the control thread: {error}"))?;
     let raw = queue.event.as_raw_fd();
     *control = Some((server, queue));
     Ok(raw)
 }
 
-/// `static native String[] take()`: the next command as {sequence, name, intent JSON or null}, or null.
+/// `static native String[] take()`: the next command as {sequence, name, arguments JSON or null}, or
+/// null: a start's or intent's intent, or another command's fields.
 unsafe extern "system" fn take(env: *mut JNIEnv, _class: jclass) -> jobjectArray {
     let Some(queue) = lock(&CONTROL).as_ref().map(|(_, queue)| queue.clone()) else {
         return std::ptr::null_mut();
@@ -228,14 +233,14 @@ unsafe extern "system" fn take(env: *mut JNIEnv, _class: jclass) -> jobjectArray
     if !lock(&queue.pending).is_empty() {
         queue.signal();
     }
-    let intent = match &command {
+    let arguments = match &command {
         Command::Start(intent) | Command::Intent(intent) => Some(intent.to_json().to_string()),
-        _ => None,
+        other => Some(Value::Object(other.fields()).to_string()),
     };
     let fields = [
         Some(sequence.to_string()),
         Some(command.name().to_string()),
-        intent,
+        arguments,
     ];
     // SAFETY: ART passes a valid environment; String is a boot class.
     unsafe {

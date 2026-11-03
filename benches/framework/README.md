@@ -52,6 +52,19 @@ docker compose run --rm -T dev bash /work/benches/framework/service.sh
 
 "From the APK" starts the launcher on the APK file, as every start did before `uxdroid install` prepared apps: it parses the manifest, makes a stub for every framework native, and runs the app's DEX uncompiled. "Installed" starts it on `<data>/app/<package>/base.apk` after `uxdroid install` with the framework, which compiled the DEX, recorded the manifest and wrote the default bodies' library.
 
+## Agent control
+
+2026-11-03, 20 runs per row, `run.sh` twice, alternating: the base commit (623ac3e) with its runtime, then this branch with its runtime copy mounted at `/runtime/art`, from ext4. Median of each run, base / branch. An app with no agent attached runs no agent code: the `ui` service and accessibility register only when an agent asks, and the remaining cost is one counter increment per presented frame.
+
+| Workload | Warm time | Peak RSS (warm) | Private dirty (warm) |
+|----------|-----------|-----------------|----------------------|
+| `FrameworkSmoke` | 77.3, 79.4 / 74.4, 73.8 ms | 116.7, 116.8 / 116.7, 116.8 MiB | 10.9 / 10.9 MiB |
+| Sample to first frame, from the APK | 139.4, 139.6 / 139.4, 139.5 ms | 147.4, 147.4 / 147.5, 147.7 MiB | 19.6 / 19.6 MiB |
+| Sample to first frame, installed | 123.6, 145.2 / 123.7, 123.3 ms | 142.0, 141.8 / 142.2, 142.2 MiB | 19.1 / 19.1 MiB |
+| Milestone 3, `uxdroid run` | 18.4, 18.7 / 17.8, 17.7 ms | 31.7 / 31.7 MiB | 5.0 / 5.0 MiB |
+
+Cold times moved by up to 500 ms between runs of the same build (sample installed: 1242 and 763 ms base, 728 and 759 ms branch), which is the shared disk, not the change. The cost of the calls themselves, from `runtime/framework/agent_smoke.sh` with `RUNS=50` on one connection to the input sample: `ui` 0.66 ms median (11 nodes, 1.8 KB), `screenshot` 2.2 ms (400x700 PNG, 19 KB), `tap` 40 ms (the finger is held 40 ms), and the first `ui` of a connection, which turns accessibility on and waits for the nodes to settle, 303 ms. RustDesk was not measured with the bench scripts; its agent smoke shows its 36-node `ui` working. No competitor offers agent control in this environment, so none was measured.
+
 ## Install-time preparation
 
 2026-11-03, 30 runs per row, from ext4, the same method as below, measured in the `art-prep` runtime copy (its boot image, framework and system odex recompiled at that path, so ART runs with its image). Median, interquartile range in brackets. Memory is from the warm rows. The machine was not idle: other builds and tests ran beside these (load average 2 to 6), so cold times are wider than in the table below, and three runs of the same unchanged row, `FrameworkSmoke` warm, read 74.0, 84.6 and 84.2 ms.
