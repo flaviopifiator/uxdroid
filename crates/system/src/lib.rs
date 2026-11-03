@@ -13,6 +13,7 @@ macro_rules! f {
 }
 
 mod compose;
+pub mod default_library;
 pub mod defaults;
 mod handles;
 mod java;
@@ -212,6 +213,61 @@ unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: 
     bound
 }
 
+/// `static native int writeDefaults(String list, String library)`: writes the library of default
+/// bodies for every listed native, made once at install time, and returns how many it holds.
+unsafe extern "system" fn write_defaults(
+    env: *mut JNIEnv,
+    _class: jclass,
+    list: jstring,
+    library: jstring,
+) -> jint {
+    // SAFETY: ART passes a valid environment and strings or null.
+    let (list, library) = unsafe { (java_string(env, list), java_string(env, library)) };
+    let result = match (list, library) {
+        (Some(list), Some(library)) => std::fs::read_to_string(&list)
+            .map_err(|error| format!("{list}: {error}"))
+            .and_then(|text| {
+                let natives = defaults::parse(&text);
+                std::fs::write(&library, default_library::build(&natives))
+                    .map_err(|error| format!("{library}: {error}"))
+                    .map(|()| natives.len() as jint)
+            }),
+        _ => Err("no list or library path".to_string()),
+    };
+    result.unwrap_or_else(|error| {
+        // SAFETY: as above.
+        unsafe { throw(env, c"java/lang/IllegalStateException", &error) };
+        0
+    })
+}
+
+/// `static native int attachDefaults(String library, String list)`: connects a library from
+/// `writeDefaults`, which `System.load` loaded, to this one, and returns how many bodies it holds.
+unsafe extern "system" fn attach_defaults(
+    env: *mut JNIEnv,
+    _class: jclass,
+    library: jstring,
+    list: jstring,
+) -> jint {
+    // SAFETY: ART passes a valid environment and strings or null.
+    let (library, list) = unsafe { (java_string(env, library), java_string(env, list)) };
+    #[cfg(target_arch = "x86_64")]
+    let result = match (library, list) {
+        (Some(library), Some(list)) => default_library::attach(&library, &list),
+        _ => Err("no library or list path".to_string()),
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let result: Result<usize, String> = {
+        let _ = (library, list);
+        Err("install-time default bodies are x86_64 code".to_string())
+    };
+    result.map(|count| count as jint).unwrap_or_else(|error| {
+        // SAFETY: as above.
+        unsafe { throw(env, c"java/lang/IllegalStateException", &error) };
+        0
+    })
+}
+
 /// `static native void bindSystem(String buildProp)`: loads properties, then replaces default bodies
 /// with this library's natives.
 unsafe extern "system" fn bind_system(env: *mut JNIEnv, _class: jclass, build_prop: jstring) {
@@ -251,11 +307,21 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
         if ((**vm).v1_2.GetEnv)(vm, &mut env, JNI_VERSION_1_6) != JNI_OK {
             return JNI_ERR;
         }
-        let methods: [Method; 2] = [
+        let methods: [Method; 4] = [
             (
                 c"bindDefaults",
                 c"(Ljava/lang/String;)I",
                 bind_defaults as *mut c_void,
+            ),
+            (
+                c"writeDefaults",
+                c"(Ljava/lang/String;Ljava/lang/String;)I",
+                write_defaults as *mut c_void,
+            ),
+            (
+                c"attachDefaults",
+                c"(Ljava/lang/String;Ljava/lang/String;)I",
+                attach_defaults as *mut c_void,
             ),
             (
                 c"bindSystem",

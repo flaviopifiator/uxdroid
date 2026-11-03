@@ -91,11 +91,51 @@ struct Reported {
     seen: Vec<AtomicBool>,
 }
 
+impl Reported {
+    fn new(natives: &[Native]) -> Self {
+        Reported {
+            names: natives
+                .iter()
+                .map(|n| format!("{}.{}{}", n.class.replace('/', "."), n.name, n.signature))
+                .collect(),
+            seen: natives.iter().map(|_| AtomicBool::new(false)).collect(),
+        }
+    }
+}
+
+/// Names for the stubs made here, at startup.
 static REPORTED: OnceLock<Reported> = OnceLock::new();
+/// The list an install-time library of default bodies was made from, read on its first call.
+static LIST: OnceLock<String> = OnceLock::new();
+static LISTED: OnceLock<Reported> = OnceLock::new();
+
+/// Names the natives of an install-time library from `list` when one is first called.
+pub fn name_from(list: &str) {
+    let _ = LIST.set(list.to_string());
+}
+
+fn reported() -> Option<&'static Reported> {
+    REPORTED.get().or_else(|| {
+        let list = LIST.get()?;
+        Some(LISTED.get_or_init(|| {
+            Reported::new(&parse(&std::fs::read_to_string(list).unwrap_or_default()))
+        }))
+    })
+}
+
+/// The functions an install-time library's hooks call, in its order: report, new object, free
+/// function.
+pub fn hook_functions() -> [usize; 3] {
+    [
+        first_call as extern "C" fn(u32) as usize,
+        new_object as extern "C" fn(u32) -> usize as usize,
+        free_function as extern "C" fn(u32) -> usize as usize,
+    ]
+}
 
 /// Called by a stub with its method's index.
 extern "C" fn first_call(index: u32) {
-    let Some(reported) = REPORTED.get() else {
+    let Some(reported) = reported() else {
         return;
     };
     let index = index as usize;
@@ -158,13 +198,8 @@ fn forwarding_stub(index: u32, target: u64) -> [u8; STUB_SIZE] {
 /// The memory lives as long as the process. Call once.
 #[cfg(target_arch = "x86_64")]
 pub fn stubs(natives: &[Native]) -> Result<Vec<usize>, String> {
-    let names = natives
-        .iter()
-        .map(|n| format!("{}.{}{}", n.class.replace('/', "."), n.name, n.signature))
-        .collect();
-    let seen = natives.iter().map(|_| AtomicBool::new(false)).collect();
     REPORTED
-        .set(Reported { names, seen })
+        .set(Reported::new(natives))
         .map_err(|_| "default bodies were already made".to_string())?;
     if natives.is_empty() {
         return Ok(Vec::new());

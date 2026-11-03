@@ -99,14 +99,34 @@ public final class Boot {
      * @param systemLibrary path of libuxdroid_system.so
      * @return how many natives got a default body
      */
-    public static synchronized int start(String root, String systemLibrary) {
+    public static int start(String root, String systemLibrary) {
+        return start(root, systemLibrary, null);
+    }
+
+    /**
+     * @param defaultsLibrary the library of default bodies {@code uxdroid install} made from the same
+     *     runtime's list, or null. ART binds its bodies by name when a native nobody registered is first
+     *     called, so nothing is bound here; without it, every listed native gets a stub now.
+     * @return how many natives have a default body
+     */
+    public static synchronized int start(String root, String systemLibrary, String defaultsLibrary) {
         if (started) {
             throw new IllegalStateException("the framework is already started");
         }
         System.load(systemLibrary);
         // Default bodies can be made once per process, so a start that failed later keeps them.
         if (defaults < 0) {
-            defaults = Natives.bindDefaults(root + "/framework/natives.txt");
+            String list = root + "/framework/natives.txt";
+            if (defaultsLibrary != null) {
+                try {
+                    System.load(defaultsLibrary);
+                    defaults = Natives.attachDefaults(defaultsLibrary, list);
+                } catch (UnsatisfiedLinkError | IllegalStateException e) {
+                    System.err.println("uxdroid: default bodies of " + defaultsLibrary + " not used, made now instead: "
+                            + e.getMessage());
+                }
+            }
+            if (defaults < 0) defaults = Natives.bindDefaults(list);
             defaultsRoot = root;
         } else if (!defaultsRoot.equals(root)) {
             throw new IllegalStateException("default bodies came from " + defaultsRoot + ", not " + root);
