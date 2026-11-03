@@ -9,7 +9,7 @@ uxdroid runs Android APKs as ordinary Linux processes: no container, no VM, no A
 | APK tooling | Parse the APK, plan execution, compile DEX ahead of time, generate the launcher | Rust |
 | Native bridge | Load bionic-linked `.so` files under glibc, translate foreign ABIs | Rust |
 | Managed runtime | Execute DEX as machine code | ART (C++, reused) |
-| Platform | `android.*` API: Java classes on the boot classpath, native methods over JNI, backed by Wayland, Vulkan/EGL and PipeWire | Java/Kotlin + Rust |
+| Platform | `android.*` API: AOSP's framework, with the natives and system services below it implemented over Wayland, Vulkan/EGL and PipeWire | Java/Kotlin + Rust |
 
 ## What "native executable" means
 
@@ -68,6 +68,31 @@ ART's host build links against a glibc 2.17 sysroot and needs no bionic, so `dal
 `uxdroid run` replaces itself with `dalvikvm`. ART tries glibc's `dlopen` on an app's native library, which fails for anything linked to bionic's `libc.so`, then falls back to `crates/nativebridge`, a Rust library that loads it with the bridge. CPU and calling convention match, so a JNI call goes straight to the function's address with no translation. This same hook is where `arm64-v8a` translation will attach. `crates/platform` holds the native half of the `android.*` classes in `platform/java`. The classes are on the class path for now, and will move to the boot class path when there are enough to be worth compiling into the image.
 
 The window, audio and GPU stay behind this layer, so a later macOS port does not reach into the rest.
+
+### The platform is AOSP's own framework
+
+Writing the `android.*` API ourselves would never end. A spike ran AOSP's real Android 16 framework on our host ART instead: a framework `TextView` measured itself and drew text through the real Skia and Minikin, reading the real `framework-res.apk`. What the framework expects from below is much narrower than its public API:
+
+| Below the framework | Who provides it |
+|---------------------|-----------------|
+| Graphics, text, resources, input events, `MessageQueue` | AOSP's host `libandroid_runtime`, built for glibc |
+| Natives nobody implemented yet | A default body that returns the type's zero, bound at install time and logged when called |
+| Logging, properties, clocks, local `Binder` objects | Our natives |
+| System services | In-process proxies of their AIDL interfaces, with no IPC; unimplemented calls return defaults and are counted |
+
+The spike measured 28 MiB of private dirty memory per process. Most of the rest was clean framework pages, shared between processes.
+
+### Guest architecture stays inside the native bridge
+
+The platform is built once, for the host. Only an app's own `.so` files have a guest ABI, and only the bridge knows which one. These rules let `arm64-v8a`, and later `armeabi-v7a`, arrive without changes elsewhere:
+
+1. ART, the framework, the services and our natives have a single host build. Nothing outside `crates/bridge` and `crates/nativebridge` depends on the app's ABI.
+2. Every function we expose to app native code, such as `libandroid`, `liblog`, EGL or OpenSL ES, is declared in a machine-readable signature table next to its implementation. Direct loading binds the table's addresses. A translator generates guest-to-host trampolines from the same table.
+3. App native code reaches the platform only through JNI and those functions. ART passes each JNI method's shorty to `get_trampoline`, which is where a translator wraps guest code.
+4. Calling-convention shortcuts stay on the host side. The default bodies above are called only by host ART, never by guest code.
+5. Install time picks the ABI: the host's when the APK has it, otherwise a guest ABI the translator supports. The choice is recorded with the install.
+
+`armeabi-v7a` also needs pointer and struct conversion between 32-bit guest code and the 64-bit host at every crossing. That is the translator's job and is not designed yet.
 
 ## Roadmap
 
