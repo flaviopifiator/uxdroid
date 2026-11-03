@@ -19,66 +19,42 @@ docker compose run --rm -T dev bash /work/benches/art/first_frame.sh
 
 ## Last result
 
-2026-11-03, 50 runs each, three rounds on one idle x86_64 machine with 12 cores; the table shows the middle round. Median time to first output, and the highest peak memory across runs. Both runtimes get the same options, and `run.sh` evicts both from the page cache first. Peak memory for `Compute` varies by a few MiB between sets of runs, so differences that small mean little.
+2026-11-03, 30 runs each, measured twice on one idle x86_64 machine with 12 cores, with both runtimes evicted from the page cache first. Median time to first output, and the highest peak memory across runs. Both runtimes get the same options, and every row printed the expected output.
 
 | Program | `uxdroid` | `uxdroid`, no JIT | `art_standalone` | `art_standalone`, no JIT | `art_standalone`, no JIT, `ulimit -s 256` |
 |---------|-----------|-------------------|------------------|--------------------------|-------------------------------------------|
-| `Hello` | 12.1 ms (26.6 MiB) | **11.9 ms (26.4 MiB)** | 18.9 ms (32.0 MiB) | 15.8 ms (30.1 MiB) | 10.8 ms (30.1 MiB) |
-| `Compute` | 36.9 ms (34.9 MiB) | 36.6 ms (34.0 MiB) | 42.2 ms (38.2 MiB) | 39.5 ms (35.4 MiB) | 33.6 ms (34.7 MiB) |
-| Installed | 147 MiB | | 115 MiB, including its 68 MiB generated boot image | | |
+| `Hello` | 12.7 ms (27.9 MiB) | 12.3 ms (27.6 MiB) | 19.0 ms (32.1 MiB) | 16.0 ms (30.1 MiB) | 10.6 ms (30.1 MiB) |
+| `Compute` | 37.5 ms (36.5 MiB) | 36.9 ms (37.7 MiB) | 42.4 ms (35.6 MiB) | 39.1 ms (33.9 MiB) | 34.1 ms (33.9 MiB) |
+| `Workload` | 38.7 ms (46.5 MiB) | 38.7 ms (46.6 MiB) | 90.5 ms (61.8 MiB) | 80.8 ms (60.1 MiB) | 75.5 ms (60.1 MiB) |
+| `Holdout` | 31.7 ms (42.7 MiB) | 32.8 ms (41.7 MiB) | 43.0 ms (52.7 MiB) | 37.1 ms (50.6 MiB) | 31.8 ms (50.9 MiB) |
+| Installed | 150 MiB | | 115 MiB, including its 68 MiB generated boot image | | |
 
-**uxdroid now wins with the same options**: 25% less time and 12% less peak memory on `Hello`, and 7% less time on `Compute`, whose memory is level within its noise. **The competitor can still win on time with a smaller stack limit**: its launcher has the same stack cost that uxdroid removed, and with a 256 KiB main thread it starts 10% faster than uxdroid, using 14% more memory on `Hello`. Its installation is smaller.
+`Workload` runs library code a real app reaches at startup, and the boot profile comes from it, so its result is flattering. `Holdout` uses library code the profile never saw, and is the fairer test.
 
-`uxdroid run` shows its first frame in a median of 15.3 ms, from `first_frame.sh`, down from 24.4 ms. There is no competitor figure for that: Android Translation Layer's own launcher was not built.
+**uxdroid wins three programs and loses `Compute` on memory.** With the JIT on, as `uxdroid run` works, it takes 33% less time on `Hello`, 12% on `Compute`, 57% on `Workload` and 26% on `Holdout`. It uses less peak memory on `Hello`, `Workload` and `Holdout`, by 13 to 25%, and 3% more on `Compute`, which varies by a few MiB.
 
-### Where the time went
+**Where the competitor still wins:**
 
-On a 21 ms start, about 7 ms was page faults. ART protects the low end of each thread's stack. The process's first thread has a stack the kernel grows on demand, so ART touches all 8 MiB of it, faulting twice per page, and then returns it. `perf` counted 6011 faults per run, and 1983 without this.
+- With a 256 KiB main thread and no JIT, it starts `Hello` 14% faster than uxdroid without JIT, and is faster on `Compute`. `Holdout` ties. That main thread has about 1/34 of the usual depth.
+- Without JIT and at the default stack, it uses 10% less memory on `Compute`.
+- Its installation is smaller.
+- On private dirty memory, `Hello` favors it: 3.3 MiB against 2.2 MiB, without JIT, in an independent measurement. RSS and PSS favor uxdroid.
 
-`patches/art-0001-dalvikvm-main-thread-stack.patch` runs the runtime on a thread with a mapped 8 MiB stack. It needs care: if the process already has a second thread, each `membarrier` registration waits for an RCU grace period of several milliseconds, which at first cancelled the whole gain. The launcher therefore registers before it creates the thread.
+Most of the win on `Hello` is the stack patch. The competitor could apply the same idea.
 
-### Memory
+`uxdroid run` shows its first frame in a median of 14.9 ms, from `first_frame.sh`, down from 24.4 ms. There is no competitor figure for that, because Android Translation Layer's own launcher was not built.
 
-From `/proc/self/smaps` on a small probe, without JIT. Most of the resident size of a library is shared file pages, which `ru_maxrss` counts.
+### What helped, and what it cost
 
-| Mapping | Before | Now | `art_standalone` |
-|---------|--------|-----|------------------|
-| `libart.so` file | 17.9 MB | 13.0 MB | 9.1 MB, plus 4.3 MB of separate compiler |
-| `libart.so` resident | 8.4 MiB | 7.1 MiB | 6.2 MiB |
-| `boot.art` dirty | 1.3 MiB | 1.3 MiB | 0.2 MiB |
+| Change | Effect | Cost |
+|--------|--------|------|
+| Runtime on a mapped stack | About 7 ms off startup: ART touched the first thread's whole 8 MiB stack | `ulimit -s` no longer raises the main stack; one more thread; `ulimit -v` near 700 MB now hangs where it used to abort, and lower values hang either way |
+| `-Xnorelocate` | Private dirty memory 19.9 to 11.7 MiB, and less startup | None measured; the competitor gains too |
+| No large object space, heap growth of 1 | `Compute` 73 to 46 ms | Unmeasured on apps with large objects; the competitor gains too |
+| Boot image from a realistic profile | Image 33 to 9 MiB; `Holdout` 54.6 to 31.2 ms against the smaller first profile, 42.8 against 53.9 MiB for a full image | A full image is about 6 ms faster on `Holdout`, and uses 11 MiB more |
+| `ART_HOST_CODEGEN_ARCHS="x86 x86_64"` | Smaller runtime | `dex2oat` cannot compile for ARM. Milestone 4 translates native libraries and not DEX, so it does not need that |
 
-`libart.so` includes the JIT compiler, and it no longer includes the ARM and RISC-V code generators.
-
-### What helped in this round
-
-Each change measured against the previous one, three rounds, same storage, page cache evicted.
-
-| Change | `Hello` | `Compute` | Cost |
-|--------|---------|-----------|------|
-| Mapped stack in the launcher | 20.8 to 13.6 ms; peak equal, since the runtime reaches its peak later | 45.7 to 38.4 ms | None measured. Stack depth 65378 to 65365 frames |
-| `ART_HOST_CODEGEN_ARCHS="x86 x86_64"` | 13.9 to 13.4 ms; 31.4 to 29.9 MiB | Within noise | `dex2oat` can no longer compile for ARM |
-| ICU, XML, TLS and crypto libraries out of the boot profile | 13.4 to 12.4 ms; 29.9 to 27.2 MiB | About 1.5 ms less | A program using those libraries takes 7% longer than it otherwise would, and uses 2.4 MiB less |
-| All three together | 20.9 to 12.1 ms; 32.1 to 26.9 MiB | 45.5 to 36.8 ms; about 40 to 34 MiB | The same program still ends up faster: 56.9 to 52.6 ms, 44.5 to 39.8 MiB |
-
-### What did not help
-
-| Tried | Result |
-|-------|--------|
-| `-Os` for ART | 0.5 MiB less, and 2% slower on the library program. Not adopted: the runtime's speed on long-running programs is unmeasured |
-| `--single-image` boot image | 1.2 ms and 1 MiB less, but on host `dex2oat` demands `--force-allow-oj-inlines`, and states that binaries built with it must not be distributed. Not adopted |
-| `x86_64` as the only code generator | Does not compile: it shares nodes with `x86` |
-| `--dirty-image-objects` | Not tried. `ClassLinker::AddImageSpace` writes to every boot image method that has code, to set its code pointer, which accounts for most of the faults there and which that option does not address |
-
-### What already helped
-
-| Change | Effect, measured from the same storage |
-|--------|----------------------------------------|
-| `-Xnorelocate` | `Hello` 26.8 to 20.2 ms; private dirty 19.9 to 11.7 MiB |
-| Heap limits | `Compute` peak 72 to about 50 MB |
-| No large object space, heap growth of 1 | `Compute` 73 to 46 ms. The competitor gains from it too, 73 to 39 ms |
-| Boot image from a profile | Image 33 to 9.7 MiB; peak about 12% less on `Hello` and 7 to 12% on `Compute`, at equal time |
-
-The profile comes from one small program. A real app uses other library code, which then runs through the JIT, and that cost has not been measured.
+Boot image dirty pages remain 1.3 MiB against 0.2 MiB for the competitor, and `libart.so` resident 7.1 against 6.2 MiB. `-Os` saved 0.5 MiB at 2% slower speed and was rejected. `--single-image` was rejected because `dex2oat` warns against distributing what it builds.
 
 ## Limits
 
@@ -90,6 +66,7 @@ The profile comes from one small program. A real app uses other library code, wh
 - Docker does not explain the results. With identical files on the same storage, `Hello` took 25.0 ms in the container and 32.6 ms directly on the host, with peak memory within 1%. An empty process cost the same on both, and the host's environment variables, timezone and locale made no difference. The cause of the extra host time was not found; its glibc differs from the container's. Absolute times on another system will differ.
 - Peak memory depends on storage: the same image read about 3 MB lower from `tmpfs` than from disk. An earlier claim of beating the competitor on memory came from comparing across them, and was wrong.
 - Peak memory also depends on how the page cache holds a file. Identical bytes read 2 to 6 MiB higher when freshly written than when read back, so `run.sh` evicts both runtimes before measuring. Numbers from before this, in the tables above and in the project log, are not directly comparable.
-- These are two small programs. They say nothing about real apps, which do not run yet.
+- These are small programs. They say nothing about real apps, which do not run yet.
+- An earlier version of this page claimed a general win from `Hello` and `Compute` alone. A verifier found uxdroid 39% slower on a library-heavy program, because the first profile compiled only 1182 methods. `Workload` and `Holdout` joined the benchmark as a result.
 - Waydroid and the Android emulator are not measured: they need kernel modules or a VM.
 - The competitor stays in a Docker volume, because its license is undetermined.

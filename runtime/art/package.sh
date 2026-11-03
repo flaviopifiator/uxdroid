@@ -50,10 +50,10 @@ NOTICES
 
 JDK=$(ls -d prebuilts/jdk/jdk*/linux-x86 | sort -V | tail -1)
 WORK=$(mktemp -d)
-for program in Hello Compute NativeCall ProfileWork Launcher; do
+for program in Hello Compute NativeCall ProfileWork Launcher Workload Holdout; do
     "$JDK/bin/javac" --release 8 -d "$WORK/$program" "/work/runtime/art/samples/$program.java" 2>&1 | { grep -v "warning:" || true; }
     "$JDK/bin/java" -cp prebuilts/r8/r8.jar com.android.tools.r8.D8 --min-api 26 \
-        --output "$RUNTIME/samples/$program.jar" "$WORK/$program/$program.class"
+        --output "$RUNTIME/samples/$program.jar" $(find "$WORK/$program" -name '*.class')
 done
 du -sh "$RUNTIME"
 ls "$RUNTIME/notices" | wc -l

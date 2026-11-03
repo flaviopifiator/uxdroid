@@ -8,8 +8,8 @@ DEX_ARGS=()
 for jar in "${JARS[@]}"; do
     DEX_ARGS+=("--dex-file=$RUNTIME/javalib/$jar.jar" "--dex-location=$RUNTIME/javalib/$jar.jar")
 done
-# Compiling only what the profile lists shrank the image from 33 to 9.7 MiB and peak memory by
-# 11 to 14%, with no slower startup on the measured programs. Everything else runs through the JIT.
+# Compiling only what the profile lists shrinks the image from 33 to 9 MiB and lowers peak memory.
+# Everything else runs through the JIT.
 HOST=/aosp/out/host/linux-x86
 APKS=()
 for jar in "${JARS[@]}"; do
@@ -36,7 +36,7 @@ compiled=$(LD_LIBRARY_PATH="$HOST/lib64" "$HOST/bin/oatdump" --oat-file="$IMAGE_
     | grep -cE "CODE: \(code_offset=0x0*[1-9a-f]" || true)
 echo "compiled boot methods: $compiled"
 [ "$compiled" -ge "$MIN_COMPILED_METHODS" ] || { echo "FAIL: too few compiled boot methods"; exit 1; }
-for program in Hello Compute NativeCall; do
+for program in Hello Compute NativeCall Workload Holdout; do
     "$RUNTIME/bin/dex2oat64" --compiler-filter=speed --instruction-set=x86_64 --host \
         --android-root="$RUNTIME" --runtime-arg -Xbootclasspath:"$BOOT" --runtime-arg -Xbootclasspath-locations:"$BOOT" \
         --boot-image="$RUNTIME/framework/boot.art" --dex-file="$RUNTIME/samples/$program.jar" \
