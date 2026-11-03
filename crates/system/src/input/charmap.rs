@@ -12,8 +12,8 @@
 use std::sync::{Arc, RwLock};
 
 use super::keys::{
-    self, Kind, Levels, META_ALT_LEFT_ON, META_ALT_RIGHT_ON, META_CAPS_LOCK_ON, META_CTRL_ON,
-    META_META_ON, META_SHIFT_LEFT_ON, META_SHIFT_ON, TABLE,
+    self, Kind, Levels, META_ALT_LEFT_ON, META_ALT_ON, META_ALT_RIGHT_ON, META_CAPS_LOCK_ON,
+    META_CTRL_ON, META_META_ON, META_SHIFT_LEFT_ON, META_SHIFT_ON, TABLE,
 };
 use super::xkb::Keymap;
 
@@ -21,6 +21,8 @@ use super::xkb::Keymap;
 pub const FULL: i32 = 4;
 /// `KeyEvent.KEYCODE_SHIFT_LEFT`.
 const KEYCODE_SHIFT_LEFT: i32 = 59;
+/// `KeyEvent.KEYCODE_ALT_RIGHT`, AltGr.
+const KEYCODE_ALT_RIGHT: i32 = 58;
 
 /// Characters per Android key code.
 #[derive(Debug, Default, PartialEq)]
@@ -149,9 +151,10 @@ impl Charmap {
     }
 
     /// Key presses that type `chars`, as (action, key code, meta state), or `None` when one cannot
-    /// be typed: `nativeGetEvents`.
+    /// be typed: `nativeGetEvents`. Shift, AltGr (the right alt) or both are held as each needs.
     pub fn events(&self, chars: &[u16]) -> Option<Vec<(i32, i32, i32)>> {
         let shift = META_SHIFT_ON | META_SHIFT_LEFT_ON;
+        let altgr = META_ALT_ON | META_ALT_RIGHT_ON;
         let mut events = Vec::new();
         for wanted in chars {
             let typed = |meta: i32| {
@@ -160,15 +163,30 @@ impl Charmap {
                     .find(|(code, _)| self.character(*code, meta) == *wanted && *wanted != 0)
                     .map(|(code, _)| *code)
             };
-            if let Some(code) = typed(0) {
-                events.push((keys::ACTION_DOWN, code, 0));
-                events.push((keys::ACTION_UP, code, 0));
+            let (code, held): (i32, &[(i32, i32)]) = if let Some(code) = typed(0) {
+                (code, &[])
+            } else if let Some(code) = typed(shift) {
+                (code, &[(KEYCODE_SHIFT_LEFT, shift)])
+            } else if let Some(code) = typed(altgr) {
+                (code, &[(KEYCODE_ALT_RIGHT, altgr)])
             } else {
-                let code = typed(shift)?;
-                events.push((keys::ACTION_DOWN, KEYCODE_SHIFT_LEFT, shift));
-                events.push((keys::ACTION_DOWN, code, shift));
-                events.push((keys::ACTION_UP, code, shift));
-                events.push((keys::ACTION_UP, KEYCODE_SHIFT_LEFT, 0));
+                let code = typed(shift | altgr)?;
+                (
+                    code,
+                    &[(KEYCODE_SHIFT_LEFT, shift), (KEYCODE_ALT_RIGHT, altgr)],
+                )
+            };
+            // Each modifier goes down with the meta state of those held so far, and up in reverse.
+            let mut meta = 0;
+            for &(modifier, bits) in held {
+                meta |= bits;
+                events.push((keys::ACTION_DOWN, modifier, meta));
+            }
+            events.push((keys::ACTION_DOWN, code, meta));
+            events.push((keys::ACTION_UP, code, meta));
+            for &(modifier, bits) in held.iter().rev() {
+                meta &= !bits;
+                events.push((keys::ACTION_UP, modifier, meta));
             }
         }
         Some(events)
@@ -204,7 +222,7 @@ pub fn set_seat(map: Charmap) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::keys::{META_ALT_ON, META_CTRL_LEFT_ON};
+    use crate::input::keys::META_CTRL_LEFT_ON;
 
     const A: i32 = 29;
     const TWO: i32 = 9;
@@ -305,9 +323,32 @@ mod tests {
     }
 
     #[test]
+    fn text_on_the_altgr_levels_becomes_key_presses_with_right_alt() {
+        let map = sample();
+        let down = keys::ACTION_DOWN;
+        let up = keys::ACTION_UP;
+        let altgr = META_ALT_ON | META_ALT_RIGHT_ON;
+        assert_eq!(
+            map.events(&[c('æ'), c('Æ')]),
+            Some(vec![
+                (down, KEYCODE_ALT_RIGHT, altgr),
+                (down, A, altgr),
+                (up, A, altgr),
+                (up, KEYCODE_ALT_RIGHT, 0),
+                (down, KEYCODE_SHIFT_LEFT, SHIFT),
+                (down, KEYCODE_ALT_RIGHT, SHIFT | altgr),
+                (down, A, SHIFT | altgr),
+                (up, A, SHIFT | altgr),
+                (up, KEYCODE_ALT_RIGHT, SHIFT),
+                (up, KEYCODE_SHIFT_LEFT, 0),
+            ])
+        );
+    }
+
+    #[test]
     fn the_compositor_s_layout_decides_the_characters() {
-        let mut de = Keymap::from_layout("de").expect("the de layout");
-        let map = Charmap::from_keymap(&mut de);
+        let mut keymap = Keymap::from_text(crate::input::xkb::FIXTURE).expect("the fixture");
+        let map = Charmap::from_keymap(&mut keymap);
         // KEYCODE_Y sits where a German keyboard has Z.
         assert_eq!(map.character(53, 0), c('z'));
         assert_eq!(map.character(45, META_ALT_ON | META_ALT_RIGHT_ON), c('@'));

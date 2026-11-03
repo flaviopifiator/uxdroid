@@ -157,7 +157,8 @@ enum Step {
 }
 
 /// How `text` is typed with `charmap`: each character a key press when a key types it, with shift
-/// when it needs shift, else committed as text.
+/// when it needs shift, else committed as text. A character on an AltGr level is committed too:
+/// the seat's key path holds only shift.
 fn plan(charmap: &Charmap, text: &str) -> Vec<Step> {
     let mut steps = Vec::new();
     for character in text.chars() {
@@ -165,9 +166,13 @@ fn plan(charmap: &Charmap, text: &str) -> Vec<Step> {
             .ok()
             .and_then(|unit| charmap.events(&[unit]))
             .and_then(|events| {
-                let shift = events.len() > 2;
-                let (_, code, _) = events.get(usize::from(shift))?;
-                let evdev = keys::TABLE.iter().find(|m| m.key_code == *code)?.evdev;
+                let shifted = keys::META_SHIFT_ON | keys::META_SHIFT_LEFT_ON;
+                let (code, shift) = match events.as_slice() {
+                    [(_, code, 0), _] => (*code, false),
+                    [_, (_, code, meta), _, _] if *meta == shifted => (*code, true),
+                    _ => return None,
+                };
+                let evdev = keys::TABLE.iter().find(|m| m.key_code == code)?.evdev;
                 Some(Step::Key { evdev, shift })
             });
         match (key, steps.last_mut()) {
@@ -552,12 +557,13 @@ mod tests {
             30 => Levels {
                 base: Some('a'),
                 shift: Some('A'),
+                ralt: Some('æ'),
                 ..Levels::default()
             },
             _ => Levels::default(),
         });
         assert_eq!(
-            plan(&charmap, "aA€\u{1F600}a"),
+            plan(&charmap, "aAæ€\u{1F600}a"),
             vec![
                 Step::Key {
                     evdev: 30,
@@ -567,7 +573,7 @@ mod tests {
                     evdev: 30,
                     shift: true
                 },
-                Step::Commit("€\u{1F600}".into()),
+                Step::Commit("æ€\u{1F600}".into()),
                 Step::Key {
                     evdev: 30,
                     shift: false

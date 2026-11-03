@@ -243,43 +243,95 @@ impl Keymap {
     }
 }
 
+/// A keymap that needs no layouts from the host: a few letters with a German Y and Z, a digit with
+/// its shifted symbol, AltGr levels on Q, and the modifiers, for tests.
+#[cfg(test)]
+pub(crate) const FIXTURE: &str = r#"xkb_keymap {
+xkb_keycodes "fixture" {
+    minimum = 8;
+    maximum = 255;
+    <ESC> = 9; <AE02> = 11; <AD01> = 24; <AD06> = 29; <LCTL> = 37; <AC01> = 38;
+    <LFSH> = 50; <AB01> = 52; <CAPS> = 66; <RALT> = 108;
+};
+xkb_types "fixture" {
+    type "ONE_LEVEL" { modifiers = none; level_name[Level1] = "Any"; };
+    type "TWO_LEVEL" {
+        modifiers = Shift; map[Shift] = Level2;
+        level_name[Level1] = "Base"; level_name[Level2] = "Shift";
+    };
+    type "ALPHABETIC" {
+        modifiers = Shift+Lock; map[Shift] = Level2; map[Lock] = Level2;
+        level_name[Level1] = "Base"; level_name[Level2] = "Caps";
+    };
+    type "ALPHABETIC_LEVEL3" {
+        modifiers = Shift+Lock+Mod5; map[Shift] = Level2; map[Lock] = Level2;
+        map[Mod5] = Level3; map[Shift+Mod5] = Level4;
+        level_name[Level1] = "Base"; level_name[Level2] = "Caps";
+        level_name[Level3] = "AltGr"; level_name[Level4] = "Shift AltGr";
+    };
+};
+xkb_compatibility "fixture" { };
+xkb_symbols "fixture" {
+    key <ESC> { [ Escape ] };
+    key <AE02> { type = "TWO_LEVEL", [ 2, at ] };
+    key <AD01> { type = "ALPHABETIC_LEVEL3", [ q, Q, at, Greek_OMEGA ] };
+    key <AD06> { type = "ALPHABETIC", [ z, Z ] };
+    key <AC01> { type = "ALPHABETIC", [ a, A ] };
+    key <AB01> { type = "ALPHABETIC", [ y, Y ] };
+    key <LFSH> { [ Shift_L ] };
+    key <CAPS> { [ Caps_Lock ] };
+    key <LCTL> { [ Control_L ] };
+    key <RALT> { [ ISO_Level3_Shift ] };
+    modifier_map Shift { <LFSH> };
+    modifier_map Lock { <CAPS> };
+    modifier_map Control { <LCTL> };
+    modifier_map Mod5 { <RALT> };
+};
+};
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_us_keymap_types_ascii_and_shifted_characters() {
-        let mut us = Keymap::from_layout("us").expect("xkb and its us layout in the dev image");
-        let a = us.levels(30);
+    fn a_keymap_types_its_levels_with_shift_caps_lock_and_altgr() {
+        let mut map = Keymap::from_text(FIXTURE).expect("xkbcommon compiles the fixture");
+        let a = map.levels(30);
         assert_eq!(a.base, Some('a'));
         assert_eq!(a.shift, Some('A'));
         assert_eq!(a.caps, Some('A'));
         assert_eq!(a.shift_caps, Some('a'));
-        let two = us.levels(3);
+        let two = map.levels(3);
         assert_eq!(
             (two.base, two.shift, two.caps),
             (Some('2'), Some('@'), Some('2'))
         );
-        assert_eq!(us.levels(1).base, None, "Escape types nothing");
-        let modifiers = us.modifiers();
+        assert_eq!(map.levels(1).base, None, "Escape types nothing");
+        // KEY_Y types z, as on a German keyboard, and AltGr+Q is @.
+        assert_eq!(map.levels(21).base, Some('z'));
+        assert_eq!(map.levels(44).base, Some('y'));
+        let q = map.levels(16);
+        assert_eq!((q.ralt, q.shift_ralt), (Some('@'), Some('Ω')));
+        let modifiers = map.modifiers();
         assert!(modifiers.shift.is_some() && modifiers.caps.is_some() && modifiers.ctrl.is_some());
     }
 
     #[test]
-    fn a_german_keymap_swaps_y_and_z_and_has_altgr() {
-        let mut de = Keymap::from_layout("de").expect("the de layout");
-        // KEY_Y sits where a German keyboard has Z.
-        assert_eq!(de.levels(21).base, Some('z'));
-        assert_eq!(de.levels(44).base, Some('y'));
-        // AltGr+Q is @ on a German keyboard.
-        assert_eq!(de.levels(16).ralt, Some('@'));
+    fn a_keymap_survives_its_text_form() {
+        let map = Keymap::from_text(FIXTURE).expect("compiles");
+        let mut again = Keymap::from_text(&map.text().expect("text")).expect("compiles");
+        assert_eq!(again.levels(21).base, Some('z'));
     }
 
     #[test]
-    fn a_keymap_survives_its_text_form() {
-        let de = Keymap::from_layout("de").expect("the de layout");
-        let mut again = Keymap::from_text(&de.text().expect("text")).expect("compiles");
-        assert_eq!(again.levels(21).base, Some('z'));
+    fn a_host_layout_compiles_when_the_host_has_xkb_data() {
+        if !std::path::Path::new("/usr/share/X11/xkb/symbols/us").exists() {
+            eprintln!("skipped: no xkb layouts on this host");
+            return;
+        }
+        let mut us = Keymap::from_layout("us").expect("the us layout");
+        assert_eq!(us.levels(30).base, Some('a'));
     }
 
     #[test]

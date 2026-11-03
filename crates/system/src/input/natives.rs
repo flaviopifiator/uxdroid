@@ -140,6 +140,14 @@ impl Channel {
 
     /// The next record for this end, if one is waiting.
     pub fn receive(&self) -> Option<(u32, Event)> {
+        match self.next() {
+            Next::Record(seq, event) => Some((seq, event)),
+            Next::Empty | Next::Closed => None,
+        }
+    }
+
+    /// The next record, or whether the channel is only empty or is closed for good.
+    fn next(&self) -> Next {
         let mut buffer = [0u8; MAX_RECORD + 1];
         loop {
             // SAFETY: reads at most the buffer's length from this end's socket without blocking.
@@ -151,16 +159,31 @@ impl Channel {
                     libc::MSG_DONTWAIT,
                 )
             };
-            let length = usize::try_from(read).ok()?;
+            let Ok(length) = usize::try_from(read) else {
+                return match std::io::Error::last_os_error().kind() {
+                    std::io::ErrorKind::WouldBlock => Next::Empty,
+                    std::io::ErrorKind::Interrupted => continue,
+                    _ => Next::Closed,
+                };
+            };
+            // Records are never empty: no bytes means the other end hung up.
             if length == 0 {
-                return None;
+                return Next::Closed;
             }
             // A record that does not decode is skipped, never trusted.
-            if let Some(decoded) = wire::decode(&buffer[..length]) {
-                return Some(decoded);
+            if let Some((seq, event)) = wire::decode(&buffer[..length]) {
+                return Next::Record(seq, event);
             }
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum Next {
+    Record(u32, Event),
+    Empty,
+    /// The other end hung up or the socket failed: the Looper stops watching it.
+    Closed,
 }
 
 static CHANNELS: Handles<Channel> = Handles::new();
@@ -304,10 +327,16 @@ unsafe impl Sync for Receiver {}
 
 impl Drop for Receiver {
     fn drop(&mut self) {
-        if let Some(env) = java::attached_env()
+        if let Some(env) = java::attached_env() {
+            // The Looper must stop watching the fd before it closes, even while an exception is
+            // pending, such as a dispose in a `finally`: it is set aside for the call, then thrown
+            // again. A listener that was never added is removed harmlessly.
             // SAFETY: an attached thread's environment.
-            && !unsafe { ((**env).v1_2.ExceptionCheck)(env) }
-        {
+            let pending = unsafe { ((**env).v1_1.ExceptionOccurred)(env) };
+            if !pending.is_null() {
+                // SAFETY: as above.
+                unsafe { ((**env).v1_1.ExceptionClear)(env) };
+            }
             let args = [jvalue { l: self.descriptor }];
             // SAFETY: as above, with this receiver's own references.
             let removed = unsafe {
@@ -322,6 +351,13 @@ impl Drop for Receiver {
             if removed.is_err() {
                 // SAFETY: as above.
                 unsafe { ((**env).v1_1.ExceptionClear)(env) };
+            }
+            if !pending.is_null() {
+                // SAFETY: as above; `pending` is a live local reference to a throwable.
+                unsafe {
+                    ((**env).v1_1.Throw)(env, pending);
+                    ((**env).v1_1.DeleteLocalRef)(env, pending);
+                }
             }
         }
         // SAFETY: these are this receiver's own global references.
@@ -528,7 +564,13 @@ unsafe fn motion_event(
 /// # Safety
 /// `env` must be the calling thread's JNI environment.
 unsafe fn dispatch(env: *mut JNIEnv, receiver: &Receiver) -> Result<jint, Pending> {
-    while let Some((seq, event)) = receiver.channel.receive() {
+    loop {
+        let (seq, event) = match receiver.channel.next() {
+            Next::Record(seq, event) => (seq, event),
+            Next::Empty => return Ok(EVENT_INPUT),
+            // A hung-up channel stays readable forever; returning 0 makes the Looper drop it.
+            Next::Closed => return Ok(0),
+        };
         // SAFETY: as above; the receiver reference is a WeakReference.
         unsafe {
             let target =
@@ -560,7 +602,6 @@ unsafe fn dispatch(env: *mut JNIEnv, receiver: &Receiver) -> Result<jint, Pendin
             delivered?;
         }
     }
-    Ok(EVENT_INPUT)
 }
 
 /// # Safety
@@ -619,29 +660,11 @@ unsafe extern "system" fn receiver_finish(
             .falling_back
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let down = falling_back.iter().position(|scan| *scan == key.scan_code);
-        let send = match (key.action, down) {
-            (keys::ACTION_DOWN, None) if !handled => {
-                falling_back.push(key.scan_code);
-                true
-            }
-            (keys::ACTION_UP, Some(index)) => {
-                falling_back.remove(index);
-                true
-            }
-            _ => false,
-        };
-        if send && let Some(fallback) = keys::fallback(key.key_code) {
-            let event = Event::Key(Key {
-                key_code: fallback,
-                flags: key.flags | FLAG_FALLBACK,
-                ..key
-            });
-            // Sent from the other end, it arrives here as the next record, after this one.
-            if let Some(peer) = receiver.channel.peer() {
-                peer.send(&event);
-            }
-        }
+        // Sent from the other end, it arrives here as the next record, after this one.
+        let peer = receiver.channel.peer();
+        fall_back(&mut falling_back, &key, handled, |event| {
+            peer.as_ref().is_some_and(|peer| peer.send(event))
+        });
     }
     if !receiver.reported.swap(true, Ordering::Relaxed) {
         eprintln!(
@@ -649,6 +672,41 @@ unsafe extern "system" fn receiver_finish(
             receiver.channel.name(),
             handled
         );
+    }
+}
+
+/// Sends the fallback of a finished key, as InputDispatcher does for a key the app did not handle:
+/// its down, then its up. A down that could not be sent is not counted, so no lone up follows it.
+fn fall_back(
+    falling_back: &mut Vec<i32>,
+    key: &Key,
+    handled: bool,
+    send: impl FnOnce(&Event) -> bool,
+) {
+    let Some(fallback) = keys::fallback(key.key_code) else {
+        return;
+    };
+    let down = falling_back.iter().position(|scan| *scan == key.scan_code);
+    let going_down = match (key.action, down) {
+        (keys::ACTION_DOWN, None) if !handled => true,
+        (keys::ACTION_UP, Some(index)) => {
+            falling_back.remove(index);
+            false
+        }
+        _ => return,
+    };
+    let event = Event::Key(Key {
+        key_code: fallback,
+        flags: key.flags | FLAG_FALLBACK,
+        ..key.clone()
+    });
+    if !send(&event) {
+        eprintln!(
+            "uxdroid: input: the fallback of key {} was dropped",
+            key.key_code
+        );
+    } else if going_down {
+        falling_back.push(key.scan_code);
     }
 }
 
@@ -835,6 +893,73 @@ mod tests {
         let (server, client) = Channel::pair("window").expect("socketpair");
         drop(client);
         assert!(!server.send(&Event::Focus(true)));
+    }
+
+    #[test]
+    fn a_hung_up_channel_reads_as_closed_not_empty() {
+        let (server, client) = Channel::pair("window").expect("socketpair");
+        assert_eq!(client.next(), Next::Empty);
+        assert!(server.send(&Event::Focus(true)));
+        drop(server);
+        // What was sent before the hangup still arrives.
+        assert_eq!(client.next(), Next::Record(1, Event::Focus(true)));
+        assert_eq!(client.next(), Next::Closed);
+    }
+
+    fn back_key(action: i32) -> Key {
+        Key {
+            down_time: 1,
+            event_time: 2,
+            action,
+            key_code: keys::KEYCODE_ESCAPE,
+            repeat: 0,
+            meta_state: 0,
+            device: 1,
+            scan_code: 1,
+            flags: 0,
+            source: 0,
+        }
+    }
+
+    #[test]
+    fn a_fallback_down_that_was_not_sent_sends_no_lone_up() {
+        let mut falling_back = Vec::new();
+        let mut sent = Vec::new();
+        fall_back(
+            &mut falling_back,
+            &back_key(keys::ACTION_DOWN),
+            false,
+            |_| false,
+        );
+        assert!(falling_back.is_empty());
+        fall_back(
+            &mut falling_back,
+            &back_key(keys::ACTION_UP),
+            false,
+            |event| {
+                sent.push(event.clone());
+                true
+            },
+        );
+        assert!(sent.is_empty(), "{sent:?}");
+        // Sent, the down is followed by its up.
+        fall_back(
+            &mut falling_back,
+            &back_key(keys::ACTION_DOWN),
+            false,
+            |_| true,
+        );
+        fall_back(
+            &mut falling_back,
+            &back_key(keys::ACTION_UP),
+            false,
+            |event| {
+                sent.push(event.clone());
+                true
+            },
+        );
+        assert_eq!(sent.len(), 1);
+        assert!(falling_back.is_empty());
     }
 
     #[test]
