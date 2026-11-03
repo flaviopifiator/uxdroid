@@ -70,10 +70,22 @@ fn install(apk_path: &Path, data: &Path) -> Result<String, String> {
     let result = extract_native_libs(apk_path, abi, &staging)
         .map_err(|error| error.to_string())
         .and_then(|count| {
-            if libraries.exists() {
-                std::fs::remove_dir_all(&libraries).map_err(|error| cannot(&libraries, error))?;
+            // Renames only: the old libraries move aside whole, and come back if the new ones
+            // cannot take their place, so no failure leaves the app with half a directory.
+            let aside = app_dir.join(format!(".old-lib-{}", std::process::id()));
+            let had_old = libraries.exists();
+            if had_old {
+                std::fs::rename(&libraries, &aside).map_err(|error| cannot(&libraries, error))?;
             }
-            std::fs::rename(&staging, &libraries).map_err(|error| cannot(&libraries, error))?;
+            if let Err(error) = std::fs::rename(&staging, &libraries) {
+                if had_old {
+                    let _ = std::fs::rename(&aside, &libraries);
+                }
+                return Err(cannot(&libraries, error));
+            }
+            if had_old {
+                let _ = std::fs::remove_dir_all(&aside);
+            }
             let record = app_dir.join("abi");
             std::fs::write(&record, format!("{abi}\n")).map_err(|error| cannot(&record, error))?;
             Ok(count)
