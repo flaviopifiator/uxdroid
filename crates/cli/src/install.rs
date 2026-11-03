@@ -70,24 +70,41 @@ fn install(apk_path: &Path, data: &Path) -> Result<String, String> {
     let result = extract_native_libs(apk_path, abi, &staging)
         .map_err(|error| error.to_string())
         .and_then(|count| {
-            // Renames only: the old libraries move aside whole, and come back if the new ones
-            // cannot take their place, so no failure leaves the app with half a directory.
+            // Renames only: the record is written first, the old libraries move aside whole and
+            // come back if anything after them fails, so a failed install changes nothing.
+            let record = app_dir.join("abi");
+            let pending = app_dir.join(format!(".abi-{}", std::process::id()));
+            std::fs::write(&pending, format!("{abi}\n"))
+                .map_err(|error| cannot(&pending, error))?;
             let aside = app_dir.join(format!(".old-lib-{}", std::process::id()));
             let had_old = libraries.exists();
-            if had_old {
-                std::fs::rename(&libraries, &aside).map_err(|error| cannot(&libraries, error))?;
-            }
-            if let Err(error) = std::fs::rename(&staging, &libraries) {
+            let swap = (|| {
                 if had_old {
-                    let _ = std::fs::rename(&aside, &libraries);
+                    std::fs::rename(&libraries, &aside)
+                        .map_err(|error| cannot(&libraries, error))?;
                 }
-                return Err(cannot(&libraries, error));
+                if let Err(error) = std::fs::rename(&staging, &libraries) {
+                    if had_old {
+                        let _ = std::fs::rename(&aside, &libraries);
+                    }
+                    return Err(cannot(&libraries, error));
+                }
+                if let Err(error) = std::fs::rename(&pending, &record) {
+                    let _ = std::fs::rename(&libraries, &staging);
+                    if had_old {
+                        let _ = std::fs::rename(&aside, &libraries);
+                    }
+                    return Err(cannot(&record, error));
+                }
+                Ok(())
+            })();
+            if swap.is_err() {
+                let _ = std::fs::remove_file(&pending);
             }
+            swap?;
             if had_old {
                 let _ = std::fs::remove_dir_all(&aside);
             }
-            let record = app_dir.join("abi");
-            std::fs::write(&record, format!("{abi}\n")).map_err(|error| cannot(&record, error))?;
             Ok(count)
         });
     if result.is_err() {

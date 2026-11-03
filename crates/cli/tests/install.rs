@@ -122,6 +122,36 @@ fn installing_again_replaces_the_old_libraries() {
 }
 
 #[test]
+fn an_install_that_fails_keeps_the_previous_libraries() {
+    let dir = scratch("keeps");
+    let data = dir.join("data");
+    let old = dir.join("old.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib("x86_64", "libold.so")
+        .write(&old);
+    let new = dir.join("new.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib("x86_64", "libnew.so")
+        .write(&new);
+    assert_eq!(install(&old, &data).status.code(), Some(0));
+    // The ABI record cannot be written over a directory, so the second install fails late.
+    let record = data.join("data/com.example.app/abi");
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+
+    let output = install(&new, &data);
+
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    assert_eq!(
+        listing(&data.join("data/com.example.app/lib")),
+        ["libold.so"]
+    );
+    assert_eq!(listing(&data.join("data/com.example.app")), ["abi", "lib"]);
+}
+
+#[test]
 fn an_apk_without_native_code_installs_an_empty_directory() {
     let dir = scratch("none");
     let apk = dir.join("app.apk");
