@@ -12,10 +12,13 @@ JDK=/aosp/$(ls -d prebuilts/jdk/jdk*/linux-x86 | sort -V | tail -1)
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
-# ART's own files share this tree, so only the framework's are replaced.
-rm -rf "$RUNTIME/framework/framework.jar" "$RUNTIME/framework/framework-res.apk" "$RUNTIME/framework/oat" \
-    "$RUNTIME/etc" "$RUNTIME/fonts" "$RUNTIME/usr" "$RUNTIME/build.prop" "$RUNTIME/lib64/libandroid_runtime.so" \
-    "$RUNTIME/notices/framework"
+# ART's own files share this tree. The last build listed what it installed, and only that is removed.
+MANIFEST="$RUNTIME/framework/framework-files.txt"
+if [ -f "$MANIFEST" ]; then
+    (cd "$RUNTIME" && xargs -a "$MANIFEST" -d '\n' rm -f)
+fi
+BEFORE="$W/before"
+(cd "$RUNTIME" && find . -type f | sort) > "$BEFORE"
 mkdir -p "$RUNTIME/framework/oat/x86_64" "$RUNTIME/etc" "$RUNTIME/fonts" "$RUNTIME/usr/icu" "$RUNTIME/notices/framework"
 
 # Framework classes. What ART's boot class path already has stays out, so the boot copy is the one used.
@@ -44,11 +47,14 @@ cp "$RUNTIME/etc/fonts.xml" "$RUNTIME/etc/font_fallback.xml"
 cp "$DL"/notices/* "$RUNTIME/notices/framework/"
 
 # Compile at install time. Verified ahead of time, the framework starts at 38 MiB instead of 119 MiB.
-"$RUNTIME/bin/dex2oat64" --compiler-filter=verify --instruction-set=x86_64 --host --android-root="$RUNTIME" \
+if ! "$RUNTIME/bin/dex2oat64" --compiler-filter=verify --instruction-set=x86_64 --host --android-root="$RUNTIME" \
     --runtime-arg -Xbootclasspath:"$BOOT" --runtime-arg -Xbootclasspath-locations:"$BOOT" \
     --boot-image="$RUNTIME/framework/boot.art" --dex-file="$RUNTIME/framework/framework.jar" \
-    --class-loader-context='PCL[]' --oat-file="$RUNTIME/framework/oat/x86_64/framework.odex" 2>&1 \
-    | grep -E "^.{0,40}(E|F) dex2oat" || true
-test -s "$RUNTIME/framework/oat/x86_64/framework.odex"
+    --class-loader-context='PCL[]' --oat-file="$RUNTIME/framework/oat/x86_64/framework.odex" > "$W/dex2oat.log" 2>&1; then
+    tail -20 "$W/dex2oat.log"
+    exit 1
+fi
+(cd "$RUNTIME" && find . -type f | sort) | comm -13 "$BEFORE" - > "$MANIFEST"
+echo "./framework/framework-files.txt" >> "$MANIFEST"
 du -shc "$RUNTIME/framework/framework.jar" "$RUNTIME/framework/framework-res.apk" "$RUNTIME/framework/oat" \
     "$RUNTIME/fonts" "$RUNTIME/usr" "$RUNTIME/lib64/libandroid_runtime.so"
