@@ -94,6 +94,9 @@ docker compose run --rm -T dev bash /work/runtime/framework/input_smoke.sh
 # One process per app: uxdroid app starts it, a second launch goes to it, and intents, status, list
 # and stop reach it through its control socket.
 docker compose run --rm -T dev bash /work/runtime/framework/control_smoke.sh
+# Apps as systemd user services, with socket_unit.py playing systemd: started on demand through the
+# control socket, again after stop, once per profile, and with a socket passed at once.
+docker compose run --rm -T dev bash /work/runtime/framework/service_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli

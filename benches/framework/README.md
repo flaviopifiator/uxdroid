@@ -26,6 +26,12 @@ UXDROID_SAMPLES=<directory with the RustDesk APK> docker compose run --rm -T \
     -v uxdroid-framework-bench:/var/tmp -e APP=rustdesk sandbox bash /work/benches/framework/input.sh
 ```
 
+A start through a systemd socket unit against a direct start:
+
+```sh
+docker compose run --rm -T dev bash /work/benches/framework/service.sh
+```
+
 ## Method
 
 [`measure.py`](measure.py) starts a fresh process for every run and reads its stdout and stderr. At the first line that matches the workload's marker it stops the process with `SIGSTOP`, reads `VmHWM` from `/proc/<pid>/status` (peak RSS up to that moment) and `/proc/<pid>/smaps_rollup` (PSS, private dirty), and kills it, or lets it finish when the row also reports time to exit. Every run must print the workload's expected lines, or the whole benchmark fails.
@@ -157,6 +163,19 @@ The latency an app sees is the server's plus what it buffered: the sample's `Aud
 This is input to a frame received by the compositor, not to light on a screen: no display scan-out is counted. Frames are paced by the 60 Hz vsync timer, so up to 16.7 ms of each figure is waiting for the next tick.
 
 Input added nothing measurable to startup or memory. Against the base commit, both mounted at `/runtime/art` and measured back to back with 30 runs per row: framework sample to first frame warm 139.4 against 141.0 ms, 19.5 against 19.6 MiB private dirty; RustDesk to its first Flutter frame warm 253.8 against 252.2 ms, 87.5 against 86.1 MiB private dirty, cold 1064 against 1049 ms. One row moved: `FrameworkSmoke` warm read 73.0 against 155.9 ms, with a tight range, while other writers built on the machine; interleaved runs of base and branch on an idle machine afterwards gave 81.0 and 82.2 ms against 81.5 and 81.5 ms to exit (medians of 15).
+
+## Start through a systemd socket unit
+
+[`service.sh`](service.sh) compares starting the installed framework sample with `uxdroid app <package> start`, which finds no socket and starts the launcher itself, against the same command connecting to the socket of the units `uxdroid service enable` writes, where `runtime/framework/socket_unit.py` plays systemd: it listens, and on the connection forks `uxdroid service run`, which becomes the launcher with the socket passed. The two alternate, over two data directories installed the same way on disk, 3 unmeasured starts of each first. Times run from the command's start to the app's `onResume` line, to its first frame, and to the command's answer.
+
+2026-11-03, branch `feat/compat-service`, the T4 writer's builds running on the machine, 30 runs each. Median (min-max):
+
+| Start | `onResume` | First frame | Command answered |
+|-------|------------|-------------|------------------|
+| Direct | 105.5 ms (102.3-111.2) | 119.7 ms (118.5-137.2) | 152.0 ms (151.8-152.2) |
+| Through the socket unit | 107.5 ms (104.2-115.9) | 132.9 ms (116.2-134.2) | 143.9 ms (127.2-145.1) |
+
+Activation costs about 2 ms to `onResume`, of which uxdroid's own part is the `uxdroid service run` step before the launcher, 0.6 ms (1.03 against 0.40 ms for running `/bin/true` with and without it, medians of 200); the rest is the stand-in manager, a Python process that forks, where systemd would. The first frame waits for a tick of the 60 Hz vsync clock, so it moves in steps of 16.7 ms with the phase of the start, and the medians differ by that and not by work; the minimums, 116.2 and 118.5 ms, overlap. The command answers 8 ms sooner through the socket, because a direct start polls for the new socket every 50 ms while a connection to the socket unit waits in its backlog. Not measured: systemd itself, which the containers lack, memory (the same launcher runs either way), and a start at login.
 
 ## Limits
 
