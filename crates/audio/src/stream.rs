@@ -1,6 +1,7 @@
 //! Output and input streams, each with its device thread.
 
 use std::collections::VecDeque;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -10,6 +11,10 @@ use crate::{Config, Error, Flow, State};
 
 /// Wakes a waiting app thread at least this often, so a closed stream never strands it.
 const RECHECK: Duration = Duration::from_millis(100);
+
+/// How long dropping a stream waits for a device that does not return, such as a sound server that
+/// hung, before it lets the device thread end on its own. An app callback is always waited for.
+const JOIN_LIMIT: Duration = Duration::from_secs(1);
 
 struct Shared<T> {
     inner: Mutex<T>,
@@ -36,6 +41,11 @@ impl<T> Shared<T> {
     }
 }
 
+/// When a wait of `timeout` ends; `None` waits forever, as does a timeout past the clock's range.
+fn deadline(timeout: Option<Duration>) -> Option<Instant> {
+    timeout.and_then(|timeout| Instant::now().checked_add(timeout))
+}
+
 /// Time left until `deadline`: `Some(None)` without one, which never expires, and `None` once passed.
 fn left(deadline: Option<Instant>) -> Option<Option<Duration>> {
     match deadline {
@@ -47,11 +57,90 @@ fn left(deadline: Option<Instant>) -> Option<Option<Duration>> {
     }
 }
 
-fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>, Error> {
+/// What a stream and its device thread tell each other about its end.
+#[derive(Default)]
+struct Life {
+    /// The stream was dropped; the thread ends at its next look.
+    closed: bool,
+    /// The thread is inside the app's callback, which may use what the app frees after closing.
+    busy: bool,
+    /// The thread returned.
+    ended: bool,
+}
+
+trait Lives {
+    fn life(&mut self) -> &mut Life;
+}
+
+/// Marks the thread ended however it leaves, a panic included.
+struct Ending<T: Lives>(Arc<Shared<T>>);
+
+impl<T: Lives> Drop for Ending<T> {
+    fn drop(&mut self) {
+        self.0.lock().life().ended = true;
+        self.0.changed.notify_all();
+    }
+}
+
+fn spawn<T: Lives + Send + 'static>(
+    name: &str,
+    shared: &Arc<Shared<T>>,
+    body: impl FnOnce(&Shared<T>) + Send + 'static,
+) -> Result<JoinHandle<()>, Error> {
+    let ending = Ending(shared.clone());
     std::thread::Builder::new()
         .name(name.into())
-        .spawn(body)
+        .spawn(move || body(&ending.0))
         .map_err(|e| Error::Unavailable(format!("audio thread: {e}")))
+}
+
+/// Closes a stream: waits for its thread to leave the app's callback, then at most [`JOIN_LIMIT`]
+/// for it to end, so a device that never returns does not hang the app.
+fn close<T: Lives>(shared: &Shared<T>, thread: Option<JoinHandle<()>>, limit: Duration) {
+    let mut inner = shared.lock();
+    inner.life().closed = true;
+    shared.changed.notify_all();
+    let Some(thread) = thread else { return };
+    // Dropped by the stream's own callback, through an app that let go of it there: the thread
+    // sees `closed` and ends by itself.
+    if thread.thread().id() == std::thread::current().id() {
+        return;
+    }
+    let deadline = Instant::now() + limit;
+    loop {
+        let life = inner.life();
+        if life.ended {
+            drop(inner);
+            let _ = thread.join();
+            return;
+        }
+        let now = Instant::now();
+        if !life.busy && now >= deadline {
+            eprintln!("uxdroid: audio device did not return in time; its thread ends on its own");
+            return;
+        }
+        let wait = if life.busy {
+            RECHECK
+        } else {
+            (deadline - now).min(RECHECK)
+        };
+        inner = shared.wait(inner, wait);
+    }
+}
+
+/// Runs the app's callback, marked busy so a close waits for it; `None` if it panicked.
+fn call<'a, T: Lives, R>(
+    shared: &'a Shared<T>,
+    mut inner: MutexGuard<'a, T>,
+    callback: impl FnOnce() -> R,
+) -> (Option<R>, MutexGuard<'a, T>) {
+    inner.life().busy = true;
+    drop(inner);
+    let result = std::panic::catch_unwind(AssertUnwindSafe(callback)).ok();
+    let mut inner = shared.lock();
+    inner.life().busy = false;
+    shared.changed.notify_all();
+    (result, inner)
 }
 
 struct Playback {
@@ -70,7 +159,13 @@ struct Playback {
     volume: [f32; 2],
     rate: u32,
     latency: Duration,
-    closed: bool,
+    life: Life,
+}
+
+impl Lives for Playback {
+    fn life(&mut self) -> &mut Life {
+        &mut self.life
+    }
 }
 
 /// Frames to the device, written by the app or asked from its callback.
@@ -103,7 +198,14 @@ impl Output {
         callback: Option<OutputCallback>,
     ) -> Result<Output, Error> {
         config.validate()?;
-        let sink = backend.sink(config)?;
+        Output::on_sink(backend.sink(config)?, config, callback)
+    }
+
+    fn on_sink(
+        sink: Box<dyn Sink>,
+        config: Config,
+        callback: Option<OutputCallback>,
+    ) -> Result<Output, Error> {
         let channels = usize::from(config.channels);
         let shared = Shared::new(Playback {
             state: State::Stopped,
@@ -119,11 +221,10 @@ impl Output {
             volume: [1.0, 1.0],
             rate: config.rate,
             latency: Duration::ZERO,
-            closed: false,
+            life: Life::default(),
         });
-        let thread_shared = shared.clone();
-        let thread = spawn("uxdroid-audio-out", move || {
-            play(&thread_shared, config, sink, callback);
+        let thread = spawn("uxdroid-audio-out", &shared, move |shared| {
+            play(shared, config, sink, callback);
         })?;
         Ok(Output {
             shared,
@@ -144,7 +245,7 @@ impl Output {
 
     /// As [`Output::write`], waiting at most `timeout` for room, or forever when `None`.
     pub fn write_within(&self, samples: &[f32], timeout: Option<Duration>) -> usize {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let deadline = deadline(timeout);
         let channels = usize::from(self.config.channels);
         let total = samples.len() / channels * channels;
         let mut done = 0;
@@ -162,7 +263,7 @@ impl Output {
             // A stopped stream blocks too, as on Android: it waits for the app to play.
             let failed = inner.state == State::Disconnected;
             let left = left(deadline);
-            if done == total || left.is_none() || inner.closed || failed {
+            if done == total || left.is_none() || inner.life.closed || failed {
                 return done;
             }
             inner = self.shared.wait(
@@ -226,13 +327,15 @@ impl Output {
 
     /// Waits up to `timeout` for the state to leave `state`, and returns the state then.
     pub fn wait_while(&self, state: State, timeout: Duration) -> State {
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline(Some(timeout));
         let mut inner = self.shared.lock();
         while inner.state == state {
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            let Some(left) = left(deadline) else {
                 break;
             };
-            inner = self.shared.wait(inner, left.min(RECHECK));
+            inner = self
+                .shared
+                .wait(inner, left.map_or(RECHECK, |left| left.min(RECHECK)));
         }
         inner.state
     }
@@ -289,25 +392,18 @@ impl Output {
         inner.latency + Duration::from_nanos(frames * 1_000_000_000 / u64::from(inner.rate))
     }
 
-    /// The frame the device presents now: the position less what the device holds.
+    /// The frame the device presents now: the position less what the device holds. The position
+    /// counts source frames, which the device plays at the playback rate.
     pub fn presented(&self) -> u64 {
         let inner = self.shared.lock();
-        let held = inner.latency.as_secs_f64() * f64::from(self.config.rate);
+        let held = inner.latency.as_secs_f64() * f64::from(inner.rate);
         inner.position.saturating_sub(held as u64)
     }
 }
 
 impl Drop for Output {
     fn drop(&mut self) {
-        self.shared.lock().closed = true;
-        self.shared.changed.notify_all();
-        if let Some(thread) = self.thread.take() {
-            // Dropped by the stream's own callback, through an app that let go of it there: the
-            // thread sees `closed` and ends by itself.
-            if thread.thread().id() != std::thread::current().id() {
-                let _ = thread.join();
-            }
-        }
+        close(&self.shared, self.thread.take(), JOIN_LIMIT);
     }
 }
 
@@ -323,7 +419,7 @@ fn play(
     loop {
         let mut inner = shared.lock();
         loop {
-            if inner.closed {
+            if inner.life.closed {
                 return;
             }
             if matches!(inner.state, State::Playing | State::Draining) {
@@ -337,9 +433,13 @@ fn play(
             running = true;
         }
         if let Some(callback) = &mut callback {
-            drop(inner);
-            let flow = callback(&mut buffer);
-            inner = shared.lock();
+            let (flow, mut after) = call(shared, inner, || callback(&mut buffer));
+            let Some(flow) = flow else {
+                eprintln!("uxdroid: audio output stopped: its callback panicked");
+                after.state = State::Disconnected;
+                return;
+            };
+            inner = after;
             inner.position += config.period() as u64;
             if flow == Flow::Stop && inner.state == State::Playing {
                 inner.state = State::Stopped;
@@ -424,7 +524,14 @@ struct Recording {
     position: u64,
     overruns: u32,
     full: bool,
-    closed: bool,
+    callback: bool,
+    life: Life,
+}
+
+impl Lives for Recording {
+    fn life(&mut self) -> &mut Life {
+        &mut self.life
+    }
 }
 
 /// Frames from the device, read by the app or handed to its callback.
@@ -457,7 +564,14 @@ impl Input {
         callback: Option<InputCallback>,
     ) -> Result<Input, Error> {
         config.validate()?;
-        let capture = backend.capture(config)?;
+        Input::on_capture(backend.capture(config)?, config, callback)
+    }
+
+    fn on_capture(
+        capture: Box<dyn Capture>,
+        config: Config,
+        callback: Option<InputCallback>,
+    ) -> Result<Input, Error> {
         let shared = Shared::new(Recording {
             state: State::Stopped,
             ring: VecDeque::new(),
@@ -465,11 +579,11 @@ impl Input {
             position: 0,
             overruns: 0,
             full: false,
-            closed: false,
+            callback: callback.is_some(),
+            life: Life::default(),
         });
-        let thread_shared = shared.clone();
-        let thread = spawn("uxdroid-audio-in", move || {
-            record(&thread_shared, config, capture, callback);
+        let thread = spawn("uxdroid-audio-in", &shared, move |shared| {
+            record(shared, config, capture, callback);
         })?;
         Ok(Input {
             shared,
@@ -512,11 +626,14 @@ impl Input {
 
     /// As [`Input::read`], waiting at most `timeout` for frames, or forever when `None`.
     pub fn read_within(&self, out: &mut [f32], timeout: Option<Duration>) -> usize {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let deadline = deadline(timeout);
         let channels = usize::from(self.config.channels);
         let total = out.len() / channels * channels;
         let mut done = 0;
         let mut inner = self.shared.lock();
+        if inner.callback {
+            return 0;
+        }
         loop {
             let take = inner.ring.len().min(total - done);
             for (slot, sample) in out[done..done + take]
@@ -530,7 +647,8 @@ impl Input {
                 inner.full = false;
             }
             let left = left(deadline);
-            if done == total || left.is_none() || inner.closed || inner.state != State::Playing {
+            if done == total || left.is_none() || inner.life.closed || inner.state != State::Playing
+            {
                 return done;
             }
             inner = self.shared.wait(
@@ -558,15 +676,7 @@ impl Input {
 
 impl Drop for Input {
     fn drop(&mut self) {
-        self.shared.lock().closed = true;
-        self.shared.changed.notify_all();
-        if let Some(thread) = self.thread.take() {
-            // Dropped by the stream's own callback, through an app that let go of it there: the
-            // thread sees `closed` and ends by itself.
-            if thread.thread().id() != std::thread::current().id() {
-                let _ = thread.join();
-            }
-        }
+        close(&self.shared, self.thread.take(), JOIN_LIMIT);
     }
 }
 
@@ -581,7 +691,7 @@ fn record(
     loop {
         let mut inner = shared.lock();
         loop {
-            if inner.closed {
+            if inner.life.closed {
                 return;
             }
             if inner.state == State::Playing {
@@ -591,11 +701,13 @@ fn record(
             inner = shared.wait(inner, RECHECK);
         }
         drop(inner);
-        if !running {
-            capture.resume();
+        let resumed = if running {
+            Ok(())
+        } else {
             running = true;
-        }
-        if let Err(error) = capture.read(&mut buffer) {
+            capture.resume()
+        };
+        if let Err(error) = resumed.and_then(|()| capture.read(&mut buffer)) {
             eprintln!("uxdroid: audio input stopped: {error}");
             shared.lock().state = State::Disconnected;
             shared.changed.notify_all();
@@ -607,12 +719,15 @@ fn record(
         }
         inner.position += u64::from(config.period());
         if let Some(callback) = &mut callback {
-            drop(inner);
-            if callback(&buffer) == Flow::Stop {
-                let mut inner = shared.lock();
-                if inner.state == State::Playing {
-                    inner.state = State::Stopped;
+            let (flow, mut inner) = call(shared, inner, || callback(&buffer));
+            match flow {
+                None => {
+                    eprintln!("uxdroid: audio input stopped: its callback panicked");
+                    inner.state = State::Disconnected;
+                    return;
                 }
+                Some(Flow::Stop) if inner.state == State::Playing => inner.state = State::Stopped,
+                Some(_) => {}
             }
         } else {
             let room = inner.capacity - inner.ring.len().min(inner.capacity);
@@ -624,5 +739,80 @@ fn record(
             inner.full = take < buffer.len();
         }
         shared.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    /// A device that takes frames as fast as they come and reports a fixed latency.
+    struct Late(Duration);
+
+    impl Sink for Late {
+        fn write(&mut self, _: &[f32]) -> Result<(), String> {
+            Ok(())
+        }
+        fn latency(&self) -> Duration {
+            self.0
+        }
+    }
+
+    /// A device whose first write never returns, as a hung sound server's.
+    struct Hung(Option<mpsc::Sender<()>>);
+
+    impl Sink for Hung {
+        fn write(&mut self, _: &[f32]) -> Result<(), String> {
+            if let Some(entered) = self.0.take() {
+                let _ = entered.send(());
+            }
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+
+    fn config() -> Config {
+        Config {
+            rate: 8_000,
+            channels: 1,
+            capacity: 4_000,
+        }
+    }
+
+    #[test]
+    fn the_presented_frame_counts_held_frames_at_the_playback_rate() {
+        let output =
+            Output::on_sink(Box::new(Late(Duration::from_millis(100))), config(), None).unwrap();
+        assert!(output.set_rate(16_000));
+        output.write(&[0.5; 4_000], true);
+        output.start();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while output.buffered() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        output.pause();
+        std::thread::sleep(Duration::from_millis(20));
+        // 100 ms of device time hold 1,600 source frames at twice the device rate.
+        assert_eq!(output.position(), 4_000);
+        assert_eq!(output.presented(), 4_000 - 1_600);
+    }
+
+    #[test]
+    fn dropping_a_stream_whose_device_hung_returns_within_the_limit() {
+        let (entered, inside) = mpsc::channel();
+        let output = Output::on_sink(Box::new(Hung(Some(entered))), config(), None).unwrap();
+        output.write(&[0.5; 80], true);
+        output.start();
+        inside.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (done, dropped) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            drop(output);
+            let _ = done.send(());
+        });
+        dropped.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(started.elapsed() >= JOIN_LIMIT);
     }
 }
