@@ -338,7 +338,7 @@ pub struct Intent {
     pub activity: Option<String>,
     pub action: Option<String>,
     pub data: Option<String>,
-    /// String extras, in the order given.
+    /// String extras. A Bundle has no order, so they travel in name order.
     pub extras: Vec<(String, String)>,
     /// `Intent.setFlags`.
     pub flags: u32,
@@ -479,11 +479,64 @@ pub struct Request {
     pub command: Command,
 }
 
+/// Parses JSON that names no key twice in one object: serde_json would keep the last silently, so
+/// a request could mean one thing to a check that read the first and another to the app.
+fn strict(line: &[u8]) -> Result<Value, String> {
+    let value: Value =
+        serde_json::from_slice(line).map_err(|error| format!("not JSON: {error}"))?;
+    match duplicate_key(line) {
+        Some(key) => Err(format!("the key {key:?} appears twice in one object")),
+        None => Ok(value),
+    }
+}
+
+/// The first key an object of `json`, which is valid JSON, names twice.
+fn duplicate_key(json: &[u8]) -> Option<String> {
+    // Per open container: the keys of an object, or `None` for an array.
+    let mut open: Vec<Option<std::collections::HashSet<String>>> = Vec::new();
+    let mut expecting_key = false;
+    let mut at = 0;
+    while at < json.len() {
+        match json[at] {
+            b'{' => {
+                open.push(Some(std::collections::HashSet::new()));
+                expecting_key = true;
+            }
+            b'[' => {
+                open.push(None);
+                expecting_key = false;
+            }
+            b'}' | b']' => {
+                open.pop();
+                expecting_key = false;
+            }
+            b',' => expecting_key = matches!(open.last(), Some(Some(_))),
+            b'"' => {
+                let start = at;
+                at += 1;
+                while json[at] != b'"' {
+                    at += if json[at] == b'\\' { 2 } else { 1 };
+                }
+                if expecting_key {
+                    expecting_key = false;
+                    let key: String = serde_json::from_slice(&json[start..=at]).ok()?;
+                    let keys = open.last_mut()?.as_mut()?;
+                    if !keys.insert(key.clone()) {
+                        return Some(key);
+                    }
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
 /// Reads one request. A refusal keeps the request's id when it had a valid one, so its answer can
 /// be matched.
 pub fn parse_request(line: &[u8]) -> Result<Request, (Option<Value>, Failure)> {
-    let value: Value =
-        serde_json::from_slice(line).map_err(|error| (None, bad(&format!("not JSON: {error}"))))?;
+    let value = strict(line).map_err(|error| (None, bad(&error)))?;
     let Value::Object(object) = value else {
         return Err((None, bad("a request must be a JSON object")));
     };
@@ -696,8 +749,7 @@ pub fn response_error(id: Option<&Value>, failure: &Failure) -> String {
 
 /// Reads an answer: the result, or the app's refusal. `Err` means the line is not an answer.
 pub fn parse_response(line: &[u8]) -> Result<Result<Value, Failure>, String> {
-    let value: Value =
-        serde_json::from_slice(line).map_err(|error| format!("not JSON: {error}"))?;
+    let value = strict(line)?;
     let object = value.as_object().ok_or("an answer must be a JSON object")?;
     if object.get("v").and_then(Value::as_u64) != Some(VERSION) {
         return Err(format!("the answer is not version {VERSION}"));

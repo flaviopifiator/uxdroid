@@ -93,6 +93,25 @@ fn bad_json_is_refused_with_a_reason() {
 }
 
 #[test]
+fn duplicate_keys_are_refused_at_any_depth() {
+    for line in [
+        &br#"{"v":1,"cmd":"status","cmd":"stop"}"#[..],
+        br#"{"v":1,"cmd":"start","intent":{"action":"a","action":"b"}}"#,
+        br#"{"v":1,"cmd":"start","intent":{"extras":{"k":"1","\u006b":"2"}}}"#,
+    ] {
+        let failure = failure(line);
+        assert_eq!(failure.code, protocol::BAD_REQUEST, "{line:?}");
+        assert!(failure.message.contains("twice"), "{}", failure.message);
+    }
+    // The same key in sibling objects, or inside a string, is no duplicate.
+    let line =
+        br#"{"v":1,"cmd":"start","intent":{"extras":{"k":"{\"k\":1,\"k\":2}"},"action":"k"}}"#;
+    assert!(protocol::parse_request(line).is_ok());
+    let response = protocol::parse_response(br#"{"v":1,"ok":true,"ok":false,"result":{}}"#);
+    assert!(response.unwrap_err().contains("twice"));
+}
+
+#[test]
 fn unknown_versions_are_refused_naming_the_supported_one() {
     for line in [
         &br#"{"v":2,"cmd":"status"}"#[..],

@@ -23,6 +23,13 @@ const MAX_CONNECTIONS: usize = 16;
 const IDLE: Duration = Duration::from_secs(30);
 /// How long a shutdown waits for connections to finish what they are answering.
 const DRAIN: Duration = Duration::from_secs(2);
+/// A connection whose peer takes nothing of an answer for this long is closed, so a client that
+/// stopped reading does not hold a connection forever.
+const WRITE_LIMIT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    IDLE
+};
 
 /// What a server knows of one connection while it lasts.
 #[derive(Debug, Default)]
@@ -94,13 +101,16 @@ fn claim_owner(lock: &Path) -> Result<Option<File>, String> {
 }
 
 /// Whether a socket in this network namespace listens at `path`, read from `/proc/net/unix` so that
-/// nothing connects: a connection to a socket unit's socket would start the app.
-fn listening(path: &Path) -> bool {
+/// nothing connects: a connection to a socket unit's socket would start the app. `None` when the
+/// table cannot be read.
+fn listening(path: &Path) -> Option<bool> {
+    Some(listening_in(&std::fs::read("/proc/net/unix").ok()?, path))
+}
+
+/// Whether `table`, laid out as `/proc/net/unix`, has a listening socket at `path`.
+pub(super) fn listening_in(table: &[u8], path: &Path) -> bool {
     /// `__SO_ACCEPTCON` in the flags column: the socket listens.
     const ACCEPTING: u32 = 1 << 16;
-    let Ok(table) = std::fs::read("/proc/net/unix") else {
-        return false;
-    };
     let wanted = path.as_os_str().as_encoded_bytes();
     table.split(|&byte| byte == b'\n').skip(1).any(|line| {
         // Num RefCount Protocol Flags Type St Inode Path, padded with spaces; the path may hold spaces.
@@ -121,6 +131,21 @@ fn listening(path: &Path) -> bool {
     })
 }
 
+/// Whether a socket file may be removed and bound again: not while a service manager listens on it,
+/// nor when that cannot be told, since removing a socket unit's file leaves the unit unreachable.
+pub(super) fn may_replace(listening: Option<bool>, exists: bool) -> bool {
+    match listening {
+        Some(listening) => !listening,
+        None if exists => {
+            eprintln!(
+                "uxdroid: /proc/net/unix cannot be read, so the control socket that exists is kept"
+            );
+            false
+        }
+        None => true,
+    }
+}
+
 /// Binds `<dir>/<package>.sock`. Ownership is a lock beside it, `<package>.lock`, held as long as the
 /// socket is served; a socket file nobody holds the lock of was left by a process that died, and is
 /// replaced.
@@ -136,7 +161,7 @@ pub fn bind_instance(dir: &Path, package: &str, profile: &str) -> Result<Bound, 
     let Some(owner) = claim_owner(&lock)? else {
         return Ok(Bound::Owned);
     };
-    if listening(&path) {
+    if !may_replace(listening(&path), path.exists()) {
         return Ok(Bound::Managed);
     }
     match std::fs::remove_file(&path) {
@@ -248,13 +273,24 @@ pub fn activated(dir: &Path, package: &str, profile: &str) -> Result<Option<List
         read("LISTEN_FDS"),
         read("LISTEN_FDNAMES"),
     );
-    let fd = listen_fd(
-        std::process::id(),
-        pid.as_deref(),
-        fds.as_deref(),
-        names.as_deref(),
-    )?;
+    let me = std::process::id();
+    // Every descriptor passed to this process closes on exec, as `sd_listen_fds` makes them, those
+    // not chosen and those of a refused unit too, so no program the app runs inherits them.
+    if pid.as_deref().and_then(|pid| pid.parse::<u32>().ok()) == Some(me)
+        && let Some(count) = fds.as_deref().and_then(|fds| fds.parse::<usize>().ok())
+    {
+        close_on_exec(LISTEN_FDS_START, count.min(MAX_LISTEN_FDS));
+    }
+    let fd = listen_fd(me, pid.as_deref(), fds.as_deref(), names.as_deref())?;
     fd.map(|fd| adopt(dir, package, profile, fd)).transpose()
+}
+
+/// Sets close-on-exec on the `count` descriptors from `first` that are open.
+pub(super) fn close_on_exec(first: RawFd, count: usize) {
+    for fd in (first..).take(count) {
+        // SAFETY: sets a flag of a descriptor; one that is not open fails harmlessly.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
 }
 
 fn socket_option(fd: RawFd, option: libc::c_int) -> Option<libc::c_int> {
@@ -557,6 +593,7 @@ fn converse(
         return;
     }
     let _ = stream.set_read_timeout(Some(IDLE));
+    let _ = stream.set_write_timeout(Some(WRITE_LIMIT));
     let mut reader = BufReader::new(stream);
     loop {
         let answer = match protocol::read_line(&mut reader) {
