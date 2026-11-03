@@ -36,6 +36,17 @@ impl<T> Shared<T> {
     }
 }
 
+/// Time left until `deadline`: `Some(None)` without one, which never expires, and `None` once passed.
+fn left(deadline: Option<Instant>) -> Option<Option<Duration>> {
+    match deadline {
+        None => Some(None),
+        Some(deadline) => deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .map(Some),
+    }
+}
+
 fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>, Error> {
     std::thread::Builder::new()
         .name(name.into())
@@ -128,6 +139,12 @@ impl Output {
     /// Buffers whole frames of `samples` and returns how many samples it took. A blocking write
     /// waits for room while the stream plays; a callback stream takes nothing.
     pub fn write(&self, samples: &[f32], blocking: bool) -> usize {
+        self.write_within(samples, if blocking { None } else { Some(Duration::ZERO) })
+    }
+
+    /// As [`Output::write`], waiting at most `timeout` for room, or forever when `None`.
+    pub fn write_within(&self, samples: &[f32], timeout: Option<Duration>) -> usize {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let channels = usize::from(self.config.channels);
         let total = samples.len() / channels * channels;
         let mut done = 0;
@@ -144,10 +161,14 @@ impl Output {
             done += take;
             // A stopped stream blocks too, as on Android: it waits for the app to play.
             let failed = inner.state == State::Disconnected;
-            if done == total || !blocking || inner.closed || failed {
+            let left = left(deadline);
+            if done == total || left.is_none() || inner.closed || failed {
                 return done;
             }
-            inner = self.shared.wait(inner, RECHECK);
+            inner = self.shared.wait(
+                inner,
+                left.flatten().map_or(RECHECK, |left| left.min(RECHECK)),
+            );
         }
     }
 
@@ -267,6 +288,13 @@ impl Output {
         let frames = (inner.ring.len() / usize::from(self.config.channels)) as u64;
         inner.latency + Duration::from_nanos(frames * 1_000_000_000 / u64::from(inner.rate))
     }
+
+    /// The frame the device presents now: the position less what the device holds.
+    pub fn presented(&self) -> u64 {
+        let inner = self.shared.lock();
+        let held = inner.latency.as_secs_f64() * f64::from(self.config.rate);
+        inner.position.saturating_sub(held as u64)
+    }
 }
 
 impl Drop for Output {
@@ -274,7 +302,11 @@ impl Drop for Output {
         self.shared.lock().closed = true;
         self.shared.changed.notify_all();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            // Dropped by the stream's own callback, through an app that let go of it there: the
+            // thread sees `closed` and ends by itself.
+            if thread.thread().id() != std::thread::current().id() {
+                let _ = thread.join();
+            }
         }
     }
 }
@@ -475,6 +507,12 @@ impl Input {
     /// Reads whole frames into `out` and returns how many samples. A blocking read waits for them
     /// while the stream records; a callback stream yields nothing.
     pub fn read(&self, out: &mut [f32], blocking: bool) -> usize {
+        self.read_within(out, if blocking { None } else { Some(Duration::ZERO) })
+    }
+
+    /// As [`Input::read`], waiting at most `timeout` for frames, or forever when `None`.
+    pub fn read_within(&self, out: &mut [f32], timeout: Option<Duration>) -> usize {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let channels = usize::from(self.config.channels);
         let total = out.len() / channels * channels;
         let mut done = 0;
@@ -491,10 +529,14 @@ impl Input {
             if take > 0 {
                 inner.full = false;
             }
-            if done == total || !blocking || inner.closed || inner.state != State::Playing {
+            let left = left(deadline);
+            if done == total || left.is_none() || inner.closed || inner.state != State::Playing {
                 return done;
             }
-            inner = self.shared.wait(inner, RECHECK);
+            inner = self.shared.wait(
+                inner,
+                left.flatten().map_or(RECHECK, |left| left.min(RECHECK)),
+            );
         }
     }
 
@@ -519,7 +561,11 @@ impl Drop for Input {
         self.shared.lock().closed = true;
         self.shared.changed.notify_all();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            // Dropped by the stream's own callback, through an app that let go of it there: the
+            // thread sees `closed` and ends by itself.
+            if thread.thread().id() != std::thread::current().id() {
+                let _ = thread.join();
+            }
         }
     }
 }

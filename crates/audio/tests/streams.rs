@@ -340,3 +340,71 @@ fn alsa_plays_into_its_null_device() {
     );
     assert_eq!(output.position(), 960);
 }
+
+#[test]
+fn a_write_or_read_with_a_timeout_returns_what_fitted_when_it_expires() {
+    let dir = Scratch::new("timeout");
+    let output = Output::open(
+        &Backend::File(dir.0.clone()),
+        Config {
+            rate: 8_000,
+            channels: 1,
+            capacity: 80,
+        },
+    )
+    .unwrap();
+    let started = Instant::now();
+    // Not playing, so the second period never fits.
+    assert_eq!(
+        output.write_within(&[0.5; 160], Some(Duration::from_millis(30))),
+        80
+    );
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(30) && waited < Duration::from_millis(500),
+        "{waited:?}"
+    );
+
+    let input = Input::open(&Backend::File(dir.0.clone()), config(8_000, 1)).unwrap();
+    let mut samples = [0.0; 800];
+    let started = Instant::now();
+    assert_eq!(
+        input.read_within(&mut samples, Some(Duration::from_millis(30))),
+        0,
+        "not recording"
+    );
+    input.start();
+    let read = input.read_within(&mut samples, Some(Duration::from_millis(35)));
+    assert!((160..800).contains(&read), "{read}");
+    assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
+fn the_presented_frame_trails_the_position_by_the_device_latency() {
+    let output = Output::open(&Backend::Null, config(8_000, 1)).unwrap();
+    output.write(&[0.5; 400], true);
+    output.start();
+    std::thread::sleep(Duration::from_millis(30));
+    let (position, presented) = (output.position(), output.presented());
+    // A clock device has no latency of its own.
+    assert_eq!(presented, position);
+    assert!(position > 0);
+}
+
+#[test]
+fn a_stream_dropped_inside_its_own_callback_ends_without_waiting_for_itself() {
+    let holder: Arc<Mutex<Option<Output>>> = Arc::new(Mutex::new(None));
+    let inside = holder.clone();
+    let (done, finished) = std::sync::mpsc::channel();
+    let output = Output::with_callback(&Backend::Null, config(8_000, 1), move |out| {
+        out.fill(0.0);
+        // The last reference goes away on the device thread.
+        drop(inside.lock().unwrap().take());
+        let _ = done.send(());
+        Flow::Continue
+    })
+    .unwrap();
+    output.start();
+    *holder.lock().unwrap() = Some(output);
+    finished.recv_timeout(Duration::from_secs(2)).unwrap();
+}
