@@ -43,6 +43,9 @@ python3 "$TOOLS/natives_list.py" "$W/javap.txt" "$W/boot-classes" "$RUNTIME/fram
 # The native half of the framework, built by AOSP for a glibc host, and the data it reads.
 unzip -q -j "$ALL" native/linux/x86_64/libandroid_runtime.so -d "$RUNTIME/lib64"
 unzip -q -j "$ALL" 'icu/icudt*.dat' -d "$RUNTIME/usr/icu"
+# The host library's ICU loader opens its data under ANDROID_I18N_ROOT the first time text breaks
+# into lines, as in an EditText, and aborts without it. ART's own, older ICU data stays beside it.
+ln -f "$RUNTIME"/usr/icu/icudt*.dat "$RUNTIME/com.android.i18n/etc/icu/"
 unzip -p "$ALL" build.prop > "$W/build.prop"
 python3 "$TOOLS/assets.py" build-prop "$W/build.prop" "$RUNTIME/build.prop"
 
