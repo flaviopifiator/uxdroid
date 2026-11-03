@@ -356,6 +356,32 @@ public final class Launcher {
             if (once) exitWhenLaunched(stack.top());
         }
 
+        /** PendingIntent.getActivity, getBroadcast and their kind: see {@link IntentSenders}. */
+        public android.content.IIntentSender getIntentSenderWithFeature(int type, String packageName,
+                String featureId, IBinder token, String resultWho, int requestCode, Intent[] intents,
+                String[] resolvedTypes, int flags, Bundle options, int userId) {
+            return IntentSenders.get(type, packageName, requestCode, intents, flags);
+        }
+
+        public void cancelIntentSender(android.content.IIntentSender sender) {
+            IntentSenders.cancel(sender);
+        }
+
+        public int sendIntentSender(IApplicationThread caller, android.content.IIntentSender target,
+                IBinder allowlistToken, int code, Intent intent, String resolvedType,
+                android.content.IIntentReceiver finishedReceiver, String requiredPermission, Bundle options) {
+            return IntentSenders.send(target, intent);
+        }
+
+        public android.app.ActivityManager.PendingIntentInfo getInfoForIntentSender(
+                android.content.IIntentSender sender) {
+            return IntentSenders.info(sender, app.application.uid);
+        }
+
+        public Intent getIntentForIntentSender(android.content.IIntentSender sender) {
+            return IntentSenders.intent(sender);
+        }
+
         /**
          * Providers of the system, such as Settings, live in this process as proxies of IContentProvider.
          * A call nobody handles returns null, which Settings reads as "use the default".
