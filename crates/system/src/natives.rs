@@ -259,9 +259,9 @@ unsafe extern "system" fn binder_finalizer(_env: *mut JNIEnv, _class: jclass) ->
 unsafe extern "system" fn calling_pid(_env: *mut JNIEnv, _class: jclass) -> jint {
     std::process::id() as jint
 }
+/// No call ever comes from another process, so the caller is the app itself, as `Process.myUid`.
 unsafe extern "system" fn calling_uid(_env: *mut JNIEnv, _class: jclass) -> jint {
-    // SAFETY: getuid cannot fail.
-    unsafe { libc::getuid() as jint }
+    crate::identity::uid()
 }
 unsafe extern "system" fn clear_identity(env: *mut JNIEnv, class: jclass) -> jlong {
     // SAFETY: as above.

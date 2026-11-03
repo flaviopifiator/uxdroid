@@ -76,6 +76,8 @@ public final class Launcher {
         }
         if (app == null) app = App.parse(apk, activityName);
         String packageName = app.application.packageName;
+        // Before ActivityThread runs: the framework reads the app's uid once and keeps it.
+        Natives.becomeApplication(packageName);
         if (!claimInstance(packageName)) {
             if (Control.activated()) refuseActivation(packageName);
             forward(packageName, intent);
@@ -244,7 +246,8 @@ public final class Launcher {
             application.credentialProtectedDataDir = data.getPath();
             application.deviceProtectedDataDir = data.getPath();
             application.nativeLibraryDir = libraries.getPath();
-            application.uid = android.os.Process.myUid();
+            // An application uid of its own, as Android's installer gives, not the Linux user's.
+            application.uid = Natives.applicationUid(application.packageName);
             if (application.processName == null) application.processName = application.packageName;
         }
 

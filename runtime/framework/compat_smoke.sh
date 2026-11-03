@@ -1,0 +1,36 @@
+#!/bin/bash
+# What the compatibility corpus (corpus_smoke.sh) needed from the platform, checked with an app of
+# ours, so it runs in the dev service: the app's identity, its storage and the system services it
+# asks for. The APK is built by build_system.sh.
+set -u -o pipefail
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+fail() { echo "FAIL: $*"; grep -v -E "jni_internal|^	at (android\.os|java\.lang\.reflect)" "$WORK/out" | tail -"${TAIL:-25}" | cut -c1-220; exit 1; }
+
+cargo build -q --release -p uxdroid-system -p uxdroid-cli --manifest-path /work/Cargo.toml || fail "build"
+TARGET="$(cargo metadata -q --format-version 1 --no-deps --manifest-path /work/Cargo.toml \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')/release"
+source /work/runtime/art/run.sh
+export ANDROID_DATA="$WORK/data"
+mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
+CP="$RUNTIME/framework/framework.jar:$RUNTIME/framework/uxdroid-system.jar"
+APK="$RUNTIME/samples/framework/compat.apk"
+[ -r "$APK" ] || fail "no $APK: run runtime/framework/build_system.sh"
+UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$APK" --data "$ANDROID_DATA" >"$WORK/install" 2>&1 \
+    || { cat "$WORK/install"; fail "install"; }
+timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher --once \
+    "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
+    || fail "exit $?"
+expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
+grep -E "^(identity|launched) " "$WORK/out"
+
+# 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
+# the Linux uid: the framework treats 1000 as the system and refuses it WebView.
+line=$(grep -E "^identity " "$WORK/out") || fail "the app did not report its identity"
+read -r _ _ my _ calling _ info _ user _ is_app <<<"$line"
+[ "$my" = "$calling" ] && [ "$my" = "$info" ] \
+    || fail "Process.myUid, Binder.getCallingUid and ApplicationInfo.uid differ: $line"
+[ "$my" -ge 10000 ] && [ "$my" -le 19999 ] || fail "the app's uid $my is not an application uid"
+[ "$user" = "UserHandle{0}" ] && [ "$is_app" = "true" ] || fail "the app is not an application of user 0: $line"
+expect "^launched com\.example\.compat/\.CompatActivity " "the activity was not launched"
+echo "ok: the app has its own identity, storage and the system services the corpus asks for"

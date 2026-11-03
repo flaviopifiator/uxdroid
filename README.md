@@ -102,6 +102,9 @@ docker compose run --rm -T dev bash /work/runtime/framework/service_smoke.sh
 # damage-only redraws, a dialog and a popup as subsurfaces, frame callbacks pacing an animation, a
 # resize and a close.
 docker compose run --rm -T dev bash /work/runtime/framework/compose_smoke.sh
+# What the F-Droid corpus needed, checked with an app of ours: its own application uid, storage and
+# the system services the corpus asks for.
+docker compose run --rm -T dev bash /work/runtime/framework/compat_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli

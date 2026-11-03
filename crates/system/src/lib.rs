@@ -18,6 +18,7 @@ pub mod control;
 pub mod default_library;
 pub mod defaults;
 mod handles;
+pub mod identity;
 pub mod input;
 mod java;
 mod natives;
@@ -333,6 +334,30 @@ unsafe extern "system" fn bind_system(env: *mut JNIEnv, _class: jclass, build_pr
 }
 
 /// # Safety
+/// `env` must be the calling thread's JNI environment, and `package` a string or null.
+unsafe extern "system" fn application_uid(
+    env: *mut JNIEnv,
+    _class: jclass,
+    package: jstring,
+) -> jint {
+    // SAFETY: as above.
+    let package = unsafe { java_string(env, package) }.unwrap_or_default();
+    identity::application_uid(&package) as jint
+}
+
+/// # Safety
+/// As `application_uid`.
+unsafe extern "system" fn become_application(
+    env: *mut JNIEnv,
+    _class: jclass,
+    package: jstring,
+) -> jint {
+    // SAFETY: as above.
+    let package = unsafe { java_string(env, package) }.unwrap_or_default();
+    identity::become_application(&package) as jint
+}
+
+/// # Safety
 /// Called by ART when the library loads.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void) -> jint {
@@ -344,7 +369,7 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
         if ((**vm).v1_2.GetEnv)(vm, &mut env, JNI_VERSION_1_6) != JNI_OK {
             return JNI_ERR;
         }
-        let methods: [Method; 5] = [
+        let methods: [Method; 7] = [
             (
                 c"defaultsProblem",
                 c"(Ljava/lang/String;)Ljava/lang/String;",
@@ -369,6 +394,16 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
                 c"bindSystem",
                 c"(Ljava/lang/String;)V",
                 bind_system as *mut c_void,
+            ),
+            (
+                c"applicationUid",
+                c"(Ljava/lang/String;)I",
+                application_uid as *mut c_void,
+            ),
+            (
+                c"becomeApplication",
+                c"(Ljava/lang/String;)I",
+                become_application as *mut c_void,
             ),
         ];
         match register(env as *mut JNIEnv, c"dev/uxdroid/system/Natives", &methods) {
