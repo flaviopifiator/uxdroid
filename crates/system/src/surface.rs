@@ -19,7 +19,7 @@
 //! are sent down that channel.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Once, OnceLock, Weak};
 use std::time::Instant;
 
@@ -123,6 +123,8 @@ static STACK: Mutex<Stack<u32>> = Mutex::new(Stack::new());
 static WINDOWS: Mutex<Vec<(u32, Weak<Layer>)>> = Mutex::new(Vec::new());
 /// Whether a Looper watches the display's connection.
 static WATCHING: AtomicBool = AtomicBool::new(false);
+/// Frames the windows presented, which an agent's `wait` for idle watches.
+static PRESENTED: AtomicU64 = AtomicU64::new(0);
 /// `dev.uxdroid.system.WindowService`, for what the compositor asks of the display.
 static WINDOW_SERVICE_CLASS: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 /// `dev.uxdroid.system.WindowInput`, found when the natives are registered.
@@ -1106,6 +1108,7 @@ fn present(target: &mut Target, window_layer: &Arc<Layer>) -> Result<(), Failure
     window
         .present(damage)
         .map_err(|error| Failure::Message(format!("cannot present a frame: {error}")))?;
+    PRESENTED.fetch_add(1, Ordering::Relaxed);
     // The round trip may have read input, which the Looper will not see as readable.
     route();
     Ok(())
@@ -1407,4 +1410,100 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
         WINDOW_SERVICE_CLASS.store(java::global(env, class).cast(), Ordering::Release);
     }
     Ok(())
+}
+
+/// The display as an agent sees it: its seat, and its windows' last frames.
+pub struct DisplaySeat;
+
+impl crate::control::agent::Seat for DisplaySeat {
+    fn display(&self) -> Option<(i32, i32)> {
+        wayland::display_size()
+    }
+
+    /// Display coordinates become the bottom window's, which input from the compositor's seat
+    /// would be in, and routing finds the window under them as it does for that input.
+    fn send(&self, input: crate::control::agent::Input) -> Result<(), String> {
+        use crate::control::agent::Input;
+        use wayland::Injected;
+        let (surface, placement) = locked(&STACK)
+            .windows()
+            .first()
+            .copied()
+            .ok_or("the app shows no window")?;
+        // Routing adds the window's place back, so the event lands at the display point.
+        let (dx, dy) = placement.surface();
+        let at = |x: i32, y: i32| ((x - dx) as f32, (y - dy) as f32);
+        let injected = match input {
+            Input::TouchDown { x, y } => {
+                let (x, y) = at(x, y);
+                Injected::TouchDown { surface, x, y }
+            }
+            Input::TouchUp => Injected::TouchUp { surface },
+            Input::Wheel { x, y, dx, dy } => {
+                let (x, y) = at(x, y);
+                Injected::Wheel {
+                    surface,
+                    x,
+                    y,
+                    vertical: dy as f32,
+                    horizontal: dx as f32,
+                }
+            }
+            Input::Key {
+                evdev,
+                pressed,
+                shift,
+            } => Injected::Key {
+                evdev,
+                pressed,
+                shift,
+            },
+        };
+        wayland::inject(injected)?;
+        route();
+        Ok(())
+    }
+
+    fn presented(&self) -> u64 {
+        PRESENTED.load(Ordering::Relaxed)
+    }
+
+    /// Copies each window's frame under its own lock, one at a time: drawing holds a window's lock
+    /// while it takes the stack's, so the stack is never held while a window is locked here.
+    fn frames(&self) -> Vec<crate::control::agent::WindowFrame> {
+        let stack = locked(&STACK).windows();
+        let windows: Vec<(u32, Arc<Layer>)> = locked(&WINDOWS)
+            .iter()
+            .filter_map(|(key, layer)| Some((*key, layer.upgrade()?)))
+            .collect();
+        let mut frames = Vec::new();
+        for (key, placement) in stack {
+            let Some((_, layer)) = windows.iter().find(|(window, _)| *window == key) else {
+                continue;
+            };
+            let mut target = layer.target();
+            let Some(window) = target.as_mut().and_then(|target| target.window.as_mut()) else {
+                continue;
+            };
+            let (x, y) = if window.is_toplevel() {
+                (0, 0)
+            } else {
+                placement.surface()
+            };
+            let frame = window.frame();
+            let count = (frame.width * frame.height) as usize;
+            frames.push(crate::control::agent::WindowFrame {
+                x,
+                y,
+                width: frame.width,
+                height: frame.height,
+                pixels: frame.pixels[..count.min(frame.pixels.len())].to_vec(),
+            });
+        }
+        frames
+    }
+
+    fn charmap(&self) -> Arc<crate::input::charmap::Charmap> {
+        crate::input::charmap::seat()
+    }
 }

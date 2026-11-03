@@ -11,6 +11,9 @@
 
 #[cfg(test)]
 mod activation_tests;
+pub mod agent;
+#[cfg(test)]
+mod agent_tests;
 pub mod client;
 mod java;
 pub mod png;

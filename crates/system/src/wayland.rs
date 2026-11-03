@@ -40,6 +40,36 @@ const ACTIVATED: u32 = 4;
 /// Where an input event goes: the surface it came from, or the focused window.
 pub type Target = Option<u32>;
 
+/// Seat input an agent sends: on a surface, in its coordinates, or for keys, to the focused window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Injected {
+    TouchDown {
+        surface: u32,
+        x: f32,
+        y: f32,
+    },
+    TouchUp {
+        surface: u32,
+    },
+    Wheel {
+        surface: u32,
+        x: f32,
+        y: f32,
+        vertical: f32,
+        horizontal: f32,
+    },
+    Key {
+        evdev: u32,
+        pressed: bool,
+        shift: bool,
+    },
+}
+
+/// The touch point agent taps use, far from the ids a compositor gives fingers.
+const AGENT_TOUCH: i32 = i32::MAX - 1;
+/// `KEY_LEFTSHIFT`.
+const LEFT_SHIFT: u32 = 42;
+
 #[derive(Default)]
 struct State {
     configure_serial: Option<u32>,
@@ -257,6 +287,67 @@ pub fn take_events() -> Vec<(Target, Event)> {
         .unwrap_or_default()
 }
 
+/// Puts agent input among the seat's, as the compositor would have sent it: the same translation
+/// makes it Android events, so the app cannot tell the two apart. The caller routes it.
+pub fn inject(input: Injected) -> Result<(), String> {
+    let mut display = display();
+    let Some(display) = display.as_mut() else {
+        return Err("the app shows no window".into());
+    };
+    let state = &mut display.state;
+    let now = input::now();
+    let shift = keys::META_SHIFT_ON | keys::META_SHIFT_LEFT_ON;
+    let (target, events) = match input {
+        Injected::TouchDown { surface, x, y } => {
+            (Some(surface), state.seat.touch_down(AGENT_TOUCH, x, y, now))
+        }
+        Injected::TouchUp { surface } => (Some(surface), state.seat.touch_up(AGENT_TOUCH, now)),
+        Injected::Wheel {
+            surface,
+            x,
+            y,
+            vertical,
+            horizontal,
+        } => (
+            Some(surface),
+            state.seat.wheel_at(x, y, vertical, horizontal, now),
+        ),
+        // Shift goes down before the key and up after it, with its meta state on the key's events,
+        // as a compositor's modifiers event would set it.
+        Injected::Key {
+            evdev,
+            pressed,
+            shift: shifted,
+        } => {
+            let mut events = Vec::new();
+            if shifted && pressed {
+                events.extend(state.seat.key(LEFT_SHIFT, true, now));
+            }
+            if shifted {
+                state.seat.set_meta_state(state.seat.meta_state() | shift);
+            }
+            events.extend(state.seat.key(evdev, pressed, now));
+            if shifted && !pressed {
+                events.extend(state.seat.key(LEFT_SHIFT, false, now));
+            }
+            state.update_meta();
+            (None, events)
+        }
+    };
+    state
+        .events
+        .extend(events.into_iter().map(|event| (target, event)));
+    Ok(())
+}
+
+/// The display's size: its toplevel's, none before the first window.
+pub fn display_size() -> Option<(i32, i32)> {
+    display()
+        .as_ref()
+        .filter(|display| display.toplevel.is_some())
+        .map(|display| display.size)
+}
+
 /// A new size or a close the compositor asked for since the last call.
 pub fn take_requests() -> Requests {
     let mut display = display();
@@ -412,6 +503,11 @@ impl Window {
                 height,
             })
         })
+    }
+
+    /// Whether this is the toplevel's own window, at the display's origin.
+    pub fn is_toplevel(&self) -> bool {
+        matches!(self.role, Role::Toplevel(..))
     }
 
     /// The id input events name this window's surface by.
