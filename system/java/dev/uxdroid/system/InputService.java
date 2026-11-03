@@ -4,23 +4,42 @@ import android.view.InputDevice;
 import android.view.KeyCharacterMap;
 
 /**
- * The handler of IInputManager. Input does not reach the app yet, but every Android device has the
- * virtual keyboard that key events without a device come from, and windows ask for its key map.
+ * The handler of IInputManager. Its devices are the Wayland seat's keyboard, mouse and touchscreen,
+ * whose events reach windows through their input channels, and the virtual keyboard every Android
+ * device has. Their key character maps all read the seat's keymap in libuxdroid_system.so.
  */
 public final class InputService {
-    private final InputDevice virtualKeyboard = new InputDevice.Builder()
-            .setId(KeyCharacterMap.VIRTUAL_KEYBOARD)
-            .setName("Virtual")
-            .setSources(InputDevice.SOURCE_KEYBOARD)
-            .setKeyboardType(InputDevice.KEYBOARD_TYPE_ALPHABETIC)
-            .setKeyCharacterMap(KeyCharacterMap.obtainEmptyMap(KeyCharacterMap.VIRTUAL_KEYBOARD))
-            .build();
+    /** Ids libuxdroid_system.so gives the seat's events. */
+    static final int KEYBOARD = 1;
+    static final int MOUSE = 2;
+    static final int TOUCHSCREEN = 3;
+
+    private final InputDevice[] devices = {
+        device(KeyCharacterMap.VIRTUAL_KEYBOARD, "Virtual", InputDevice.SOURCE_KEYBOARD, false),
+        device(KEYBOARD, "uxdroid keyboard", InputDevice.SOURCE_KEYBOARD, true),
+        device(MOUSE, "uxdroid pointer", InputDevice.SOURCE_MOUSE, true),
+        device(TOUCHSCREEN, "uxdroid touchscreen", InputDevice.SOURCE_TOUCHSCREEN, false),
+    };
+
+    private static InputDevice device(int id, String name, int sources, boolean external) {
+        InputDevice.Builder builder = new InputDevice.Builder().setId(id).setName(name).setSources(sources)
+                .setExternal(external).setKeyCharacterMap(KeyCharacterMap.obtainEmptyMap(id));
+        if (sources == InputDevice.SOURCE_KEYBOARD) {
+            builder.setKeyboardType(InputDevice.KEYBOARD_TYPE_ALPHABETIC);
+        }
+        return builder.build();
+    }
 
     public int[] getInputDeviceIds() {
-        return new int[] {virtualKeyboard.getId()};
+        int[] ids = new int[devices.length];
+        for (int i = 0; i < devices.length; i++) ids[i] = devices[i].getId();
+        return ids;
     }
 
     public InputDevice getInputDevice(int id) {
-        return id == virtualKeyboard.getId() ? virtualKeyboard : null;
+        for (InputDevice device : devices) {
+            if (device.getId() == id) return device;
+        }
+        return null;
     }
 }

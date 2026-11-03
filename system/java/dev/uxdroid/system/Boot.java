@@ -31,6 +31,7 @@ public final class Boot {
         "android.util.jar.StrictJarFile",
         "android.view.InputDevice",
         "android.view.KeyCharacterMap",
+        "android.view.KeyEvent",
         "android.view.MotionEvent",
         "android.view.VelocityTracker",
         "com.android.internal.util.VirtualRefBasePtr",

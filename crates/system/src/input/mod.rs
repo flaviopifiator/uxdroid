@@ -9,6 +9,7 @@
 //! [`natives`] implements `InputChannel`, `InputEventReceiver` and `KeyCharacterMap` over them.
 
 pub mod charmap;
+pub mod kcm;
 pub mod keys;
 pub mod natives;
 pub mod translate;
