@@ -761,3 +761,160 @@ fn only_start_connects_to_a_socket_no_app_serves_yet() {
     );
     assert!(app.join().unwrap().contains("\"cmd\":\"start\""));
 }
+
+#[test]
+fn start_with_another_data_directory_than_the_running_one_is_refused() {
+    let dir = scratch("start-other-data");
+    let (server, app) = serve(&dir, "com.example.app", app(77));
+    let output = uxdroid(
+        &dir,
+        &[
+            "app",
+            "com.example.app",
+            "start",
+            "--data-dir",
+            "/other/data",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "error: com.example.app is already running over /srv/android data, not /other/data; \
+         give this one its own --profile to run both\n"
+    );
+    assert_eq!(*app.received.lock().unwrap(), vec![Request::Status]);
+    // The running instance's own data directory hands it the intent, as without --data-dir.
+    let output = uxdroid(
+        &dir,
+        &[
+            "app",
+            "com.example.app",
+            "start",
+            "--data-dir",
+            "/srv/android data",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains("the intent went to it"));
+    server.shutdown();
+}
+
+/// A launcher that writes its pid to `pid` and runs `server` on the instance's socket.
+fn launching(dir: &Path, server: &str) -> PathBuf {
+    let runtime = fake_runtime(dir);
+    std::fs::write(
+        runtime.join("bin/dalvikvm64"),
+        format!(
+            "#!/bin/sh\necho launcher says hello\n{server}\n",
+            server = server
+                .replace("{pid}", &dir.join("pid").display().to_string())
+                .replace("{socket}", "$XDG_RUNTIME_DIR/uxdroid/com.example.app.sock")
+        ),
+    )
+    .unwrap();
+    runtime
+}
+
+fn gone(pid: i32) -> bool {
+    for _ in 0..100 {
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn a_start_that_fails_after_launching_stops_what_it_launched() {
+    let dir = scratch("start-orphan");
+    // Serves its socket with lines that are no answers.
+    let runtime = launching(
+        &dir,
+        "echo $$ > {pid}\nexec python3 -I -c 'import socket, sys\n\
+         s = socket.socket(socket.AF_UNIX)\ns.bind(sys.argv[1])\ns.listen()\n\
+         while True:\n    c, _ = s.accept()\n    c.sendall(b\"garbage\\n\")\n    c.close()\n' \"{socket}\"",
+    );
+    let data = installed(&dir);
+    let output = uxdroid(
+        &dir,
+        &[
+            "app",
+            "com.example.app",
+            "start",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--runtime",
+            runtime.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let pid: i32 = std::fs::read_to_string(dir.join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let left = !gone(pid);
+    if left {
+        // SAFETY: ends the process this test's launcher left.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert!(!left, "the launched process was left running");
+}
+
+#[test]
+fn a_start_that_hands_off_to_another_keeps_that_instance_s_log() {
+    let dir = scratch("start-handoff");
+    // Another instance serves the socket by the time this launcher exits, as when two starts race.
+    let runtime = launching(
+        &dir,
+        "python3 -I -c 'import json, os, socket, sys\n\
+         s = socket.socket(socket.AF_UNIX)\ns.bind(sys.argv[1])\ns.listen()\n\
+         open(sys.argv[2], \"w\").write(str(os.getpid()))\n\
+         while True:\n    c, _ = s.accept()\n    for line in c.makefile():\n\
+         \x20       r = {\"pid\": os.getpid(), \"package\": \"com.example.app\", \"data\": \"/d\", \"activities\": []}\n\
+         \x20       c.sendall((json.dumps({\"v\": 1, \"id\": 1, \"ok\": True, \"result\": r}) + chr(10)).encode())\n\
+         \x20   c.close()\n' \"{socket}\" {pid} &\n\
+         while [ ! -s {pid} ]; do sleep 0.01; done\nexit 0",
+    );
+    let data = installed(&dir);
+    let control = uxdroid_system::control::control_dir_in(&dir.join("run")).unwrap();
+    let log = control.join("com.example.app.log");
+    std::fs::write(&log, "the running instance's log\n").unwrap();
+    let output = uxdroid(
+        &dir,
+        &[
+            "app",
+            "com.example.app",
+            "start",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--runtime",
+            runtime.to_str().unwrap(),
+        ],
+    );
+    let pid: i32 = std::fs::read_to_string(dir.join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: ends the server this test's launcher started.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("the launch went to it"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "the running instance's log\n"
+    );
+    let names: Vec<String> = std::fs::read_dir(dir.join("run/uxdroid"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".log"))
+        .collect();
+    assert_eq!(names, ["com.example.app.log"], "no other log is left");
+}
