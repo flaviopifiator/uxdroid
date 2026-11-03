@@ -322,6 +322,16 @@ name = "uxdroid-nativebridge"
 version = "0.1.0"
 dependencies = [
  "uxdroid-bridge",
+ "uxdroid-ndk",
+]
+
+[[package]]
+name = "uxdroid-ndk"
+version = "0.1.0"
+dependencies = [
+ "jni-sys",
+ "libc",
+ "uxdroid-bridge",
 ]
 
 [[package]]

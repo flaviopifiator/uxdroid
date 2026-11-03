@@ -47,6 +47,7 @@ bionic and glibc share most symbol names but not their ABI. Probes compiled agai
 
 | Symbol | Result |
 |--------|--------|
+| Exported by an Android system library the library needs, such as `libandroid.so` | Binds to that library's signature table, below |
 | Listed in `crates/bridge/src/glibc_compatible.txt` | Binds directly, with no added cost |
 | Different ABI, translatable | Binds to a shim in `crates/bridge/src/shims.rs` |
 | A function in glibc that nobody audited | Loads, and stops the program naming the symbol if it is called |
@@ -68,6 +69,27 @@ ART's host build links against a glibc 2.17 sysroot and needs no bionic, so `dal
 `uxdroid run` replaces itself with `dalvikvm`. ART tries glibc's `dlopen` on an app's native library, which fails for anything linked to bionic's `libc.so`, then falls back to `crates/nativebridge`, a Rust library that loads it with the bridge. CPU and calling convention match, so a JNI call goes straight to the function's address with no translation. This same hook is where `arm64-v8a` translation will attach. `crates/platform` holds the native half of the `android.*` classes in `platform/java`. The classes are on the class path for now, and will move to the boot class path when there are enough to be worth compiling into the image.
 
 The window, audio and GPU stay behind this layer, so a later macOS port does not reach into the rest.
+
+### Android's system libraries are signature tables
+
+App libraries name `liblog.so`, `libandroid.so`, `libjnigraphics.so`, `libEGL.so`, `libGLESv2.so`, `libGLESv3.so` and `libOpenSLES.so` in `DT_NEEDED`. None of them is a file. Each is a table of `uxdroid_bridge::table`: every export with its host address and its signature in a closed vocabulary, such as `i32(i32,ptr,ptr,...)` for `__android_log_print` or `ptr` for an object like `SL_IID_ENGINE`. `liblog`'s table is in the bridge, next to the printf machinery it shares with bionic's libc, and every library sees it, as on Android, where `app_process` links it. The others are in `crates/ndk`, and `crates/nativebridge` hands them to the loader before the first app library loads. A library searches its loaded dependencies first, then the tables it needs, then the shims, and a name its table lacks is reported missing like any other. The EGL and GLES tables are generated from the NDK's headers and stubs by `crates/ndk/generate.sh`.
+
+| Library | Served by |
+|---------|-----------|
+| `liblog` | stderr, with the minimum priority, default tag, logger and aborter an app may set |
+| `libandroid` assets | The framework's `AssetManager`: each asset is read into memory when it opens, and stored entries also open as file descriptors |
+| `libandroid` looper | One epoll set per thread. On a thread with a Java `Looper`, `MessageQueue.addOnFileDescriptorEventListener` watches that set, so the app's callbacks run inside `Looper.loop` |
+| `libandroid` native window | The Java `Surface`: a lock hands out a buffer, and posting copies it into a `Bitmap` and draws it through `Surface.lockCanvas` |
+| `libjnigraphics` | `Bitmap.getPixels` and `setPixels`, converted to Android's memory layout |
+| `libEGL` | Mesa's surfaceless platform, with llvmpipe when there is no GPU. A window surface is a pbuffer that each swap reads back into its native window. Configs report `EGL_WINDOW_BIT` and Android's visual IDs |
+| `libGLESv2`, `libGLESv3` | Mesa's own functions, at no added cost |
+| `libOpenSLES` | An engine that realizes, with every audio object `SL_RESULT_FEATURE_UNSUPPORTED`. The interface IDs are data, bound on purpose: each is a pointer to a GUID of ours, and apps compare the pointers |
+
+Pixels cross into Java as `int` arrays, because AOSP's host graphics library cannot take NIO buffers on ART: it looks up OpenJDK's `FileDescriptor.fd`. A native window frame is therefore copied three times before it reaches Wayland, and an EGL frame once more for the readback. A buffer shared with the Wayland window, and an EGL window on its `wl_surface`, would remove those copies.
+
+A translator needs more than the tables: callbacks into app code, such as `ALooper` callbacks and an app's logger, and host functions handed out as pointers, such as `eglGetProcAddress` results and OpenSL ES method tables, cross the same boundary.
+
+Not yet: `AChoreographer`, a second surface such as a `SurfaceView`, `AHardwareBuffer` and Android image extensions for EGL, audio, and the rest of `libandroid`, such as sensors, input queues and configuration.
 
 ### The platform is AOSP's own framework
 
@@ -102,7 +124,7 @@ The spike measured 28 MiB of private dirty memory per process. Most of the rest 
 The platform is built once, for the host. Only an app's own `.so` files have a guest ABI, and only the bridge knows which one. These rules let `arm64-v8a`, and later `armeabi-v7a`, arrive without changes elsewhere:
 
 1. ART, the framework, the services and our natives have a single host build. Nothing outside `crates/bridge` and `crates/nativebridge` depends on the app's ABI.
-2. Every function we expose to app native code, such as `libandroid`, `liblog`, EGL or OpenSL ES, is declared in a machine-readable signature table next to its implementation. Direct loading binds the table's addresses. A translator generates guest-to-host trampolines from the same table.
+2. Every function we expose to app native code, such as `libandroid`, `liblog`, EGL or OpenSL ES, is declared in a machine-readable signature table next to its implementation, as described above. Direct loading binds the table's addresses. A translator generates guest-to-host trampolines from the same table.
 3. App native code reaches the platform only through JNI and those functions. ART passes each JNI method's shorty to `get_trampoline`, which is where a translator wraps guest code.
 4. Calling-convention shortcuts stay on the host side. The default bodies above are called only by host ART, never by guest code.
 5. Install time picks the ABI: the host's when the APK has it, otherwise a guest ABI the translator supports. The choice is recorded with the install.

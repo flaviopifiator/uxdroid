@@ -3,6 +3,9 @@
 //! ART tries glibc's `dlopen` first and falls back to this library, which it finds through
 //! `-XX:NativeBridge=`. Bionic libraries here share the host's CPU and calling convention, so a
 //! trampoline is simply the function's own address and a JNI call costs nothing extra.
+//!
+//! The Android system libraries apps link against, such as `libandroid.so` or `libEGL.so`, are the
+//! signature tables of `uxdroid_ndk`, served to the loader before the first app library loads.
 #![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 
 use std::cell::RefCell;
@@ -10,11 +13,13 @@ use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
+use std::sync::Once;
 
-use uxdroid_bridge::{Library, load};
+use uxdroid_bridge::{Library, load, table};
 
-/// Includes linker namespaces, the lowest version current ART accepts.
-const INTERFACE_VERSION: u32 = 3;
+/// Up to identifying bridged function pointers. Below it, libnativebridge warns on every native
+/// method ART registers, thousands of times for the framework.
+const INTERFACE_VERSION: u32 = 8;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -51,6 +56,14 @@ pub struct NativeBridgeCallbacks {
     ) -> *mut c_void,
     link_namespaces: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> bool,
     load_library_ext: unsafe extern "C" fn(*const c_char, c_int, *mut c_void) -> *mut c_void,
+    get_vendor_namespace: unsafe extern "C" fn() -> *mut c_void,
+    get_exported_namespace: unsafe extern "C" fn(*const c_char) -> *mut c_void,
+    pre_zygote_fork: unsafe extern "C" fn(),
+    get_trampoline_with_jni_call_type:
+        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32, c_int) -> *mut c_void,
+    get_trampoline_for_function_pointer:
+        unsafe extern "C" fn(*const c_void, *const c_char, u32, c_int) -> *mut c_void,
+    is_native_bridge_function_pointer: unsafe extern "C" fn(*const c_void) -> bool,
 }
 
 /// The symbol ART looks up by this exact name.
@@ -72,17 +85,34 @@ pub static NativeBridgeItf: NativeBridgeCallbacks = NativeBridgeCallbacks {
     create_namespace,
     link_namespaces,
     load_library_ext,
+    get_vendor_namespace,
+    get_exported_namespace,
+    pre_zygote_fork,
+    get_trampoline_with_jni_call_type,
+    get_trampoline_for_function_pointer,
+    is_native_bridge_function_pointer,
 };
+
+fn provide_system_libraries() {
+    static PROVIDED: Once = Once::new();
+    PROVIDED.call_once(|| {
+        for library in uxdroid_ndk::tables() {
+            table::provide(library);
+        }
+    });
+}
 
 unsafe extern "C" fn initialize(
     _callbacks: *const c_void,
     _private_dir: *const c_char,
     _instruction_set: *const c_char,
 ) -> bool {
+    provide_system_libraries();
     true
 }
 
 unsafe extern "C" fn load_library(path: *const c_char, _flag: c_int) -> *mut c_void {
+    provide_system_libraries();
     // SAFETY: ART passes a C string.
     let path = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(path) }.to_bytes(),
@@ -174,4 +204,41 @@ unsafe extern "C" fn load_library_ext(
 ) -> *mut c_void {
     // SAFETY: forwards ART's arguments under the same contract.
     unsafe { load_library(path, flag) }
+}
+
+unsafe extern "C" fn get_vendor_namespace() -> *mut c_void {
+    std::ptr::dangling_mut()
+}
+
+unsafe extern "C" fn get_exported_namespace(_name: *const c_char) -> *mut c_void {
+    std::ptr::dangling_mut()
+}
+
+unsafe extern "C" fn pre_zygote_fork() {}
+
+unsafe extern "C" fn get_trampoline_with_jni_call_type(
+    handle: *mut c_void,
+    name: *const c_char,
+    shorty: *const c_char,
+    shorty_length: u32,
+    _call_type: c_int,
+) -> *mut c_void {
+    // SAFETY: forwards ART's arguments under the same contract.
+    unsafe { get_trampoline(handle, name, shorty, shorty_length) }
+}
+
+/// A function a bridged library registers itself. Host-ABI code needs no trampoline; a translator
+/// wraps guest code here.
+unsafe extern "C" fn get_trampoline_for_function_pointer(
+    method: *const c_void,
+    _shorty: *const c_char,
+    _shorty_length: u32,
+    _call_type: c_int,
+) -> *mut c_void {
+    method.cast_mut()
+}
+
+/// No loaded function needs translation while every bridged library has the host's ABI.
+unsafe extern "C" fn is_native_bridge_function_pointer(_method: *const c_void) -> bool {
+    false
 }

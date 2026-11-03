@@ -82,6 +82,8 @@ docker compose run --rm -T dev bash /work/runtime/framework/smoke.sh
 docker compose run --rm -T dev bash /work/runtime/framework/app_smoke.sh
 # The same Activity resumed and drawn by AOSP's ViewRootImpl into a Wayland window.
 docker compose run --rm -T dev bash /work/runtime/framework/window_smoke.sh
+# An NDK-built library using liblog, libandroid, libjnigraphics, EGL, GLES and OpenSL ES.
+docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
 
 # Build uxdroid, then run an APK with a Wayland compositor available.
 docker compose run --rm dev cargo build --release -p uxdroid-cli -p uxdroid-nativebridge -p uxdroid-platform

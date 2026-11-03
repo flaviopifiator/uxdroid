@@ -17,9 +17,11 @@ RUN apt-get update \
 FROM base AS dev
 COPY --from=ndk /opt/android-ndk /opt/android-ndk
 
-# Weston's headless backend gives tests a real Wayland compositor.
+# Weston's headless backend gives tests a real Wayland compositor. Mesa serves the EGL and GLES that
+# app native code links against, with llvmpipe where there is no GPU.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends weston python3-minimal \
+        libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri \
     && rustup component add clippy rustfmt \
     && mkdir -p /cache \
     && chown 1000:1000 /cache

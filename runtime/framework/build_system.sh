@@ -45,20 +45,24 @@ mkdir -p "$RUNTIME/samples/framework"
 compile smoke "$RUNTIME/samples/framework/smoke.jar" "PCL[$FRAMEWORK:$RUNTIME/framework/uxdroid-system.jar]" \
     "$ALL:$W/system" /work/runtime/framework/samples/FrameworkSmoke.java
 
-# A sample app built as the SDK would: resources and manifest by aapt2 against framework-res.apk, code
-# against the framework jar. It knows nothing about uxdroid.
-APP=/work/runtime/framework/samples/app
+# Sample apps built as the SDK would: resources, assets and manifest by aapt2 against framework-res.apk,
+# code against the framework jar. They know nothing about uxdroid. The NDK sample's native library is
+# built by ndk_smoke.sh in the dev service, which has the NDK.
 AAPT2=/aosp/prebuilts/sdk/tools/linux/bin/aapt2
-mkdir -p "$W/app/gen" "$W/app/classes"
-"$AAPT2" compile --dir "$APP/res" -o "$W/app/res.zip"
-"$AAPT2" link -I "$RUNTIME/framework/framework-res.apk" --manifest "$APP/AndroidManifest.xml" \
-    --java "$W/app/gen" -o "$W/app/base.apk" "$W/app/res.zip"
-"$JDK/bin/javac" --release 11 -cp "$ALL" -d "$W/app/classes" $(find "$APP" "$W/app/gen" -name '*.java')
-mkdir -p "$W/app/dex"
-"${D8[@]}" --classpath "$FRAMEWORK" --output "$W/app/dex" $(find "$W/app/classes" -name '*.class') 2>&1 \
-    | { grep -v -i warning || true; }
-# resources.arsc and classes.dex stay uncompressed and aligned, as Android requires from targetSdk 30.
-PYTHONDONTWRITEBYTECODE=1 python3 - "$W/app/base.apk" "$W/app/dex/classes.dex" "$RUNTIME/samples/framework/app.apk" <<'EOF'
+build_app() {
+    local app=$1 out=$2 work="$W/$(basename "$1")"
+    local assets=()
+    [ -d "$app/assets" ] && assets=(-A "$app/assets")
+    mkdir -p "$work/gen" "$work/classes" "$work/dex"
+    "$AAPT2" compile --dir "$app/res" -o "$work/res.zip"
+    "$AAPT2" link -I "$RUNTIME/framework/framework-res.apk" --manifest "$app/AndroidManifest.xml" \
+        "${assets[@]}" --java "$work/gen" -o "$work/base.apk" "$work/res.zip"
+    "$JDK/bin/javac" --release 11 -cp "$ALL" -d "$work/classes" $(find "$app" "$work/gen" -name '*.java')
+    "${D8[@]}" --classpath "$FRAMEWORK" --output "$work/dex" $(find "$work/classes" -name '*.class') 2>&1 \
+        | { grep -v -i warning || true; }
+    # Entries stay uncompressed and aligned, as Android requires of resources.arsc and classes.dex from
+    # targetSdk 30; stored assets can then be opened as file descriptors, as on Android.
+    PYTHONDONTWRITEBYTECODE=1 python3 - "$work/base.apk" "$work/dex/classes.dex" "$out" <<'PY'
 import sys, zipfile
 sys.path.insert(0, "/work/runtime/framework")
 import assets
@@ -66,5 +70,9 @@ base, dex, out = sys.argv[1:]
 with zipfile.ZipFile(base) as src:
     entries = [(n, src.read(n)) for n in src.namelist()]
 assets.write_stored(out, entries + [("classes.dex", open(dex, "rb").read())])
-EOF
-ls -la "$RUNTIME/framework/uxdroid-system.jar" "$RUNTIME/samples/framework/smoke.jar" "$RUNTIME/samples/framework/app.apk"
+PY
+}
+build_app /work/runtime/framework/samples/app "$RUNTIME/samples/framework/app.apk"
+build_app /work/runtime/framework/samples/ndk "$RUNTIME/samples/framework/ndk.apk"
+ls -la "$RUNTIME/framework/uxdroid-system.jar" "$RUNTIME/samples/framework/smoke.jar" "$RUNTIME/samples/framework/app.apk" \
+    "$RUNTIME/samples/framework/ndk.apk"
