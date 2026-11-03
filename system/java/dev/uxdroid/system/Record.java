@@ -174,8 +174,13 @@ final class Record {
                 seen.put(value, seen.size());
                 Class<?> type = value.getClass();
                 if (type.isArray()) {
+                    Class<?> component = type.getComponentType();
+                    if (!component.isPrimitive() && component != String.class
+                            && !component.getName().startsWith("android.")) {
+                        throw new IllegalArgumentException("cannot record an array of " + component.getName());
+                    }
                     data.writeByte(ARRAY);
-                    string(type.getComponentType().getName());
+                    string(component.getName());
                     int length = Array.getLength(value);
                     data.writeInt(length);
                     for (int i = 0; i < length; i++) value(Array.get(value, i));
@@ -296,7 +301,11 @@ final class Record {
             case "long": return long.class;
             case "float": return float.class;
             case "double": return double.class;
-            default: return Class.forName(name);
+            case "java.lang.String": return String.class;
+            default:
+                // A record names only the framework's own classes; nothing else is loaded from one.
+                if (!name.startsWith("android.")) throw new ClassNotFoundException("unexpected class in record: " + name);
+                return Class.forName(name);
         }
     }
 

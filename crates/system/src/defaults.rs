@@ -142,7 +142,9 @@ extern "C" fn first_call(index: u32) {
     if let (Some(seen), Some(name)) = (reported.seen.get(index), reported.names.get(index))
         && !seen.swap(true, Ordering::Relaxed)
     {
-        eprintln!("uxdroid: unimplemented native {name} returned its default");
+        // One write, so a line other threads print at the same time cannot land inside it.
+        let line = format!("uxdroid: unimplemented native {name} returned its default\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
     }
 }
 
