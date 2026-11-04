@@ -233,7 +233,7 @@ fn table() -> &'static HashMap<&'static str, Target> {
             table.insert(name, Target::Function(address.0));
         }
         #[cfg(target_arch = "aarch64")]
-        for &(name, address) in wide_objects::FUNCTIONS {
+        for &(name, address) in wide_objects::FUNCTIONS.iter().chain(misaligned::FUNCTIONS) {
             table.insert(name, Target::Function(address));
         }
         table
@@ -1735,6 +1735,239 @@ unsafe extern "C" fn epoll_pwait(
 }
 
 // --- Threads ---
+
+/// bionic's `pthread_cond_t` and `sem_t` are 4-aligned and glibc's 8-aligned on AArch64, where
+/// glibc updates their 64-bit sequence words with atomics that fault at an address 4 mod 8, as a
+/// condition variable after a mutex in a struct lands. An 8-aligned object is glibc's own, so
+/// that path costs one test. A 4-mod-8 one stands for a glibc object on the heap: its own word at
+/// offset 4, which is 8-aligned, holds that object's address, set with a compare-and-swap when
+/// it is first used, so a zeroed object (`PTHREAD_COND_INITIALIZER`) needs no call and two threads
+/// using it at once get the same one. Destroying it frees the glibc object. A process-shared one
+/// cannot live on this process's heap, so a misaligned one is refused.
+#[cfg(target_arch = "aarch64")]
+mod misaligned {
+    use std::ffi::{c_int, c_uint, c_void};
+    use std::mem::MaybeUninit;
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    /// The word that holds a misaligned object's glibc object, or `None` for an 8-aligned object.
+    fn slot<T: 'static>(object: *mut c_void) -> Option<&'static AtomicPtr<T>> {
+        let address = object as usize;
+        if address % 8 != 4 {
+            return None;
+        }
+        // SAFETY: bionic's types are 4-aligned and at least 12 bytes, so the word at offset 4 is
+        // inside the caller's object and 8-aligned; only these functions touch the object.
+        Some(unsafe { &*((address + 4) as *const AtomicPtr<T>) })
+    }
+
+    fn zeroed<T>() -> *mut T {
+        Box::into_raw(Box::<T>::new_zeroed()).cast()
+    }
+
+    /// The glibc object for `object`, made zeroed on first use.
+    fn host<T: 'static>(object: *mut c_void) -> *mut T {
+        let Some(slot) = slot::<T>(object) else {
+            return object.cast();
+        };
+        let current = slot.load(Ordering::Acquire);
+        if !current.is_null() {
+            return current;
+        }
+        let fresh = zeroed::<T>();
+        match slot.compare_exchange(
+            std::ptr::null_mut(),
+            fresh,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => fresh,
+            Err(winner) => {
+                // SAFETY: `fresh` came from `zeroed` and nobody else saw it.
+                drop(unsafe { Box::from_raw(fresh.cast::<MaybeUninit<T>>()) });
+                winner
+            }
+        }
+    }
+
+    /// Takes a misaligned object's glibc object out of it, for destroying.
+    fn take<T: 'static>(object: *mut c_void) -> Option<*mut T> {
+        slot::<T>(object).map(|slot| slot.swap(std::ptr::null_mut(), Ordering::AcqRel))
+    }
+
+    /// # Safety
+    /// `host` came from `zeroed::<T>` and nothing uses it any more.
+    unsafe fn free<T>(host: *mut T) {
+        if !host.is_null() {
+            // SAFETY: the caller's promise.
+            drop(unsafe { Box::from_raw(host.cast::<MaybeUninit<T>>()) });
+        }
+    }
+
+    unsafe extern "C" fn pthread_cond_init(
+        cond: *mut c_void,
+        attr: *const libc::pthread_condattr_t,
+    ) -> c_int {
+        let Some(slot) = slot::<libc::pthread_cond_t>(cond) else {
+            // SAFETY: an 8-aligned object is glibc's own, and the C contract makes it writable.
+            return unsafe { libc::pthread_cond_init(cond.cast(), attr) };
+        };
+        let mut shared = libc::PTHREAD_PROCESS_PRIVATE;
+        // SAFETY: a non-null attribute is the caller's initialized one.
+        if !attr.is_null()
+            && unsafe { libc::pthread_condattr_getpshared(attr, &mut shared) } == 0
+            && shared != libc::PTHREAD_PROCESS_PRIVATE
+        {
+            return libc::EINVAL;
+        }
+        // What the object held may be anything, a freed object's address included, so it is
+        // replaced, never read.
+        let fresh = zeroed::<libc::pthread_cond_t>();
+        // SAFETY: `fresh` is a zeroed glibc object of glibc's size and alignment.
+        let status = unsafe { libc::pthread_cond_init(fresh, attr) };
+        if status != 0 {
+            // SAFETY: nobody saw `fresh`.
+            unsafe { free(fresh) };
+            return status;
+        }
+        slot.store(fresh, Ordering::Release);
+        0
+    }
+
+    unsafe extern "C" fn pthread_cond_destroy(cond: *mut c_void) -> c_int {
+        match take::<libc::pthread_cond_t>(cond) {
+            None => {
+                // SAFETY: an 8-aligned object is glibc's own.
+                unsafe { libc::pthread_cond_destroy(cond.cast()) }
+            }
+            Some(host) if host.is_null() => 0,
+            Some(host) => {
+                // SAFETY: glibc's destroy returns once no waiter uses the object, which the C
+                // contract makes the last use, so it can be freed.
+                unsafe {
+                    let status = libc::pthread_cond_destroy(host);
+                    free(host);
+                    status
+                }
+            }
+        }
+    }
+
+    unsafe extern "C" fn pthread_cond_signal(cond: *mut c_void) -> c_int {
+        // SAFETY: `host` gives glibc an object of its own alignment.
+        unsafe { libc::pthread_cond_signal(host(cond)) }
+    }
+
+    unsafe extern "C" fn pthread_cond_broadcast(cond: *mut c_void) -> c_int {
+        // SAFETY: as above.
+        unsafe { libc::pthread_cond_broadcast(host(cond)) }
+    }
+
+    unsafe extern "C" fn pthread_cond_wait(
+        cond: *mut c_void,
+        mutex: *mut libc::pthread_mutex_t,
+    ) -> c_int {
+        // SAFETY: as above; glibc's mutex atomics are 32-bit, which bionic's alignment allows.
+        unsafe { libc::pthread_cond_wait(host(cond), mutex) }
+    }
+
+    unsafe extern "C" fn pthread_cond_timedwait(
+        cond: *mut c_void,
+        mutex: *mut libc::pthread_mutex_t,
+        time: *const libc::timespec,
+    ) -> c_int {
+        // SAFETY: as above.
+        unsafe { libc::pthread_cond_timedwait(host(cond), mutex, time) }
+    }
+
+    unsafe extern "C" fn sem_init(sem: *mut c_void, shared: c_int, value: c_uint) -> c_int {
+        let Some(slot) = slot::<libc::sem_t>(sem) else {
+            // SAFETY: an 8-aligned object is glibc's own.
+            return unsafe { libc::sem_init(sem.cast(), shared, value) };
+        };
+        if shared != 0 {
+            super::set_errno(libc::ENOSYS);
+            return -1;
+        }
+        let fresh = zeroed::<libc::sem_t>();
+        // SAFETY: `fresh` is a zeroed glibc object of glibc's size and alignment.
+        if unsafe { libc::sem_init(fresh, 0, value) } != 0 {
+            // SAFETY: nobody saw `fresh`.
+            unsafe { free(fresh) };
+            return -1;
+        }
+        slot.store(fresh, Ordering::Release);
+        0
+    }
+
+    unsafe extern "C" fn sem_destroy(sem: *mut c_void) -> c_int {
+        match take::<libc::sem_t>(sem) {
+            None => {
+                // SAFETY: an 8-aligned object is glibc's own.
+                unsafe { libc::sem_destroy(sem.cast()) }
+            }
+            Some(host) => {
+                // SAFETY: the C contract makes destroy the last use.
+                unsafe {
+                    let status = if host.is_null() {
+                        0
+                    } else {
+                        libc::sem_destroy(host)
+                    };
+                    free(host);
+                    status
+                }
+            }
+        }
+    }
+
+    unsafe extern "C" fn sem_post(sem: *mut c_void) -> c_int {
+        // SAFETY: `host` gives glibc an object of its own alignment.
+        unsafe { libc::sem_post(host(sem)) }
+    }
+
+    unsafe extern "C" fn sem_wait(sem: *mut c_void) -> c_int {
+        // SAFETY: as above.
+        unsafe { libc::sem_wait(host(sem)) }
+    }
+
+    unsafe extern "C" fn sem_trywait(sem: *mut c_void) -> c_int {
+        // SAFETY: as above.
+        unsafe { libc::sem_trywait(host(sem)) }
+    }
+
+    unsafe extern "C" fn sem_timedwait(sem: *mut c_void, time: *const libc::timespec) -> c_int {
+        // SAFETY: as above.
+        unsafe { libc::sem_timedwait(host(sem), time) }
+    }
+
+    unsafe extern "C" fn sem_getvalue(sem: *mut c_void, value: *mut c_int) -> c_int {
+        // SAFETY: as above.
+        unsafe { libc::sem_getvalue(host(sem), value) }
+    }
+
+    pub const FUNCTIONS: &[(&str, *const ())] = &[
+        ("pthread_cond_init", pthread_cond_init as *const ()),
+        ("pthread_cond_destroy", pthread_cond_destroy as *const ()),
+        ("pthread_cond_signal", pthread_cond_signal as *const ()),
+        (
+            "pthread_cond_broadcast",
+            pthread_cond_broadcast as *const (),
+        ),
+        ("pthread_cond_wait", pthread_cond_wait as *const ()),
+        (
+            "pthread_cond_timedwait",
+            pthread_cond_timedwait as *const (),
+        ),
+        ("sem_init", sem_init as *const ()),
+        ("sem_destroy", sem_destroy as *const ()),
+        ("sem_post", sem_post as *const ()),
+        ("sem_wait", sem_wait as *const ()),
+        ("sem_trywait", sem_trywait as *const ()),
+        ("sem_timedwait", sem_timedwait as *const ()),
+        ("sem_getvalue", sem_getvalue as *const ()),
+    ];
+}
 
 /// On AArch64 glibc's `pthread_attr_t` is 64 bytes and its mutex 48, against bionic's 56 and 40,
 /// and three functions clear the whole of glibc's size (`abi/write_extent.c`); every other

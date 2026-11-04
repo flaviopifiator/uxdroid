@@ -34,6 +34,7 @@ const CHECKS: &[&str] = &[
     "test_threads",
     "test_semaphore",
     "test_thread_objects_keep_their_bionic_size",
+    "test_misaligned_conditions_and_semaphores",
     "test_dlopen",
     "test_getaddrinfo",
     "test_strerror_r",

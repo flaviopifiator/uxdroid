@@ -20,6 +20,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <wchar.h>
 
@@ -235,6 +236,108 @@ int test_thread_objects_keep_their_bionic_size(void) {
     }
     pthread_mutexattr_destroy(&recursive);
     return guarded.canary == CANARY ? 0 : 11;
+}
+
+// bionic's condition variables and semaphores are 4-aligned and glibc's 8-aligned on arm64,
+// where glibc's 64-bit atomics on a 4-mod-8 address fault. A queue that puts them after a mutex
+// is ordinary code; each is used both 4 mod 8 and 8-aligned, statically and dynamically initialized.
+struct queue {
+    int count;
+    pthread_mutex_t lock;
+    pthread_cond_t ready;
+    sem_t slots;
+};
+struct aligned_queue {
+    long count;
+    pthread_mutex_t lock;
+    pthread_cond_t ready;
+    sem_t slots;
+};
+static struct queue static_queue __attribute__((aligned(8))) = {
+    0, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, {0}};
+static struct aligned_queue static_aligned __attribute__((aligned(8))) = {
+    0, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, {0}};
+
+struct waiters {
+    pthread_mutex_t *lock;
+    pthread_cond_t *ready;
+    sem_t *slots;
+    int *count;
+    int woken;
+};
+
+static void *wait_for_count(void *argument) {
+    struct waiters *w = argument;
+    pthread_mutex_lock(w->lock);
+    while (*w->count == 0) pthread_cond_wait(w->ready, w->lock);
+    w->woken++;
+    pthread_mutex_unlock(w->lock);
+    sem_post(w->slots);
+    return NULL;
+}
+
+static int exercise_queue(pthread_mutex_t *lock, pthread_cond_t *ready, sem_t *slots, int *count) {
+    struct waiters w = {lock, ready, slots, count, 0};
+    *count = 0;
+    if (sem_init(slots, 0, 0) != 0) return 1;
+    pthread_t threads[3];
+    for (int i = 0; i < 3; i++) {
+        if (pthread_create(&threads[i], NULL, wait_for_count, &w) != 0) return 2;
+    }
+    // One signal, then a broadcast for the rest; each waiter posts the semaphore once.
+    pthread_mutex_lock(lock);
+    *count = 1;
+    pthread_cond_signal(ready);
+    pthread_cond_broadcast(ready);
+    pthread_mutex_unlock(lock);
+    for (int i = 0; i < 3; i++) {
+        if (sem_wait(slots) != 0) return 3;
+    }
+    for (int i = 0; i < 3; i++) pthread_join(threads[i], NULL);
+    if (w.woken != 3) return 4;
+    int value = -1;
+    if (sem_getvalue(slots, &value) != 0 || value != 0) return 5;
+    if (sem_trywait(slots) != -1 || errno != EAGAIN) return 6;
+    struct timespec soon;
+    clock_gettime(CLOCK_REALTIME, &soon);
+    soon.tv_nsec += 20 * 1000 * 1000;
+    if (soon.tv_nsec >= 1000000000) {
+        soon.tv_sec++;
+        soon.tv_nsec -= 1000000000;
+    }
+    if (sem_timedwait(slots, &soon) != -1 || errno != ETIMEDOUT) return 7;
+    pthread_mutex_lock(lock);
+    int timed = pthread_cond_timedwait(ready, lock, &soon);
+    pthread_mutex_unlock(lock);
+    if (timed != ETIMEDOUT) return 8;
+    if (sem_destroy(slots) != 0) return 9;
+    return 0;
+}
+
+int test_misaligned_conditions_and_semaphores(void) {
+    if ((((unsigned long)&static_queue.ready) & 7) != 4 || (((unsigned long)&static_queue.slots) & 7) != 4)
+        return 100;
+    int status = exercise_queue(&static_queue.lock, &static_queue.ready, &static_queue.slots,
+                                &static_queue.count);
+    if (status != 0) return 10 + status;
+    if (pthread_cond_destroy(&static_queue.ready) != 0) return 20;
+    status = exercise_queue(&static_aligned.lock, &static_aligned.ready, &static_aligned.slots,
+                            (int *)&static_aligned.count);
+    if (status != 0) return 30 + status;
+    // Dynamic ones, initialized and destroyed twice at the same misaligned place.
+    void *memory = NULL;
+    if (posix_memalign(&memory, 8, sizeof(struct queue)) != 0) return 40;
+    struct queue *dynamic = memory;
+    for (int round = 0; round < 2; round++) {
+        pthread_mutex_init(&dynamic->lock, NULL);
+        if (pthread_cond_init(&dynamic->ready, NULL) != 0) return 41;
+        status = exercise_queue(&dynamic->lock, &dynamic->ready, &dynamic->slots, &dynamic->count);
+        if (status != 0) return 50 + status;
+        if (pthread_cond_destroy(&dynamic->ready) != 0) return 60;
+        pthread_mutex_destroy(&dynamic->lock);
+    }
+    free(dynamic);
+    return 0;
 }
 
 int test_semaphore(void) {
