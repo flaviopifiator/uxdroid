@@ -63,18 +63,19 @@ for y in range(height):
     kind, row = raw[offset], bytearray(raw[offset + 1:offset + 1 + stride])
     offset += stride + 1
     for i in range(stride):
-        left = row[i - channels] if i >= channels else 0
+        # The byte before, not the region's left edge, which this loop must not overwrite.
+        before = row[i - channels] if i >= channels else 0
         up, corner = previous[i], previous[i - channels] if i >= channels else 0
         if kind == 1:
-            row[i] = (row[i] + left) & 255
+            row[i] = (row[i] + before) & 255
         elif kind == 2:
             row[i] = (row[i] + up) & 255
         elif kind == 3:
-            row[i] = (row[i] + (left + up) // 2) & 255
+            row[i] = (row[i] + (before + up) // 2) & 255
         elif kind == 4:
-            p = left + up - corner
-            pa, pb, pc = abs(p - left), abs(p - up), abs(p - corner)
-            row[i] = (row[i] + (left if pa <= pb and pa <= pc else up if pb <= pc else corner)) & 255
+            p = before + up - corner
+            pa, pb, pc = abs(p - before), abs(p - up), abs(p - corner)
+            row[i] = (row[i] + (before if pa <= pb and pa <= pc else up if pb <= pc else corner)) & 255
     if y >= top:
         counts.update(bytes(row[x * channels:x * channels + 3]) for x in range(left, right))
     previous = row
