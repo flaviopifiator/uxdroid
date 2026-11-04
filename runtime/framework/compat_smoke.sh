@@ -48,6 +48,16 @@ grep -q "Unable to instantiate appComponentFactory" "$WORK/out" \
 if awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route; then online=true; else online=false; fi
 expect "^network active $online internet $online connected $online total received true own received -1$" \
     "ConnectivityManager or TrafficStats do not report the host's network (default route: $online)"
+# A network callback hears of the current network once, with its capabilities; offline, of none.
+for name in default internet; do
+    if [ "$online" = true ]; then
+        [ "$(grep -c "^network callback $name available$" "$WORK/out")" = 1 ] \
+            || fail "the $name network callback did not hear of the network once"
+        expect "^network callback $name internet true$" "the $name network callback got no capabilities"
+    else
+        grep -q "^network callback $name" "$WORK/out" && fail "the $name network callback heard of a network offline"
+    fi
+done
 grep -q "TrafficStats not initialized" "$WORK/out" && fail "TrafficStats did not find its service"
 
 # 6. Services the corpus stopped on without them: notification channels and posted notifications,

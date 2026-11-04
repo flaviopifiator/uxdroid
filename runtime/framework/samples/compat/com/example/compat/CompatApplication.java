@@ -215,6 +215,21 @@ public class CompatApplication extends Application {
         System.out.println("game mode " + (games == null ? "none" : games.getGameMode()));
     }
 
+    private static android.net.ConnectivityManager.NetworkCallback callback(String name) {
+        return new android.net.ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(android.net.Network network) {
+                System.out.println("network callback " + name + " available");
+            }
+
+            @Override
+            public void onCapabilitiesChanged(android.net.Network network, android.net.NetworkCapabilities caps) {
+                System.out.println("network callback " + name + " internet "
+                        + caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET));
+            }
+        };
+    }
+
     /** Glide, in Aegis, holds the ConnectivityManager and watches the default network. */
     private void network() {
         android.net.ConnectivityManager connectivity = getSystemService(android.net.ConnectivityManager.class);
@@ -222,6 +237,11 @@ public class CompatApplication extends Application {
             System.out.println("network no ConnectivityManager");
             return;
         }
+        // Watching the network, as Glide and WorkManager do: each callback hears of the current
+        // network once, with its capabilities, on ConnectivityManager's own thread, as on Android.
+        connectivity.registerDefaultNetworkCallback(callback("default"));
+        connectivity.registerNetworkCallback(new android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET).build(), callback("internet"));
         android.net.Network active = connectivity.getActiveNetwork();
         android.net.NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(active);
         android.net.NetworkInfo info = connectivity.getActiveNetworkInfo();

@@ -159,7 +159,7 @@ The corpus also looked up services nobody served, and an app usually stops on th
 
 | Service | Behavior |
 |---------|----------|
-| `connectivity` | The host's network, which the process uses directly: the interface of the default route in `/proc/net/route` is the one active network, Ethernet or Wi-Fi, with internet and not metered; with no default route there is none. Network requests are kept but their callbacks are not delivered yet, and the network is never reported as validated, since nothing probes it |
+| `connectivity` | The host's network, which the process uses directly: the interface of the default route in `/proc/net/route` is the one active network, Ethernet or Wi-Fi, with internet and not metered; with no default route there is none. A network callback, default or for a request, hears of that network once, with its capabilities and link properties, on the thread Android uses (`ConnectivityManager`'s own unless the app gave a handler); later changes of the host's routes are not reported, and the network is never reported as validated, since nothing probes it |
 | `netstats` | `TrafficStats` totals from the host's counters in `/proc/net/dev`, loopback left out; an app's own traffic is not counted apart, so per-uid counters are `UNSUPPORTED` |
 | `notification` | Channels, channel groups and posted notifications kept for the process's life, notifications enabled and each posted one printed; showing them on the desktop through the freedesktop notification service is not done yet |
 | `alarm` | Alarms fire on time from a timer thread, repeating ones again: a listener runs on its handler, and a `PendingIntent` is sent, so a broadcast one reaches the app's receivers |
