@@ -30,6 +30,9 @@ done
 for patch in /work/runtime/framework/android16/patches/rust-*.patch; do
     apply prebuilts/rust "$patch"
 done
+for patch in /work/runtime/framework/android16/patches/conscrypt-*.patch; do
+    apply external/conscrypt "$patch"
+done
 # Only C and C++ is built here, and the framework's Java needs the SDK prebuilts and modules this tree
 # leaves out, which Soong cannot analyze: its Java, app and API stub modules are removed from every
 # blueprint file of frameworks/base, with build/make's system images and prebuilts/sdk's API
@@ -54,6 +57,7 @@ JOBS="${JOBS:-6}"
 ARM64=out-arm64/host/linux-arm64
 DEFAULT_TARGETS="$ARM64/lib64/libandroid_runtime.so $ARM64/lib64/libicu.so $ARM64/lib64/libicuuc-host.so"
 DEFAULT_TARGETS="$DEFAULT_TARGETS $ARM64/lib64/libicui18n-host.so $ARM64/lib64/libicu_jni.so $ARM64/lib64/libjavacrypto.so"
+DEFAULT_TARGETS="$DEFAULT_TARGETS $ARM64/lib64/libsqlite.so"
 TARGETS="${TARGETS:-$DEFAULT_TARGETS}"
 
 (

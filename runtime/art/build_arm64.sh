@@ -19,14 +19,14 @@ cp prebuilts/gcc/linux-x86/host/aarch64-linux-glibc2.31-10/sysroot/usr/lib/aarch
 
 MIN_FREE_KIB=$((60 * 1024 * 1024))
 JOBS="${JOBS:-6}"
-# What the arm64 runtime ships, as runtime/art/package.sh copies for x86_64, but ICU and Conscrypt,
+# What the arm64 runtime ships, as runtime/art/package.sh copies for x86_64, but ICU, Conscrypt and SQLite,
 # which come from the Android 16 tree (runtime/framework/android16/build.sh, which runs first), and the build machine's
 # dex2oat and oatdump for the boot image.
 ARM64=out-arm64/host/linux-arm64
 DEFAULT_TARGETS="$ARM64/bin/dalvikvm64 $ARM64/bin/dex2oat64"
 for library in art artbase art-disassembler artpalette androidio base c++ dexfile dt_socket expat-host \
     javacore jdwp log lz4 lzma nativebridge nativehelper \
-    nativeloader npt openjdk openjdkjvm openjdkjvmti profile sigchain sqlite unwindstack z-host ziparchive; do
+    nativeloader npt openjdk openjdkjvm openjdkjvmti profile sigchain unwindstack z-host ziparchive; do
     DEFAULT_TARGETS="$DEFAULT_TARGETS $ARM64/lib64/lib$library.so"
 done
 DEFAULT_TARGETS="$DEFAULT_TARGETS out-arm64/host/linux-x86/bin/dex2oat64 out-arm64/host/linux-x86/bin/oatdump"
