@@ -74,7 +74,7 @@ Tests that start `uxdroid` go through `UXDROID_TEST_RUNNER` (`qemu-aarch64` ther
 
 ## Run an APK
 
-`uxdroid run` needs ART built for the host, which takes about 16 GB of download and an hour of build. Only an x86_64 glibc host is supported.
+`uxdroid run` needs ART built for the host, which takes about 16 GB of download and an hour of build. There is one runtime package per host CPU, x86_64 (`/runtime/art`) and arm64 (`/runtime/art-arm64-host`), with the same layout, the same framework library and the same install command; the commands below build the x86_64 one, and the arm64 one is built after it, as shown further down.
 
 ```bash
 # Build the runtime in Docker, once. Volumes keep the result.
@@ -89,6 +89,25 @@ docker compose --profile art run --rm -T art-builder bash /work/runtime/framewor
 docker compose --profile art run --rm -T art-builder bash /work/runtime/framework/build_system.sh
 # Check it: the framework draws, writes text and reads its resources.
 docker compose run --rm -T dev bash /work/runtime/framework/smoke.sh
+# The arm64 package, cross-built on this x86_64 machine from the same trees (another 26 GB of
+# download and about 5 GB of output; see the architecture). ART comes from the master-art tree, and
+# libandroid_runtime, ICU and Conscrypt from part of android-16.0.0_r1, in volume uxdroid-android16_src.
+docker compose --profile art run --rm -T android16-builder bash /work/runtime/framework/android16/sync.sh
+docker compose --profile art run --rm -T android16-builder bash /work/runtime/framework/android16/build.sh
+docker compose --profile art run --rm -T art-builder bash /work/runtime/art/build_arm64.sh
+docker compose --profile art run --rm -T -e ARCH=arm64 android16-builder bash /work/runtime/art/package.sh
+docker compose --profile art run --rm -T -e ARCH=arm64 art-builder bash /work/runtime/art/compile.sh
+docker compose --profile art run --rm -T -e ARCH=arm64 art-builder bash /work/runtime/art/build_platform.sh
+docker compose --profile art run --rm -T -e ARCH=arm64 android16-builder bash /work/runtime/framework/build.sh
+docker compose --profile art run --rm -T -e ARCH=arm64 art-builder bash /work/runtime/framework/build_system.sh
+# Check it under QEMU user: a DEX main() as compiled arm64 code, the framework, an APK's first frame
+# through `uxdroid install`, and `uxdroid run`. Programs uxdroid starts go through runtime/art/qemu-bin.
+docker compose run --rm -T -e ARCH=arm64 sandbox-arm64 bash /work/runtime/art/smoke.sh
+docker compose run --rm -T -e ARCH=arm64 dev-arm64 bash /work/runtime/framework/smoke.sh
+docker compose run --rm -T -e ARCH=arm64 -v ./runtime/art/qemu-bin:/runtime/art-arm64-host/bin:ro \
+    -v uxdroid-art_art_runtime:/runtime-real:ro dev-arm64 bash /work/runtime/framework/window_smoke.sh
+docker compose run --rm -T -e ARCH=arm64 -v ./runtime/art/qemu-bin:/runtime/art-arm64-host/bin:ro \
+    -v uxdroid-art_art_runtime:/runtime-real:ro dev-arm64 bash /work/runtime/art/app_smoke.sh
 # An SDK-built APK's Activity, launched by AOSP's own ActivityThread, with no window.
 docker compose run --rm -T dev bash /work/runtime/framework/app_smoke.sh
 # The same Activity resumed and drawn by AOSP's ViewRootImpl into a Wayland window.
