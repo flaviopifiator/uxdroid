@@ -2,6 +2,7 @@
 // carry across the guest boundary. Built for arm64-v8a with the NDK; each function returns a value
 // the test checks.
 #include <android/log.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <setjmp.h>
@@ -290,6 +291,66 @@ __attribute__((visibility("default"))) int spike_sscanf(const char* text) {
     int a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0, i = 0;
     int read = sscanf(text, "%d %d %d %d %d %d %d %d %d", &a, &b, &c, &d, &e, &f, &g, &h, &i);
     return read * 1000 + a + b + c + d + e + f + g + h + i;
+}
+
+// --- The dynamic linker, through the bridge's loader ---
+
+// Each part adds a digit: symbols of a guest library, of the host's libc, a refused lookup with its
+// error, dladdr on guest code, and dlclose.
+__attribute__((visibility("default"))) int spike_dl(void) {
+    int score = 0;
+    void* self = dlopen("libspike.so", RTLD_NOW);
+    auto add = reinterpret_cast<int (*)(int, int)>(dlsym(self, "spike_add"));
+    if (add != nullptr && add(2, 3) == 5) {
+        score += 1;
+    }
+    auto length = reinterpret_cast<size_t (*)(const char*)>(dlsym(RTLD_DEFAULT, "strlen"));
+    void* libc = dlopen("libc.so", RTLD_NOW);
+    auto pid = reinterpret_cast<pid_t (*)(void)>(dlsym(libc, "getpid"));
+    if (length != nullptr && length("four") == 4 && pid != nullptr && pid() == getpid()) {
+        score += 10;
+    }
+    if (dlsym(self, "spike_nonexistent") == nullptr) {
+        const char* error = dlerror();
+        if (error != nullptr && strstr(error, "spike_nonexistent") != nullptr) {
+            score += 100;
+        }
+    }
+    Dl_info info = {};
+    if (dladdr(reinterpret_cast<void*>(spike_add), &info) != 0 && info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libspike.so") != nullptr) {
+        score += 1000;
+    }
+    if (dlclose(self) == 0) {
+        score += 10000;
+    }
+    return score;
+}
+
+// A GL function found with eglGetProcAddress is a guest stub with the table's signature; one the
+// tables do not know is null.
+__attribute__((visibility("default"))) int spike_proc_address(void) {
+    void* egl = dlopen("libEGL.so", RTLD_NOW);
+    auto get = reinterpret_cast<void* (*)(const char*)>(dlsym(egl, "eglGetProcAddress"));
+    if (get == nullptr) {
+        return -1;
+    }
+    auto multiply = reinterpret_cast<int (*)(int, int)>(get("glUxdroidMultiply"));
+    if (multiply == nullptr) {
+        return -2;
+    }
+    return multiply(6, 7) + (get("glUxdroidUnknown") == nullptr ? 1000 : 0);
+}
+
+static int on_fd(int fd, int events, void* data) {
+    return fd * 100 + events * 10 + (data == reinterpret_cast<void*>(0x10) ? 1 : 0);
+}
+
+// A guest callback handed to an NDK function becomes a host thunk.
+__attribute__((visibility("default"))) int spike_looper(void) {
+    using AddFd = int (*)(void*, int, int, int, int (*)(int, int, void*), void*);
+    auto add = reinterpret_cast<AddFd>(dlsym(dlopen("libandroid.so", RTLD_NOW), "ALooper_addFd"));
+    return add == nullptr ? -1 : add(nullptr, 5, 0, 1, on_fd, reinterpret_cast<void*>(0x10));
 }
 
 // A system call made directly, as Go, Rust's std and hand-written assembly do: `svc #0` with the

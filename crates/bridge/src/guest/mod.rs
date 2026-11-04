@@ -165,6 +165,42 @@ struct HostFunction {
     returns: Type,
     parameters: Vec<Type>,
     variadic: Variadic,
+    /// Parameters that are guest functions the host will call, with their signatures.
+    callbacks: &'static [(usize, &'static str)],
+}
+
+/// NDK functions that take a callback, which the tables declare as a plain pointer: the index of
+/// that parameter and the callback's signature. A guest function there becomes a host thunk.
+const CALLBACK_PARAMETERS: &[(&str, &[(usize, &str)])] = &[
+    (
+        "AAudioStreamBuilder_setDataCallback",
+        &[(1, "i32(ptr,ptr,ptr,i32)")],
+    ),
+    (
+        "AAudioStreamBuilder_setErrorCallback",
+        &[(1, "void(ptr,ptr,i32)")],
+    ),
+    ("AChoreographer_postFrameCallback", &[(1, "void(i64,ptr)")]),
+    (
+        "AChoreographer_postFrameCallback64",
+        &[(1, "void(i64,ptr)")],
+    ),
+    (
+        "AChoreographer_postFrameCallbackDelayed",
+        &[(1, "void(i64,ptr)")],
+    ),
+    (
+        "AChoreographer_postFrameCallbackDelayed64",
+        &[(1, "void(i64,ptr)")],
+    ),
+    ("ALooper_addFd", &[(4, "i32(i32,i32,ptr)")]),
+];
+
+fn callback_parameters(name: &str) -> &'static [(usize, &'static str)] {
+    CALLBACK_PARAMETERS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map_or(&[], |&(_, parameters)| parameters)
 }
 
 enum Service {
@@ -299,6 +335,12 @@ fn resolve_import(
     if let Some(twin) = libc::variadic_twin(name) {
         return va_list_service(name, twin, tables);
     }
+    // Hands out function pointers, which must be guest stubs.
+    if name == "eglGetProcAddress"
+        && let Some(libc::Import::Special(special)) = libc::find(name)
+    {
+        return add_service(Service::Special(special)).map(Some);
+    }
     for table in tables {
         if let Some(export) = table.find(name.as_bytes()) {
             let Some(address) = export.bind() else {
@@ -368,6 +410,7 @@ fn va_list_service(
             true => Variadic::ScanVaList,
             false => Variadic::FormatVaList,
         },
+        callbacks: &[],
     }))
     .map(Some)
 }
@@ -402,6 +445,7 @@ fn host_service(name: &str, target: Target, signature: &str) -> Result<u64, ElfE
         returns,
         parameters,
         variadic,
+        callbacks: callback_parameters(name),
     }))
 }
 
@@ -550,6 +594,15 @@ fn call_host(cpu: &dyn Cpu, function: &HostFunction) {
     let mut stack = vec![0u64; host.stack_slots];
     for (index, (&raw, &to)) in values.iter().zip(&host.slots).enumerate() {
         let mut value = normalize(kinds[index], raw);
+        if let Some(&(_, signature)) = function.callbacks.iter().find(|(at, _)| *at == index)
+            && value != 0
+            && crate::loader::is_guest_address(value as usize)
+        {
+            value = match callback(value, signature, Kind::Plain) {
+                Ok(thunk) => thunk as u64,
+                Err(reason) => fail(cpu, format_args!("{}: {reason}", function.name)),
+            };
+        }
         if index == 0 {
             value = match function.target {
                 Target::Fixed(_) => value,

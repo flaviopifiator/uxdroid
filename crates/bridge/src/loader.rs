@@ -1028,6 +1028,49 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
     }
 }
 
+/// `dlsym` for guest code: an address guest code can call, its own code or a service stub,
+/// searched among guest libraries and the signature tables only, never host libraries.
+pub(crate) fn guest_symbol(handle: *mut c_void, name: &[u8]) -> Option<u64> {
+    const RTLD_DEFAULT: *mut c_void = std::ptr::null_mut();
+    let rtld_next = usize::MAX as *mut c_void;
+    let libraries: Vec<&'static Library> = snapshot()
+        .into_iter()
+        .filter(|library| library.machine != Machine::X86_64)
+        .collect();
+    let scope = if handle == RTLD_DEFAULT || handle == rtld_next {
+        Scope {
+            libraries,
+            tables: table::all(),
+        }
+    } else if let Some(library) = libraries
+        .iter()
+        .find(|library| std::ptr::from_ref(**library).cast::<c_void>() == handle.cast_const())
+    {
+        Scope::of(library)
+    } else if let Some(table) = table::from_handle(handle) {
+        Scope {
+            libraries: Vec::new(),
+            tables: vec![table],
+        }
+    } else {
+        // SYSTEM_HANDLE: libc, libm and libdl, which the guest's own table serves.
+        Scope {
+            libraries: Vec::new(),
+            tables: Vec::new(),
+        }
+    };
+    let found = resolve(&scope, name, false, Machine::Aarch64)
+        .ok()
+        .flatten();
+    if found.is_none() {
+        set_dl_error(format!(
+            "undefined symbol: {}",
+            String::from_utf8_lossy(name)
+        ));
+    }
+    found
+}
+
 pub extern "C" fn dlclose(_handle: *mut c_void) -> c_int {
     // Libraries stay loaded, which Android also allows and which keeps atexit handlers valid.
     0

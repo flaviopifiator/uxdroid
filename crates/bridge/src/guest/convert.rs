@@ -730,7 +730,61 @@ fn pthread_atfork(cpu: &dyn Cpu) {
     set_i32(cpu, status);
 }
 
+// --- The dynamic linker ---
+
+fn dlopen(cpu: &dyn Cpu) {
+    // SAFETY: the loader's dlopen with the guest's C string; the handle is opaque to the guest.
+    let handle = unsafe { crate::loader::dlopen(ptr(cpu.x(0)), cpu.x(1) as i32) };
+    cpu.set_x(0, handle as u64);
+}
+
+fn dlsym(cpu: &dyn Cpu) {
+    // SAFETY: the libdl contract makes the name a C string; the read is bounded.
+    let name = unsafe { native::c_string(cpu.x(1), 4096) };
+    let found = crate::loader::guest_symbol(ptr(cpu.x(0)), name).unwrap_or(0);
+    cpu.set_x(0, found);
+}
+
+fn dlerror(cpu: &dyn Cpu) {
+    cpu.set_x(0, crate::loader::dlerror() as u64);
+}
+
+fn dlclose(cpu: &dyn Cpu) {
+    set_i32(cpu, crate::loader::dlclose(ptr(cpu.x(0))));
+}
+
+/// `Dl_info` is four pointers on both.
+fn dladdr(cpu: &dyn Cpu) {
+    // SAFETY: the loader's dladdr with the guest's address and writable Dl_info.
+    let found = unsafe { crate::loader::dladdr(ptr(cpu.x(0)), ptr(cpu.x(1))) };
+    set_i32(cpu, found);
+}
+
+/// GL and EGL functions by name, from the signature tables, so each is a guest stub; a name no
+/// table signs is null, as for a driver without that extension.
+fn egl_get_proc_address(cpu: &dyn Cpu) {
+    // SAFETY: eglGetProcAddress takes a C string; the read is bounded.
+    let name = unsafe { native::c_string(cpu.x(0), 4096) };
+    let tables = crate::table::all();
+    let known = tables.iter().any(|table| table.find(name).is_some());
+    let stub = match known {
+        true => super::import(name, &tables, false)
+            .ok()
+            .flatten()
+            .unwrap_or(0),
+        false => 0,
+    };
+    cpu.set_x(0, stub);
+}
+
 pub(super) const SPECIALS: &[(&str, super::libc::Special)] = &[
+    ("dlopen", dlopen),
+    ("android_dlopen_ext", dlopen),
+    ("dlsym", dlsym),
+    ("dlerror", dlerror),
+    ("dlclose", dlclose),
+    ("dladdr", dladdr),
+    ("eglGetProcAddress", egl_get_proc_address),
     ("open", open),
     ("open64", open),
     ("openat", openat),

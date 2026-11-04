@@ -11,7 +11,8 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use uxdroid_bridge::guest::{host_function, jni_trampoline, missing_signatures};
-use uxdroid_bridge::{Library, load};
+use uxdroid_bridge::table::{Export, Table};
+use uxdroid_bridge::{Library, load, table};
 
 fn engine_available() -> bool {
     let available = std::env::var_os("UXDROID_TRANSLATOR").is_some();
@@ -67,6 +68,9 @@ fn library() -> &'static Library {
             .unwrap();
         assert!(status.success());
         uxdroid_translate::install();
+        for fake in [&FAKE_EGL, &FAKE_GLES, &FAKE_ANDROID] {
+            table::provide(fake);
+        }
         let library = load(&path, &[]).unwrap_or_else(|error| panic!("{error}"));
         eprintln!(
             "guest imports without a signature: {:?}",
@@ -75,6 +79,56 @@ fn library() -> &'static Library {
         library
     })
 }
+
+// --- System library tables of the test's, standing in for crates/ndk's ---
+
+extern "C" fn fake_get_proc_address(_name: *const c_char) -> usize {
+    // The host's eglGetProcAddress; the bridge answers guest code from the tables instead.
+    0
+}
+
+extern "C" fn fake_multiply(a: i32, b: i32) -> i32 {
+    a * b
+}
+
+/// Calls the callback at once, as a looper would when the descriptor is ready.
+extern "C" fn fake_add_fd(
+    _looper: usize,
+    fd: i32,
+    _ident: i32,
+    events: i32,
+    callback: extern "C" fn(i32, i32, usize) -> i32,
+    data: usize,
+) -> i32 {
+    callback(fd, events, data)
+}
+
+static FAKE_EGL: Table = Table {
+    library: "libEGL.so",
+    exports: &[Export::function(
+        c"eglGetProcAddress",
+        "ptr(ptr)",
+        fake_get_proc_address as *const (),
+    )],
+};
+
+static FAKE_GLES: Table = Table {
+    library: "libGLESv2.so",
+    exports: &[Export::function(
+        c"glUxdroidMultiply",
+        "i32(i32,i32)",
+        fake_multiply as *const (),
+    )],
+};
+
+static FAKE_ANDROID: Table = Table {
+    library: "libandroid.so",
+    exports: &[Export::function(
+        c"ALooper_addFd",
+        "i32(ptr,i32,i32,i32,ptr,ptr)",
+        fake_add_fd as *const (),
+    )],
+};
 
 /// A typed host pointer to a guest function.
 fn function<F: Copy>(name: &str, signature: &str) -> F {
@@ -294,6 +348,26 @@ fn long_double_and_scanf_results_cross() {
     let sscanf: extern "C" fn(*const c_char) -> i32 = function("spike_sscanf", "i32(ptr)");
     let text = CString::new("1 2 3 4 5 6 7 8 9").unwrap();
     assert_eq!(sscanf(text.as_ptr()), 9045);
+}
+
+#[test]
+fn guest_dynamic_linking_goes_through_the_bridge() {
+    if !engine_available() {
+        return;
+    }
+    let dl: extern "C" fn() -> i32 = function("spike_dl", "i32()");
+    assert_eq!(dl(), 11111);
+}
+
+#[test]
+fn host_function_pointers_and_callbacks_cross_as_guest_stubs_and_thunks() {
+    if !engine_available() {
+        return;
+    }
+    let proc_address: extern "C" fn() -> i32 = function("spike_proc_address", "i32()");
+    assert_eq!(proc_address(), 1042);
+    let looper: extern "C" fn() -> i32 = function("spike_looper", "i32()");
+    assert_eq!(looper(), 511);
 }
 
 #[test]
