@@ -143,11 +143,20 @@ Exit codes: `1` it cannot start, `2` wrong usage. Once started, the process is t
 
 ### Install for the framework launcher
 
-`dev.uxdroid.system.Launcher`, which starts an APK on AOSP's framework, reads app files where Android's installer leaves them. `uxdroid install` does the installer's part before the first start: it extracts the APK's native libraries for this CPU into `<data>/data/<package>/lib`, the directory `ApplicationInfo.nativeLibraryDir` names, and records the chosen ABI in `<data>/data/<package>/abi`. `<data>` is the absolute directory the launcher gets as `ANDROID_DATA`. Installing again replaces the libraries, and APKs with native code only for another CPU are refused, as are archives that name an entry twice, which Android refuses too. Installs of one package into one data directory take turns, through a lock on `<data>/app/.<package>.lock`, and clear what an interrupted install left.
+`dev.uxdroid.system.Launcher`, which starts an APK on AOSP's framework, reads app files where Android's installer leaves them. `uxdroid install` does the installer's part before the first start: it extracts the APK's native libraries for this CPU into `<data>/data/<package>/lib`, the directory `ApplicationInfo.nativeLibraryDir` names, and records the chosen ABI in `<data>/data/<package>/abi`. `<data>` is the absolute directory the launcher gets as `ANDROID_DATA`. Installing again replaces the libraries. An APK whose native code exists only for `arm64-v8a` installs those libraries on an x86_64 host, to run through the translator; APKs with native code only for any other CPU are refused, as are archives that name an entry twice, which Android refuses too. Installs of one package into one data directory take turns, through a lock on `<data>/app/.<package>.lock`, and clear what an interrupted install left.
 
 ```sh
 UXDROID_RUNTIME=/runtime/art uxdroid install app.apk --data /path/to/android-data
 ```
+
+For `arm64-v8a` libraries the install also resolves every import of every library, against the APK's other libraries, the system library tables and the translator's guest libc, and writes the result with each library's JNI entry points and exported function bounds to `<data>/data/<package>/lib/arm64-v8a.plan.json`. A needed library nobody provides, or an import found nowhere, fails the install naming it, as the start would fail. An import the host has but guest code cannot call yet is bound to a stub that stops the program naming it only if called, since apps import much they never call; the report counts them and lists the first 20:
+
+```text
+installed io.anuke.mindustry: 2 native libraries for arm64-v8a in /data/data/io.anuke.mindustry/lib
+translated for x86_64: 108 imports resolved at install, 0 from the app's libraries, 6 from system library tables, 102 from the guest libc, 0 weak ones null, 0 bound to stubs that stop the program naming them if called; plan in /data/data/io.anuke.mindustry/lib/arm64-v8a.plan.json
+```
+
+A start does not read the plan yet; it resolves the same imports again, which costs microseconds per import.
 
 With the framework's runtime, found as for `uxdroid run` through `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime`, the install also prepares everything a start would otherwise redo, in the app's code directory `<data>/app/<package>`, as Android's installer does:
 
