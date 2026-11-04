@@ -1,6 +1,8 @@
 #!/bin/bash
 # Installs AOSP's framework into the runtime, which is laid out as Android's system partition, and compiles it.
-# Runs after runtime/art/package.sh and runtime/framework/fetch.sh.
+# Runs after runtime/art/package.sh and runtime/framework/fetch.sh. ARCH=arm64 builds the arm64
+# package, whose libandroid_runtime.so is the same Android 16 library built for arm64 by
+# runtime/framework/android16/build.sh; it runs in the android16-builder service, which has both trees.
 set -eu -o pipefail
 source /work/runtime/art/run.sh
 DL=/aosp/framework-dl
@@ -19,7 +21,7 @@ if [ -f "$MANIFEST" ]; then
 fi
 BEFORE="$W/before"
 (cd "$RUNTIME" && find . -type f | sort) > "$BEFORE"
-mkdir -p "$RUNTIME/framework/oat/x86_64" "$RUNTIME/etc" "$RUNTIME/fonts" "$RUNTIME/usr/icu" "$RUNTIME/notices/framework"
+mkdir -p "$RUNTIME/framework/oat/$ARCH" "$RUNTIME/etc" "$RUNTIME/fonts" "$RUNTIME/usr/icu" "$RUNTIME/notices/framework"
 
 # Framework classes. What ART's boot class path already has stays out, so the boot copy is the one used.
 # javax.microedition.khronos is the platform's too: GLSurfaceView hands its renderer a GL10.
@@ -42,7 +44,17 @@ done > "$W/javap.txt"
 python3 "$TOOLS/natives_list.py" "$W/javap.txt" "$W/boot-classes" "$RUNTIME/framework/natives.txt"
 
 # The native half of the framework, built by AOSP for a glibc host, and the data it reads.
-unzip -q -j "$ALL" native/linux/x86_64/libandroid_runtime.so -d "$RUNTIME/lib64"
+if [ "$ARCH" = arm64 ]; then
+    # Android 16's library reads aconfig flags through the flag storage reader beside it, which the
+    # Robolectric build x86_64 uses predates. Both without debug information, as package.sh ships ART's.
+    A16_LIB64="${A16_LIB64:-/a16/out-arm64/host/linux-arm64/lib64}"
+    for library in libandroid_runtime.so libaconfig_storage_read_api_cc.so; do
+        cp "$A16_LIB64/$library" "$RUNTIME/lib64/"
+        /aosp/prebuilts/clang/host/linux-x86/clang-r547379/bin/llvm-strip --strip-debug "$RUNTIME/lib64/$library"
+    done
+else
+    unzip -q -j "$ALL" native/linux/x86_64/libandroid_runtime.so -d "$RUNTIME/lib64"
+fi
 unzip -q -j "$ALL" 'icu/icudt*.dat' -d "$RUNTIME/usr/icu"
 # The host library's ICU loader opens its data under ANDROID_I18N_ROOT the first time text breaks
 # into lines, as in an EditText, and aborts without it. ART's own, older ICU data stays beside it.
@@ -57,7 +69,9 @@ for data in "$RUNTIME"/usr/icu/icudt*.dat; do
     fi
 done
 unzip -p "$ALL" build.prop > "$W/build.prop"
-python3 "$TOOLS/assets.py" build-prop "$W/build.prop" "$RUNTIME/build.prop"
+ABI=x86_64
+[ "$ARCH" = arm64 ] && ABI=arm64-v8a
+python3 "$TOOLS/assets.py" build-prop "$W/build.prop" "$RUNTIME/build.prop" "$ABI"
 
 # Fonts. CJK alone is 120 MiB; DroidSansFallback covers those scripts in 4 MiB.
 unzip -q -j "$FONTS_JAR" 'fonts/*' -x 'fonts/NotoSansCJK*' 'fonts/fonts.xml' -d "$RUNTIME/fonts"
@@ -69,10 +83,10 @@ cp "$RUNTIME/etc/fonts.xml" "$RUNTIME/etc/font_fallback.xml"
 cp "$DL"/notices/* "$RUNTIME/notices/framework/"
 
 # Compile at install time. Verified ahead of time, the framework starts at 38 MiB instead of 119 MiB.
-if ! "$RUNTIME/bin/dex2oat64" --compiler-filter=verify --instruction-set=x86_64 --host --android-root="$RUNTIME" \
+if ! "${DEX2OAT[@]}" --compiler-filter=verify --instruction-set="$ARCH" --host --android-root="$RUNTIME" \
     --runtime-arg -Xbootclasspath:"$BOOT" --runtime-arg -Xbootclasspath-locations:"$BOOT" \
     --boot-image="$RUNTIME/framework/boot.art" --dex-file="$RUNTIME/framework/framework.jar" \
-    --class-loader-context='PCL[]' --oat-file="$RUNTIME/framework/oat/x86_64/framework.odex" > "$W/dex2oat.log" 2>&1; then
+    --class-loader-context='PCL[]' --oat-file="$RUNTIME/framework/oat/$ARCH/framework.odex" > "$W/dex2oat.log" 2>&1; then
     tail -20 "$W/dex2oat.log"
     exit 1
 fi

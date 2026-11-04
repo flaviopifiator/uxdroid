@@ -9,6 +9,8 @@
 # The APK is /samples/rustdesk-1.5.1-universal-signed.apk unless RUSTDESK_APK names another. Stages,
 # in order: install the native libraries, run Dart, post a Flutter frame on the SurfaceView, the
 # activity reports itself fully drawn, the window shows it. A failure names the furthest stage reached.
+# ARCH=arm64 runs the arm64 package from sandbox-arm64, as window_smoke.sh describes; its install picks
+# the APK's arm64-v8a libraries, which then run natively (RUSTDESK_ABI=arm64-v8a).
 set -u -o pipefail
 WORK=$(mktemp -d)
 # Removed however the script ends, a failure before the full trap below included.
@@ -26,7 +28,7 @@ fail() {
 }
 reached() { STAGE="$1"; echo "stage: $1"; }
 
-TARGET="${CARGO_TARGET_DIR:-/cache/target}/release"
+TARGET="${CARGO_TARGET_DIR:-/cache/target}${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}/release"
 for file in uxdroid libuxdroid_system.so libuxdroid_nativebridge.so; do
     [ -e "$TARGET/$file" ] || fail "no $TARGET/$file: build the release libraries in the dev service first"
 done
@@ -34,11 +36,11 @@ done
 source /work/runtime/art/run.sh
 [ -e "$RUNTIME/framework/uxdroid-system.jar" ] || fail "no framework in $RUNTIME: run runtime/framework/build.sh"
 export ANDROID_DATA="$WORK/data"
-mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
+mkdir -p "$ANDROID_DATA/dalvik-cache/$ARCH"
 
 # The installer's part, as Android's does it: native libraries where nativeLibraryDir points.
 # It also compiles the app's DEX, records its manifest and writes its default bodies.
-UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$APK" --data "$ANDROID_DATA" >"$WORK/install" 2>&1 \
+UXDROID_RUNTIME="$RUNTIME" "${RUNNER[@]}" "$TARGET/uxdroid" install "$APK" --data "$ANDROID_DATA" >"$WORK/install" 2>&1 \
     || { cat "$WORK/install"; fail "install"; }
 grep -q -E "^installed $PACKAGE: [1-9][0-9]* native libraries for $ABI in " "$WORK/install" \
     || { cat "$WORK/install"; fail "the install found no $ABI libraries"; }
@@ -52,7 +54,10 @@ start_compositor
 
 export LD_LIBRARY_PATH="$RUNTIME/lib64:$TARGET"
 CP="$RUNTIME/framework/framework.jar:$RUNTIME/framework/uxdroid-system.jar"
-"$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -XX:NativeBridge=libuxdroid_nativebridge.so -Xforce-nb-testing \
+# The wrapper over bin/ of an emulated run already runs the program under qemu.
+DALVIKVM=("${RUNNER[@]}" "$RUNTIME/bin/dalvikvm64")
+[ -d /runtime-real ] && DALVIKVM=("$RUNTIME/bin/dalvikvm64")
+"${DALVIKVM[@]}" "${ART_FLAGS[@]}" -XX:NativeBridge=libuxdroid_nativebridge.so -Xforce-nb-testing \
     -cp "$CP" dev.uxdroid.system.Launcher "$RUNTIME" "$TARGET/libuxdroid_system.so" \
     "$ANDROID_DATA/app/$PACKAGE/base.apk" >"$WORK/out" 2>&1 &
 app=$!

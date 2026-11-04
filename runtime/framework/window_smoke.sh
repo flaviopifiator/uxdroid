@@ -1,7 +1,12 @@
 #!/bin/bash
 # Shows an SDK-built APK's Activity in a Wayland window: AOSP's ActivityThread resumes it, its
 # ViewRootImpl draws the decor view in software, and the pixels are read back from a headless
-# compositor. Runs in the dev service; the APK is ours, built by build_system.sh.
+# compositor. Runs in the dev service; the APK is ours, built by build_system.sh. With ARCH=arm64 it
+# checks the arm64 package from dev-arm64; on an x86_64 machine, under qemu-aarch64, with
+# runtime/art/qemu-bin over the package's bin/ for the programs uxdroid starts:
+#
+#   docker compose run --rm -e ARCH=arm64 -v ./runtime/art/qemu-bin:/runtime/art-arm64-host/bin:ro \
+#       -v uxdroid-art_art_runtime:/runtime-real:ro dev-arm64 bash /work/runtime/framework/window_smoke.sh
 set -u -o pipefail
 WORK=$(mktemp -d)
 # Removed however the script ends, a failure before the full trap below included.
@@ -9,20 +14,23 @@ trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $*"; tail -"${TAIL:-25}" "$WORK/out" | cut -c1-220; exit 1; }
 
 cargo build -q --release -p uxdroid-system -p uxdroid-cli --manifest-path /work/Cargo.toml || fail "build"
-TARGET="$(cargo metadata -q --format-version 1 --no-deps --manifest-path /work/Cargo.toml \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')/release"
+source /work/runtime/art/release_dir.sh
+TARGET="$RELEASE"
 LIBRARY="$TARGET/libuxdroid_system.so"
 source /work/runtime/art/run.sh
 export ANDROID_DATA="$WORK/data"
-mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
+mkdir -p "$ANDROID_DATA/dalvik-cache/$ARCH"
 source /work/runtime/art/test_lib.sh
 start_compositor
 # Installed as uxdroid install leaves it: compiled, with its manifest recorded and its default bodies.
-UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$RUNTIME/samples/framework/app.apk" --data "$ANDROID_DATA" \
+UXDROID_RUNTIME="$RUNTIME" "${RUNNER[@]}" "$TARGET/uxdroid" install "$RUNTIME/samples/framework/app.apk" --data "$ANDROID_DATA" \
     >"$WORK/install" 2>&1 || { cat "$WORK/install"; fail "install"; }
 
 CP="$RUNTIME/framework/framework.jar:$RUNTIME/framework/uxdroid-system.jar"
-"$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher \
+# The wrapper over bin/ already runs the program under qemu.
+DALVIKVM=("${RUNNER[@]}" "$RUNTIME/bin/dalvikvm64")
+[ -d /runtime-real ] && DALVIKVM=("$RUNTIME/bin/dalvikvm64")
+"${DALVIKVM[@]}" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher \
     "$RUNTIME" "$LIBRARY" "$ANDROID_DATA/app/com.example.framework/base.apk" >"$WORK/out" 2>&1 &
 app=$!
 trap 'kill "$app" "$compositor" 2>/dev/null; wait 2>/dev/null; rm -rf "$WORK"' EXIT

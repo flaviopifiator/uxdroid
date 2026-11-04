@@ -1,5 +1,5 @@
 # Shared by the smoke scripts: runs a headless compositor with an isolated home. Needs $WORK.
-export XDG_RUNTIME_DIR="$WORK/run" HOME="$WORK/home" WAYLAND_DISPLAY=uxdroid-test UXDROID_RUNTIME=/runtime/art
+export XDG_RUNTIME_DIR="$WORK/run" HOME="$WORK/home" WAYLAND_DISPLAY=uxdroid-test UXDROID_RUNTIME="${RUNTIME:-/runtime/art}"
 unset XDG_CACHE_HOME XDG_DATA_HOME
 mkdir -p "$XDG_RUNTIME_DIR" "$HOME"
 chmod 700 "$XDG_RUNTIME_DIR"

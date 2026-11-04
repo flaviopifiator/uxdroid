@@ -3,12 +3,14 @@
 # `dev` first: it is the base. Development and test only; nothing here is shipped.
 FROM uxdroid-dev
 USER root
-# The host libraries uxdroid opens at run time, xkbcommon and ALSA, come as Debian's arm64 builds
-# beside the dev image's x86_64 ones.
+# The host libraries uxdroid opens at run time, xkbcommon, ALSA, and EGL and GLES with Mesa's
+# llvmpipe for apps that draw with the GPU, come as Debian's arm64 builds beside the dev image's
+# x86_64 ones. The compositor stays the dev image's x86_64 Weston: Wayland is a socket.
 RUN dpkg --add-architecture arm64 \
     && apt-get update \
     && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
         qemu-user libxkbcommon0:arm64 libasound2t64:arm64 xkb-data \
+        libegl1:arm64 libgles2:arm64 libegl-mesa0:arm64 libgl1-mesa-dri:arm64 \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add aarch64-unknown-linux-gnu
 # QEMU_LD_PREFIX lets qemu-aarch64 find the aarch64 glibc. Tests that start the built `uxdroid`

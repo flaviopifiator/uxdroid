@@ -20,9 +20,9 @@ compile() {
         | { grep -v -i warning || true; }
     python3 /work/runtime/framework/assets.py aligned-jar "$W/$out.jar" "$dex_jar"
     local oat
-    oat="$(dirname "$dex_jar")/oat/x86_64/$(basename "$dex_jar" .jar).odex"
+    oat="$(dirname "$dex_jar")/oat/$ARCH/$(basename "$dex_jar" .jar).odex"
     mkdir -p "$(dirname "$oat")"
-    "$RUNTIME/bin/dex2oat64" --compiler-filter=verify --instruction-set=x86_64 --host --android-root="$RUNTIME" \
+    "${DEX2OAT[@]}" --compiler-filter=verify --instruction-set="$ARCH" --host --android-root="$RUNTIME" \
         --runtime-arg -Xbootclasspath:"$BOOT" --runtime-arg -Xbootclasspath-locations:"$BOOT" \
         --boot-image="$RUNTIME/framework/boot.art" --dex-file="$dex_jar" --class-loader-context="$context" \
         --oat-file="$oat" > "$W/dex2oat.log" 2>&1 || { tail -20 "$W/dex2oat.log"; exit 1; }
@@ -37,8 +37,10 @@ compile system "$RUNTIME/framework/uxdroid-system.jar" "PCL[$FRAMEWORK]" "$ALL" 
 # Libraries the framework loads by name only to register natives, which already have default bodies.
 # Each is an empty library, so System.loadLibrary finds it.
 CLANG=/aosp/$(ls -d prebuilts/clang/host/linux-x86/clang-r* | sort -V | tail -1)/bin/clang
+CROSS=()
+[ "$ARCH" = arm64 ] && CROSS=(--target=aarch64-linux-gnu -fuse-ld=lld)
 for library in stats_jni framework-connectivity-jni framework-connectivity-tiramisu-jni media_jni; do
-    "$CLANG" -shared -nostdlib -o "$RUNTIME/lib64/lib$library.so" -x c /dev/null
+    "$CLANG" "${CROSS[@]}" -shared -nostdlib -o "$RUNTIME/lib64/lib$library.so" -x c /dev/null
 done
 
 mkdir -p "$RUNTIME/samples/framework"

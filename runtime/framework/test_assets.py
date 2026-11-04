@@ -44,13 +44,13 @@ class BuildPropTest(unittest.TestCase):
         "persist.debug.new_insets=0",
     ]) + "\n"
 
-    def properties(self):
+    def properties(self, *abi):
         from assets import build_prop
         with tempfile.TemporaryDirectory() as work:
             source, out = os.path.join(work, "in"), os.path.join(work, "out")
             with open(source, "w") as f:
                 f.write(self.ROBOLECTRIC)
-            build_prop(source, out)
+            build_prop(source, out, *abi)
             with open(out) as f:
                 return dict(line.split("=", 1) for line in f.read().splitlines() if "=" in line)
 
@@ -64,3 +64,11 @@ class BuildPropTest(unittest.TestCase):
         self.assertEqual(props["ro.build.display.id"], "BLR2.250402.052")
         self.assertEqual(props["ro.product.cpu.abi"], "x86_64")
         self.assertEqual(props["persist.debug.new_insets"], "0")
+
+    def test_the_arm64_package_describes_an_arm64_device(self):
+        # The arm64 package's apps pick arm64-v8a code, as Build.SUPPORTED_ABIS lists it.
+        props = self.properties("arm64-v8a")
+        for key in ("ro.product.cpu.abi", "ro.product.cpu.abilist", "ro.product.cpu.abilist64"):
+            self.assertEqual(props[key], "arm64-v8a")
+        self.assertEqual(props["ro.product.cpu.abilist32"], "")
+        self.assertEqual(props["ro.product.model"], "uxdroid")

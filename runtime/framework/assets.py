@@ -4,7 +4,7 @@ Usage:
   assets.py aligned-jar <dex jar> <out jar>
   assets.py framework-res <android-all jar> <out apk>
   assets.py fonts <fonts dir> <fonts.xml in> <fonts.xml out>
-  assets.py build-prop <build.prop in> <build.prop out>
+  assets.py build-prop <build.prop in> <build.prop out> [<ABI>]
 """
 
 import os
@@ -63,8 +63,9 @@ def fonts(directory, xml_in, xml_out):
     print("fonts: {} families".format(len(root.findall("family"))))
 
 
-def build_prop(prop_in, prop_out):
-    """Describes this machine: an x86_64 host named uxdroid, not the ARM device Robolectric pretends to be.
+def build_prop(prop_in, prop_out, abi="x86_64"):
+    """Describes this machine: a host named uxdroid running the package's ABI, x86_64 or arm64-v8a, not
+    the ARM device Robolectric pretends to be.
 
     Robolectric names itself in the product, tags and fingerprint, and apps read that as a unit test:
     AnkiDroid skips loading its native library when Build.FINGERPRINT is "robolectric". The fingerprint
@@ -80,10 +81,10 @@ def build_prop(prop_in, prop_out):
     build_id = props.get("ro.build.id", "unknown")
     release = props.get("ro.build.version.release", "unknown")
     overrides = {
-        "ro.product.cpu.abi": "x86_64",
+        "ro.product.cpu.abi": abi,
         "ro.product.cpu.abi2": "",
-        "ro.product.cpu.abilist": "x86_64",
-        "ro.product.cpu.abilist64": "x86_64",
+        "ro.product.cpu.abilist": abi,
+        "ro.product.cpu.abilist64": abi,
         "ro.product.cpu.abilist32": "",
         "ro.product.name": "uxdroid",
         "ro.product.device": "uxdroid",
