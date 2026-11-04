@@ -87,6 +87,8 @@ docker compose run --rm -T dev bash /work/runtime/framework/parcel_smoke.sh
 # An NDK-built library using liblog, libandroid (with AChoreographer), libjnigraphics, EGL, GLES and
 # OpenSL ES.
 docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
+# An NDK-built library that finds no AMediaCodec and keeps an AMediaFormat through libmediandk.
+docker compose run --rm -T dev bash /work/runtime/framework/media_smoke.sh
 # Sound through AudioTrack, AudioRecord, OpenSL ES and AAudio, checked sample by sample in files, then
 # played through a private PulseAudio server.
 docker compose run --rm -T dev bash /work/runtime/framework/audio_smoke.sh
