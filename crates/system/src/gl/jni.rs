@@ -11,6 +11,7 @@ pub(super) use crate::Method;
 
 pub(super) const GL_COLOR: u32 = 0x1800;
 pub(super) const GL_CURRENT_VERTEX_ATTRIB: u32 = 0x8626;
+pub(super) const GL_TEXTURE_BORDER_COLOR: u32 = 0x1004;
 
 /// Throws `class` with `message`.
 ///

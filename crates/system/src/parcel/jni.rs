@@ -621,6 +621,17 @@ unsafe extern "system" fn marshall(env: *mut JNIEnv, _class: jclass, pointer: jl
     with_parcel!(pointer, std::ptr::null_mut(), |p| match p.marshall() {
         // SAFETY: ART passes a valid environment.
         Ok(bytes) => unsafe { new_byte_array(env, &bytes) },
+        Err(NO_MEMORY) => {
+            // SAFETY: as above.
+            unsafe {
+                throw(
+                    env,
+                    c"java/lang/OutOfMemoryError",
+                    "cannot marshall the parcel",
+                )
+            };
+            std::ptr::null_mut()
+        }
         Err(_) => {
             // SAFETY: as above.
             unsafe { throw_objects(env) };
@@ -643,10 +654,24 @@ unsafe fn throw_objects(env: *mut JNIEnv) {
 /// `env` must be the calling thread's JNI environment.
 unsafe fn marshall_into(env: *mut JNIEnv, pointer: jlong, out: Option<&mut [u8]>) -> jint {
     with_parcel!(pointer, 0, |p| {
-        let Ok(bytes) = p.marshall() else {
-            // SAFETY: as above.
-            unsafe { throw_objects(env) };
-            return 0;
+        let bytes = match p.marshall() {
+            Ok(bytes) => bytes,
+            Err(NO_MEMORY) => {
+                // SAFETY: as above.
+                unsafe {
+                    throw(
+                        env,
+                        c"java/lang/OutOfMemoryError",
+                        "cannot marshall the parcel",
+                    )
+                };
+                return 0;
+            }
+            Err(_) => {
+                // SAFETY: as above.
+                unsafe { throw_objects(env) };
+                return 0;
+            }
         };
         match out {
             Some(out) if out.len() >= bytes.len() => {

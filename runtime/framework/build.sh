@@ -46,7 +46,16 @@ unzip -q -j "$ALL" native/linux/x86_64/libandroid_runtime.so -d "$RUNTIME/lib64"
 unzip -q -j "$ALL" 'icu/icudt*.dat' -d "$RUNTIME/usr/icu"
 # The host library's ICU loader opens its data under ANDROID_I18N_ROOT the first time text breaks
 # into lines, as in an EditText, and aborts without it. ART's own, older ICU data stays beside it.
-ln -f "$RUNTIME"/usr/icu/icudt*.dat "$RUNTIME/com.android.i18n/etc/icu/"
+# A file of ART's own with the same name is kept, never replaced: the manifest would not list it, so
+# the next build could not restore it.
+for data in "$RUNTIME"/usr/icu/icudt*.dat; do
+    target="$RUNTIME/com.android.i18n/etc/icu/$(basename "$data")"
+    if [ -e "$target" ] && ! [ "$target" -ef "$data" ]; then
+        echo "note: keeping ART's own $target"
+    else
+        ln -f "$data" "$target"
+    fi
+done
 unzip -p "$ALL" build.prop > "$W/build.prop"
 python3 "$TOOLS/assets.py" build-prop "$W/build.prop" "$RUNTIME/build.prop"
 

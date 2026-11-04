@@ -19,5 +19,11 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+        <receiver android:name=".CompatReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.compat.REMIND" />
+            </intent-filter>
+        </receiver>
+        <activity android:name=".ResultActivity" android:exported="false" />
     </application>
 </manifest>

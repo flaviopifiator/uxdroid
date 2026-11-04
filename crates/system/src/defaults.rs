@@ -55,12 +55,24 @@ fn is_free_getter(native: &Native) -> bool {
             .any(|w| name.contains(w))
 }
 
+/// A native returning a handle whose name starts, after a `native` or `n` prefix, with a verb that
+/// makes one: `nativeCreate`, `nInit`, `native_new_instance`. A name that only holds such a word,
+/// as `nativeGetNewestTimestamp` or `nRecreateCache`, returns a value, not a new object.
 fn creates_object(native: &Native) -> bool {
-    let name = native.name.to_ascii_lowercase();
+    let name = native.name.as_str();
+    let rest = name
+        .strip_prefix("native")
+        .or_else(|| {
+            name.strip_prefix('n')
+                .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+        })
+        .unwrap_or(name)
+        .trim_start_matches('_')
+        .to_ascii_lowercase();
     native.signature.ends_with(")J")
         && ["init", "create", "new", "make"]
             .iter()
-            .any(|w| name.contains(w))
+            .any(|verb| rest.starts_with(verb))
 }
 
 /// Chooses each native's body, in order.
@@ -281,6 +293,33 @@ mod tests {
                 Body::Object,
                 Body::Free,
                 Body::Zero,
+                Body::Zero,
+                Body::Zero,
+                Body::Zero
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_name_that_starts_with_making_something_makes_an_object() {
+        let natives = parse(
+            "a/C nativeGetFinalizer ()J\n\
+             a/C nativeCreate (I)J\n\
+             a/C nInit ()J\n\
+             a/C native_new_instance ()J\n\
+             a/C makeNative ()J\n\
+             a/C nativeGetNewestTimestamp (J)J\n\
+             a/C nativeGetInitialValue (J)J\n\
+             a/C nRecreateCache (J)J\n",
+        );
+        assert_eq!(
+            bodies(&natives),
+            vec![
+                Body::Free,
+                Body::Object,
+                Body::Object,
+                Body::Object,
+                Body::Object,
                 Body::Zero,
                 Body::Zero,
                 Body::Zero

@@ -1,6 +1,9 @@
 package dev.uxdroid.system;
 
+import android.app.Activity;
 import android.app.IApplicationThread;
+import android.app.ResultInfo;
+import android.app.servertransaction.ActivityResultItem;
 import android.app.servertransaction.ClientTransaction;
 import android.app.servertransaction.DestroyActivityItem;
 import android.app.servertransaction.LaunchActivityItem;
@@ -39,6 +42,8 @@ final class ActivityStack {
         final IBinder token = new Binder();
         final ActivityInfo info;
         boolean resumed;
+        /** Who started it for a result, and asked with what; null when nobody waits for one. */
+        Result result;
 
         Entry(ActivityInfo info) {
             this.info = info;
@@ -46,6 +51,24 @@ final class ActivityStack {
 
         String component() {
             return new ComponentName(info.packageName, info.name).flattenToShortString();
+        }
+    }
+
+    /** What startActivityForResult asked: the activity that waits, its embedded id and request code. */
+    static final class Result {
+        final IBinder to;
+        final String who;
+        final int requestCode;
+
+        Result(IBinder to, String who, int requestCode) {
+            this.to = to;
+            this.who = who;
+            this.requestCode = requestCode;
+        }
+
+        /** The result of Instrumentation's start, or null when it asked for none. */
+        static Result of(IBinder to, String who, int requestCode) {
+            return to != null && requestCode >= 0 ? new Result(to, who, requestCode) : null;
         }
     }
 
@@ -125,6 +148,11 @@ final class ActivityStack {
      * a new activity on top. Returns what it did: launched, new_intent or brought_forward.
      */
     String start(Intent intent, ActivityInfo info) throws RemoteException {
+        return start(intent, info, null);
+    }
+
+    /** {@link #start}, for an activity that waits for a result from the one launched, if any. */
+    private String start(Intent intent, ActivityInfo info, Result result) throws RemoteException {
         intent.setComponent(new ComponentName(info.packageName, info.name));
         if (!entries.isEmpty() && isLauncher(intent) && info.name.equals(app.activity.name)) {
             return "brought_forward";
@@ -148,7 +176,7 @@ final class ActivityStack {
             deliver(entries.get(entries.size() - 1), intent);
             return "new_intent";
         }
-        launch(intent, info);
+        launch(intent, info, result);
         return "launched";
     }
 
@@ -157,10 +185,19 @@ final class ActivityStack {
      * intent for one of the app's activities starts as {@link #start} does, with FLAG_ACTIVITY_CLEAR_TASK
      * first finishing the task; one for another app's activity, or that none of the app's takes, has no
      * activity here, since no other app is installed, and fails with ActivityNotFoundException.
-     * Results of startActivityForResult are not delivered yet. With {@code check}, only the manifest is
+     * With {@code check}, only the manifest is
      * read, so any thread may ask, and an intent the app takes answers START_SUCCESS without starting.
      */
     int startFromApp(Intent intent, boolean check) throws RemoteException {
+        return startFromApp(intent, check, null);
+    }
+
+    /**
+     * {@link #startFromApp}, with what startActivityForResult asked: when the activity started finishes,
+     * its result is delivered to {@code result.to} before that one resumes. A start that launches nothing
+     * new, as a launch mode or flag may decide, answers RESULT_CANCELED at once, as Android does.
+     */
+    int startFromApp(Intent intent, boolean check, Result result) throws RemoteException {
         ComponentName component = intent.getComponent();
         String packageName = app.application.packageName;
         if (component != null && !component.getPackageName().equals(packageName)) {
@@ -181,11 +218,36 @@ final class ActivityStack {
         if ((flags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0 && (flags & Intent.FLAG_ACTIVITY_CLEAR_TASK) != 0) {
             while (!entries.isEmpty()) destroy(entries.get(entries.size() - 1));
         }
-        switch (start(intent, info)) {
+        String outcome = start(intent, info, result);
+        if (result != null && !outcome.equals("launched")) deliverResult(result, Activity.RESULT_CANCELED, null);
+        switch (outcome) {
             case "new_intent": return android.app.ActivityManager.START_DELIVERED_TO_TOP;
             case "brought_forward": return android.app.ActivityManager.START_TASK_TO_FRONT;
             default: return android.app.ActivityManager.START_SUCCESS;
         }
+    }
+
+    /**
+     * {@link #startFromApp} from any thread: the task runs on the main thread, so a start from another
+     * thread is checked against the manifest now, so its caller still sees a refusal, and queued there.
+     */
+    int startFromAnyThread(Intent intent) throws RemoteException {
+        return startFromAnyThread(intent, null);
+    }
+
+    int startFromAnyThread(Intent intent, Result result) throws RemoteException {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return startFromApp(intent, false, result);
+        int refused = startFromApp(intent, true);
+        if (refused != android.app.ActivityManager.START_SUCCESS) return refused;
+        Intent copy = new Intent(intent);
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            try {
+                startFromApp(copy, false, result);
+            } catch (RemoteException | RuntimeException e) {
+                System.err.println("uxdroid: cannot start " + copy + ": " + e);
+            }
+        });
+        return android.app.ActivityManager.START_SUCCESS;
     }
 
     private Entry highest(ActivityInfo info) {
@@ -195,7 +257,7 @@ final class ActivityStack {
         return null;
     }
 
-    private void launch(Intent intent, ActivityInfo info) throws RemoteException {
+    private void launch(Intent intent, ActivityInfo info, Result result) throws RemoteException {
         Entry below = entries.isEmpty() ? null : entries.get(entries.size() - 1);
         if (below != null && below.resumed) {
             ClientTransaction pause = new ClientTransaction(thread);
@@ -204,6 +266,7 @@ final class ActivityStack {
             below.resumed = false;
         }
         Entry entry = new Entry(info);
+        entry.result = result;
         Configuration config = Launcher.configuration();
         ClientTransaction launch = new ClientTransaction(thread);
         launch.addTransactionItem(new LaunchActivityItem(entry.token, intent, 0, info, config, config,
@@ -238,6 +301,22 @@ final class ActivityStack {
         thread.scheduleTransaction(transaction);
     }
 
+    /**
+     * Hands a finished activity's result to the one that asked for it, if it is still in the task, as
+     * an ActivityResultItem: the framework calls its onActivityResult before it resumes.
+     */
+    private void deliverResult(Result result, int resultCode, Intent data) throws RemoteException {
+        for (Entry waiting : entries) {
+            if (waiting.token == result.to) {
+                ClientTransaction transaction = new ClientTransaction(thread);
+                transaction.addTransactionItem(new ActivityResultItem(waiting.token,
+                        List.of(new ResultInfo(result.who, result.requestCode, resultCode, data))));
+                thread.scheduleTransaction(transaction);
+                return;
+            }
+        }
+    }
+
     private void resumeTop() throws RemoteException {
         if (entries.isEmpty() || !resume) return;
         Entry top = entries.get(entries.size() - 1);
@@ -252,10 +331,12 @@ final class ActivityStack {
      * Activity.finish: destroys it and resumes the one below. When the last one goes, the process ends,
      * as a desktop app does when its last window closes.
      */
-    boolean finish(IBinder token) throws RemoteException {
+    boolean finish(IBinder token, int resultCode, Intent resultData) throws RemoteException {
         for (Entry entry : entries) {
             if (entry.token == token) {
                 destroy(entry);
+                // Before the activity below resumes, as ActivityRecord.finishIfPossible sends it.
+                if (entry.result != null) deliverResult(entry.result, resultCode, resultData);
                 if (entries.isEmpty()) {
                     Control.exitAfterPending();
                 } else {

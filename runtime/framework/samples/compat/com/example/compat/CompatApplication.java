@@ -19,6 +19,63 @@ public class CompatApplication extends Application {
         device();
         graphics();
         redirect();
+        broadcasts();
+    }
+
+    /**
+     * Broadcasts inside the app: a receiver it registers, one of its manifest, an ordered broadcast
+     * through receivers by priority to a result receiver, and an alarm whose PendingIntent is a
+     * broadcast. An implicit broadcast reaches no manifest receiver, as on Android since 8.0.
+     */
+    private void broadcasts() {
+        registerReceiver(new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context, android.content.Intent intent) {
+                System.out.println("broadcast registered " + intent.getAction() + " main "
+                        + (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()));
+            }
+        }, new android.content.IntentFilter("com.example.compat.PING"), RECEIVER_NOT_EXPORTED);
+        sendBroadcast(new android.content.Intent("com.example.compat.PING"));
+        sendBroadcast(new android.content.Intent("com.example.compat.REMIND").setPackage(getPackageName())
+                .putExtra("by", "package"));
+        sendBroadcast(new android.content.Intent("com.example.compat.REMIND").putExtra("by", "implicit"));
+
+        android.content.IntentFilter first = new android.content.IntentFilter("com.example.compat.ORDERED");
+        first.setPriority(10);
+        android.content.IntentFilter second = new android.content.IntentFilter("com.example.compat.ORDERED");
+        second.setPriority(1);
+        registerReceiver(new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context, android.content.Intent intent) {
+                setResult(getResultCode() + 1, getResultData() + "b", null);
+            }
+        }, second, RECEIVER_NOT_EXPORTED);
+        registerReceiver(new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context, android.content.Intent intent) {
+                setResult(getResultCode() + 1, getResultData() + "a", null);
+            }
+        }, first, RECEIVER_NOT_EXPORTED);
+        sendOrderedBroadcast(new android.content.Intent("com.example.compat.ORDERED"), null,
+                new android.content.BroadcastReceiver() {
+                    @Override
+                    public void onReceive(android.content.Context context, android.content.Intent intent) {
+                        System.out.println("broadcast ordered result " + getResultData() + " code " + getResultCode());
+                    }
+                }, null, 0, "", null);
+
+        android.app.AlarmManager alarms = getSystemService(android.app.AlarmManager.class);
+        // An alarm clock that went off is no longer the next one.
+        alarms.setAlarmClock(new android.app.AlarmManager.AlarmClockInfo(System.currentTimeMillis() - 1, null),
+                android.app.PendingIntent.getBroadcast(this, 12, new android.content.Intent("com.example.compat.REMIND")
+                        .setPackage(getPackageName()).putExtra("by", "alarm clock"), android.app.PendingIntent.FLAG_IMMUTABLE));
+        android.content.Intent due = new android.content.Intent("com.example.compat.REMIND")
+                .setPackage(getPackageName()).putExtra("by", "alarm");
+        alarms.setExact(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime() - 1,
+                android.app.PendingIntent.getBroadcast(this, 10, due, android.app.PendingIntent.FLAG_IMMUTABLE));
+        alarms.setExact(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime() + 3_600_000,
+                android.app.PendingIntent.getBroadcast(this, 11, new android.content.Intent(due).putExtra("by", "later alarm"),
+                        android.app.PendingIntent.FLAG_IMMUTABLE));
     }
 
     /**
@@ -68,6 +125,30 @@ public class CompatApplication extends Application {
                 + " GL " + (android.opengl.GLES20.glGetString(android.opengl.GLES20.GL_VERSION) != null)
                 + " pixel " + String.format("%02x%02x%02x%02x", pixel.get(0), pixel.get(1), pixel.get(2), pixel.get(3))
                 + " shader " + compiled[0] + " refused " + refused);
+        // GLES31 and GLES32, on the same context: a program pipeline and a texture's border color.
+        int[] pipelines = new int[1];
+        android.opengl.GLES31.glGenProgramPipelines(1, pipelines, 0);
+        android.opengl.GLES31.glBindProgramPipeline(pipelines[0]);
+        String pipelineLog = android.opengl.GLES31.glGetProgramPipelineInfoLog(pipelines[0]);
+        int[] texture = new int[1];
+        android.opengl.GLES20.glGenTextures(1, texture, 0);
+        android.opengl.GLES20.glBindTexture(android.opengl.GLES20.GL_TEXTURE_2D, texture[0]);
+        android.opengl.GLES32.glTexParameterIiv(android.opengl.GLES20.GL_TEXTURE_2D,
+                android.opengl.GLES32.GL_TEXTURE_BORDER_COLOR, new int[] {1, 2, 3, 4}, 0);
+        int[] border = new int[4];
+        android.opengl.GLES32.glGetTexParameterIiv(android.opengl.GLES20.GL_TEXTURE_2D,
+                android.opengl.GLES32.GL_TEXTURE_BORDER_COLOR, border, 0);
+        String shortBorder;
+        try {
+            android.opengl.GLES32.glGetTexParameterIiv(android.opengl.GLES20.GL_TEXTURE_2D,
+                    android.opengl.GLES32.GL_TEXTURE_BORDER_COLOR, new int[2], 0);
+            shortBorder = "accepted";
+        } catch (IllegalArgumentException e) {
+            shortBorder = "refused";
+        }
+        System.out.println("graphics31 pipeline " + android.opengl.GLES31.glIsProgramPipeline(pipelines[0])
+                + " log " + (pipelineLog != null) + " border " + java.util.Arrays.toString(border)
+                + " short border " + shortBorder);
         egl.eglMakeCurrent(display, javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE,
                 javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE, javax.microedition.khronos.egl.EGL10.EGL_NO_CONTEXT);
         egl.eglDestroySurface(display, surface);
@@ -157,9 +238,56 @@ public class CompatApplication extends Application {
                 + " max " + shortcuts.getMaxShortcutCountPerActivity()
                 + " pin " + shortcuts.isRequestPinShortcutSupported());
 
+        // A list over the limit is refused whole: what was there stays.
+        java.util.List<android.content.pm.ShortcutInfo> many = new java.util.ArrayList<>();
+        for (int i = 0; i < shortcuts.getMaxShortcutCountPerActivity(); i++) {
+            many.add(new android.content.pm.ShortcutInfo.Builder(this, "s" + i).setShortLabel("S" + i)
+                    .setIntent(new android.content.Intent("com.example.compat.SECOND")).build());
+        }
+        String refused = "accepted";
+        try {
+            shortcuts.addDynamicShortcuts(many);
+        } catch (IllegalArgumentException e) {
+            refused = "refused";
+        }
+        System.out.println("shortcuts over the limit " + refused + " kept " + shortcuts.getDynamicShortcuts().size());
+
+        // Apps choose their layout and features by what the device has: a desktop with a touchscreen,
+        // sound, a microphone and OpenGL ES, and no camera, telephony or WebView.
+        android.content.pm.PackageManager pm = getPackageManager();
+        StringBuilder features = new StringBuilder("features");
+        for (String feature : new String[] {"android.hardware.type.pc", "android.hardware.touchscreen",
+                "android.hardware.audio.output", "android.hardware.microphone", "android.hardware.camera",
+                "android.hardware.telephony", "android.software.webview"}) {
+            features.append(' ').append(feature.substring(feature.lastIndexOf('.') + 1)).append(' ')
+                    .append(pm.hasSystemFeature(feature));
+        }
+        features.append(" listed ").append(pm.getSystemAvailableFeatures().length > 0);
+        System.out.println(features);
+        // AnkiDroid's text fields ask for spell checkers; a desktop has none, and says so.
+        android.view.textservice.TextServicesManager text =
+                getSystemService(android.view.textservice.TextServicesManager.class);
+        System.out.println("textservices " + (text != null) + " spell checker "
+                + (text != null && text.isSpellCheckerEnabled()));
+
         // Mindustry's graphics setup asks for its game mode.
         android.app.GameManager games = getSystemService(android.app.GameManager.class);
         System.out.println("game mode " + (games == null ? "none" : games.getGameMode()));
+    }
+
+    private static android.net.ConnectivityManager.NetworkCallback callback(String name) {
+        return new android.net.ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(android.net.Network network) {
+                System.out.println("network callback " + name + " available");
+            }
+
+            @Override
+            public void onCapabilitiesChanged(android.net.Network network, android.net.NetworkCapabilities caps) {
+                System.out.println("network callback " + name + " internet "
+                        + caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET));
+            }
+        };
     }
 
     /** Glide, in Aegis, holds the ConnectivityManager and watches the default network. */
@@ -169,6 +297,11 @@ public class CompatApplication extends Application {
             System.out.println("network no ConnectivityManager");
             return;
         }
+        // Watching the network, as Glide and WorkManager do: each callback hears of the current
+        // network once, with its capabilities, on ConnectivityManager's own thread, as on Android.
+        connectivity.registerDefaultNetworkCallback(callback("default"));
+        connectivity.registerNetworkCallback(new android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET).build(), callback("internet"));
         android.net.Network active = connectivity.getActiveNetwork();
         android.net.NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(active);
         android.net.NetworkInfo info = connectivity.getActiveNetworkInfo();

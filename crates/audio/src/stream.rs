@@ -273,6 +273,12 @@ impl Output {
         }
     }
 
+    /// Lets the device go, as AAudio's release does, while the stream is still held: its thread
+    /// ends, and a write blocked on it returns, as does every later one, with nothing taken.
+    pub fn release(&self) {
+        close(&self.shared, None, JOIN_LIMIT);
+    }
+
     /// Plays from the buffer or the callback; false once the device has failed.
     pub fn start(&self) -> bool {
         let mut inner = self.shared.lock();
@@ -618,6 +624,12 @@ impl Input {
         self.shared.lock().state
     }
 
+    /// Lets the device go while the stream is still held: a read blocked on it returns, as does every
+    /// later one, with nothing read.
+    pub fn release(&self) {
+        close(&self.shared, None, JOIN_LIMIT);
+    }
+
     /// Reads whole frames into `out` and returns how many samples. A blocking read waits for them
     /// while the stream records; a callback stream yields nothing.
     pub fn read(&self, out: &mut [f32], blocking: bool) -> usize {
@@ -801,6 +813,27 @@ mod tests {
         // 100 ms of device time hold 1,600 source frames at twice the device rate.
         assert_eq!(output.position(), 4_000);
         assert_eq!(output.presented(), 4_000 - 1_600);
+    }
+
+    #[test]
+    fn releasing_a_stream_returns_a_write_blocked_on_it() {
+        let output =
+            Arc::new(Output::on_sink(Box::new(Late(Duration::ZERO)), config(), None).unwrap());
+        // Full and never started: a blocking write waits for room that never comes.
+        output.write(&[0.5; 4_000], true);
+        let (done, written) = mpsc::channel();
+        let writer = output.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(writer.write(&[0.5; 80], true));
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        output.release();
+        assert_eq!(written.recv_timeout(Duration::from_secs(1)), Ok(0));
+        assert_eq!(
+            output.write(&[0.5; 80], true),
+            0,
+            "a released stream takes nothing"
+        );
     }
 
     #[test]

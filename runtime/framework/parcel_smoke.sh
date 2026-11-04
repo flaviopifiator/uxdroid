@@ -35,6 +35,7 @@ expect "aidl result 3 $BUNDLE" "the framework's AIDL proxy did not reach its stu
 expect "aidl refused: Binder invocation to an incorrect interface" "enforceInterface accepted a wrong token"
 expect "bitmap 3x2 ARGB_8888 240 ff112233 ff00ff00 0 mutable true same true" \
     "a Bitmap in a Bundle did not round-trip"
+expect "bitmap unpremultiplied 40ff8020 premultiplied false" "an unpremultiplied Bitmap changed on the way"
 expect "bitmap forged refused: Failed to unparcel Bitmap" "a forged Bitmap header was not refused"
 expect "motion refused: android.view.MotionEvent.nativeWriteToParcel: AOSP's host library cannot use uxdroid's parcels" \
     "a host native was handed a parcel it cannot read"

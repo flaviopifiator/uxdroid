@@ -21,8 +21,8 @@ per line:
     frames HZ           answer frame callbacks at HZ after each commit; 0 (the default) at once,
                         `stop` never, as for a hidden window
 
-It prints `[compositor] commit N WxH damage X,Y,W,H` for each frame of the toplevel,
-`[compositor] subsurface S commit WxH at X,Y damage X,Y,W,H` for each of a subsurface, `subsurface S
+It prints `[compositor] commit N WxH damage X,Y,W,H format F` for each frame of the toplevel,
+`[compositor] subsurface S commit WxH at X,Y damage X,Y,W,H format F` for each of a subsurface, `subsurface S
 created` and `destroyed`, and after each input command, the time until the first frame whose pixels
 differ from the frame shown when the input was sent: `[compositor] changed MS ms after COMMAND`.
 
@@ -165,7 +165,7 @@ def under(x, y):
     """The surface under display point (x, y), and the point in its coordinates."""
     for _, surface, sx, sy in reversed(subsurfaces):
         if surface in contents:
-            _, width, height = contents[surface]
+            _, width, height, _ = contents[surface]
             if sx <= x < sx + width and sy <= y < sy + height:
                 return surface, x - sx, y - sy
     return window[1], x, y
@@ -280,22 +280,40 @@ def run(command):
 configured = set()
 
 
+FORMATS = {0: "argb8888", 1: "xrgb8888"}
+
+
+def blend(below, above):
+    """Premultiplied ARGB8888 pixels over others, little-endian B, G, R, A, as the compositor does."""
+    alphas = above[3::4]
+    if alphas.count(255) == len(alphas):
+        return above
+    out = bytearray(above)
+    for i in range(0, len(above), 4):
+        keep = 255 - above[i + 3]
+        for c in range(4):
+            out[i + c] = min(255, above[i + c] + (below[i + c] * keep + 127) // 255)
+    return out
+
+
 def compose():
-    """The toplevel's last frame with the subsurfaces over it."""
-    pixels, width, height = contents[window[1]]
+    """The toplevel's last frame with the subsurfaces over it; ARGB ones blend with what is below."""
+    pixels, width, height, _ = contents[window[1]]
     if not any(surface in contents for _, surface, _, _ in subsurfaces):
         return pixels
     out = bytearray(pixels)
     for _, surface, sx, sy in subsurfaces:
         if surface not in contents:
             continue
-        sub, sw, sh = contents[surface]
+        sub, sw, sh, fmt = contents[surface]
         for row in range(max(0, sy), min(height, sy + sh)):
             left, right = max(0, sx), min(width, sx + sw)
             if right <= left:
                 continue
             start = ((row - sy) * sw + (left - sx)) * 4
-            out[(row * width + left) * 4:(row * width + right) * 4] = sub[start:start + (right - left) * 4]
+            target = slice((row * width + left) * 4, (row * width + right) * 4)
+            above = sub[start:start + (right - left) * 4]
+            out[target] = blend(out[target], above) if fmt == 0 else above
     return bytes(out)
 
 
@@ -316,24 +334,24 @@ def commit(surface):
             if len(entry) > 4:
                 entry[2], entry[3] = entry.pop()
     if attached in buffers:
-        fd, offset, width, height, stride = buffers[attached]
+        fd, offset, width, height, stride, fmt = buffers[attached]
         raw = os.pread(fd, stride * height, offset)
         if stride != width * 4:
             raw = b"".join(raw[row * stride:row * stride + width * 4] for row in range(height))
-        contents[surface] = (raw, width, height)
+        contents[surface] = (raw, width, height, fmt)
     if surface not in contents or window[1] not in contents:
         return
-    _, width, height = contents[surface]
+    _, width, height, fmt = contents[surface]
     area = ",".join(map(str, damage.pop(surface, [0, 0, 0, 0])))
     if sub is not None:
-        log(f"subsurface {sub[0]} commit {width}x{height} at {sub[2]},{sub[3]} damage {area}")
+        log(f"subsurface {sub[0]} commit {width}x{height} at {sub[2]},{sub[3]} damage {area} format {FORMATS.get(fmt, fmt)}")
     raw = compose()
-    width, height = contents[window[1]][1:]
+    width, height = contents[window[1]][1:3]
     frame["count"] += 1
     frame["pixels"], frame["size"] = raw, (width, height)
     frame["hash"] = hashlib.md5(raw).digest()
     if sub is None:
-        log(f"commit {frame['count']} {width}x{height} damage {area}")
+        log(f"commit {frame['count']} {width}x{height} damage {area} format {FORMATS.get(fmt, fmt)}")
     now = time.monotonic()
     for entry in list(waiting):
         sent, command, before = entry
@@ -388,9 +406,9 @@ def handle(object_id, opcode, body):
         pools[word(0)] = incoming_fds.pop(0)
         objects[word(0)] = "wl_shm_pool"
     elif kind == "wl_shm_pool" and opcode == 0:
-        new, offset, width, height, stride, _ = struct.unpack_from("<IiiiiI", body)
+        new, offset, width, height, stride, fmt = struct.unpack_from("<IiiiiI", body)
         objects[new] = "wl_buffer"
-        buffers[new] = (pools[object_id], offset, width, height, stride)
+        buffers[new] = (pools[object_id], offset, width, height, stride, fmt)
     elif kind == "wl_buffer" and opcode == 0:
         buffers.pop(object_id, None)
     elif kind == "wl_subcompositor" and opcode == 1:

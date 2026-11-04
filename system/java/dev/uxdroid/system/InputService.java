@@ -9,10 +9,10 @@ import android.view.KeyCharacterMap;
  * device has. Their key character maps all read the seat's keymap in libuxdroid_system.so.
  */
 public final class InputService {
-    /** Ids libuxdroid_system.so gives the seat's events. */
-    static final int KEYBOARD = 1;
-    static final int MOUSE = 2;
-    static final int TOUCHSCREEN = 3;
+    /** Ids libuxdroid_system.so gives the seat's events, from the library itself. */
+    static final int KEYBOARD = Natives.seatDevice(0);
+    static final int MOUSE = Natives.seatDevice(1);
+    static final int TOUCHSCREEN = Natives.seatDevice(2);
 
     private final InputDevice[] devices = {
         device(KeyCharacterMap.VIRTUAL_KEYBOARD, "Virtual", InputDevice.SOURCE_KEYBOARD, false),

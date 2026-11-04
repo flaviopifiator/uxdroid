@@ -483,7 +483,8 @@ impl Agent {
     }
 }
 
-/// The frames over each other, bottom first, on a black display, as the compositor shows them.
+/// The frames over each other, bottom first, on a black display, as the compositor shows them:
+/// translucent windows blend with what is below.
 fn compose(frames: &[WindowFrame], width: i32, height: i32) -> Vec<u32> {
     let mut display = vec![0xFF00_0000; (width.max(0) * height.max(0)) as usize];
     for frame in frames {
@@ -503,11 +504,29 @@ fn compose(frames: &[WindowFrame], width: i32, height: i32) -> Vec<u32> {
             let source = (row * frame.width + (left - frame.x)) as usize;
             let target = (y * width + left) as usize;
             let length = (right - left) as usize;
-            display[target..target + length]
-                .copy_from_slice(&frame.pixels[source..source + length]);
+            for (below, &above) in display[target..target + length]
+                .iter_mut()
+                .zip(&frame.pixels[source..source + length])
+            {
+                *below = over_premultiplied(above, *below);
+            }
         }
     }
     display
+}
+
+/// A window's premultiplied pixel over what is below it, as the compositor blends an ARGB8888
+/// surface; an XRGB8888 window's pixels are opaque and replace it.
+fn over_premultiplied(above: u32, below: u32) -> u32 {
+    let alpha = above >> 24;
+    if alpha == 0xFF {
+        return above;
+    }
+    let channel = |shift: u32| {
+        let kept = (((below >> shift) & 0xFF) * (255 - alpha) + 127) / 255;
+        (((above >> shift) & 0xFF) + kept).min(255) << shift
+    };
+    channel(24) | channel(16) | channel(8) | channel(0)
 }
 
 /// Every `scale`th pixel of each `scale`th row, as RGB.

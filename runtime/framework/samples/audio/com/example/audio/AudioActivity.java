@@ -66,6 +66,10 @@ public class AudioActivity extends Activity {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build();
         if (track.getState() != AudioTrack.STATE_INITIALIZED) return "not initialized";
+        track.setNotificationMarkerPosition(1200);
+        track.setPositionNotificationPeriod(480);
+        System.out.println("audiotrack marker " + track.getNotificationMarkerPosition()
+                + " period " + track.getPositionNotificationPeriod());
         short[] tone = new short[FRAMES];
         for (int i = 0; i < FRAMES; i++) tone[i] = saw(i, 440, RATE);
         track.play();

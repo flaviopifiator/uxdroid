@@ -49,15 +49,22 @@ public final class Agent {
 
     private static long snapshots;
     private static Accessibility accessibility;
+    /** Snapshots still waiting for nodes to settle after accessibility turned on. */
+    private static int settling;
 
-    /** Answers a ui command with a snapshot, after the nodes settle if accessibility just turned on. */
+    /**
+     * Answers a ui command with a snapshot, after the nodes settle if accessibility just turned on,
+     * or is still settling for another agent's command. The limits are the protocol's, checked again
+     * here so no caller of this class can ask for an unbounded walk.
+     */
     static void ui(long sequence, JSONObject arguments) throws JSONException {
-        int maxNodes = arguments.optInt("max_nodes", 1000);
-        int maxDepth = arguments.optInt("max_depth", 64);
-        if (!enable(true)) {
+        int maxNodes = Math.max(1, Math.min(5000, arguments.optInt("max_nodes", 1000)));
+        int maxDepth = Math.max(1, Math.min(128, arguments.optInt("max_depth", 64)));
+        if (!enable(true) && settling == 0) {
             Control.answer(sequence, snapshot(maxNodes, maxDepth).toString(), null, null);
             return;
         }
+        settling++;
         settle(sequence, maxNodes, maxDepth, SystemClock.uptimeMillis(), -1, 0);
     }
 
@@ -69,11 +76,13 @@ public final class Agent {
                 int stable = count == before ? same + 1 : 0;
                 long waited = SystemClock.uptimeMillis() - since;
                 if ((stable >= 2 && waited >= SETTLE_MIN_MS) || waited >= SETTLE_MAX_MS) {
+                    settling--;
                     Control.answer(sequence, snapshot.toString(), null, null);
                 } else {
                     settle(sequence, maxNodes, maxDepth, since, count, stable);
                 }
             } catch (JSONException | RuntimeException e) {
+                settling--;
                 Control.answer(sequence, null, "failed", String.valueOf(e));
             }
         }, SETTLE_STEP_MS);

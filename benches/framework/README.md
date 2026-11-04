@@ -52,6 +52,20 @@ docker compose run --rm -T dev bash /work/benches/framework/service.sh
 
 "From the APK" starts the launcher on the APK file, as every start did before `uxdroid install` prepared apps: it parses the manifest, makes a stub for every framework native, and runs the app's DEX uncompiled. "Installed" starts it on `<data>/app/<package>/base.apk` after `uxdroid install` with the framework, which compiled the DEX, recorded the manifest and wrote the default bodies' library.
 
+## Compatibility cleanup (T7b)
+
+2026-11-04, `run.sh` and `rustdesk.sh` alternating base (bca7420, its runtime copy) and branch (its copy), each mounted at `/runtime/art`, from ext4; 10 warm runs per row in two rounds, and a third round of 20 for the sample. Medians, installed starts.
+
+| Workload | Base | Branch |
+|----------|------|--------|
+| Sample app to first frame | 123.3, 123.5, 124.3 ms | 123.1, 138.2, 124.7 ms |
+| Sample app private dirty | 19.3 MiB | 19.3 MiB |
+| RustDesk to fully drawn | 225.3, 217.5 ms | 219.6, 224.0 ms |
+| RustDesk private dirty | 80.9, 81.1 MiB | 82.1, 82.2 MiB |
+| RustDesk PSS | 291.0, 291.5 MiB | 292.1, 292.1 MiB |
+
+The sample's start is bimodal on both sides, about 123 and 138 ms; the branch landed in the slower mode in more runs (its second round's median, and an upper quartile of 137.8 against 124.8 ms in the third), for a reason not found. RustDesk's time is within the noise, and it holds about 1.1 MiB more private dirty memory, unexplained; it now gets its network callbacks and broadcasts, which may account for it. No competitor was measured.
+
 ## Agent control
 
 2026-11-03, 20 runs per row, `run.sh` twice, alternating: the base commit (623ac3e) with its runtime, then this branch with its runtime copy mounted at `/runtime/art`, from ext4. Median of each run, base / branch. An app with no agent attached runs no agent code: the `ui` service and accessibility register only when an agent asks, and the remaining cost is one counter increment per presented frame.

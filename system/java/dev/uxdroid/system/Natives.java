@@ -27,4 +27,7 @@ final class Natives {
      * Process.myUid answer its application uid. The Linux uid does not change. Returns the uid.
      */
     static native int becomeApplication(String packageName);
+
+    /** The input device id the seat's events carry: keyboard 0, mouse 1, touchscreen 2. */
+    static native int seatDevice(int kind);
 }

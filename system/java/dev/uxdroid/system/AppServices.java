@@ -30,6 +30,23 @@ final class AppServices {
         Services.register("appops", com.android.internal.app.IAppOpsService.class, new AppOps(app));
         Services.register("shortcut", android.content.pm.IShortcutService.class, new Shortcuts(app));
         Services.register("game", android.app.IGameManagerService.class, new Games(app));
+        Services.register("textservices", com.android.internal.textservice.ITextServicesManager.class,
+                new TextServices());
+    }
+
+    /**
+     * The handler of ITextServicesManager: a desktop has no spell checker service, so none is enabled,
+     * which text fields read as no suggestions. Without the service, TextServicesManager itself is
+     * null and AnkiDroid's text fields log its absence.
+     */
+    public static final class TextServices {
+        public boolean isSpellCheckerEnabled(int userId) { return false; }
+        public android.view.textservice.SpellCheckerInfo getCurrentSpellChecker(int userId, String locale) {
+            return null;
+        }
+        public android.view.textservice.SpellCheckerInfo[] getEnabledSpellCheckers(int userId) {
+            return new android.view.textservice.SpellCheckerInfo[0];
+        }
     }
 
     /**
@@ -124,8 +141,8 @@ final class AppServices {
     /**
      * The handler of IAlarmManager. An alarm with a listener, as AlarmManager.set with an
      * OnAlarmListener makes, fires on time from a timer thread and the listener runs on its own handler;
-     * repeating ones fire again. An alarm with a PendingIntent is kept, so getNextAlarmClock sees it,
-     * but not delivered: broadcasts are not delivered yet, which is said once.
+     * repeating ones fire again. An alarm with a PendingIntent sends it at its time, which for a
+     * broadcast reaches the app's receivers ({@link Broadcasts}).
      */
     public static final class Alarms {
         private final java.util.concurrent.ScheduledExecutorService timer =
@@ -135,7 +152,6 @@ final class AppServices {
                     return thread;
                 });
         private final List<Alarm> alarms = new ArrayList<>();
-        private boolean warned;
 
         private static final class Alarm {
             final android.app.PendingIntent operation;
@@ -172,24 +188,22 @@ final class AppServices {
             remove(operation, listener);
             Alarm alarm = new Alarm(operation, listener, clock);
             alarms.add(alarm);
-            if (listener == null) {
-                if (!warned) {
-                    warned = true;
-                    System.err.println("uxdroid: alarms of " + callingPackage + " with a PendingIntent are kept but not"
-                            + " delivered: broadcasts are not delivered yet");
-                }
-                return;
-            }
             Runnable fire = () -> {
-                try {
-                    listener.doAlarm(COMPLETE);
-                } catch (android.os.RemoteException e) {
-                    throw new IllegalStateException(e);
-                }
+                // Gone before it is handled, so what it starts never sees it as the next alarm.
                 if (interval <= 0) {
                     synchronized (this) {
                         alarms.remove(alarm);
                     }
+                }
+                try {
+                    if (listener != null) {
+                        listener.doAlarm(COMPLETE);
+                    } else if (operation != null) {
+                        // As AlarmManagerService sends an alarm's operation: its broadcast, activity or service.
+                        IntentSenders.send(operation.getTarget(), null);
+                    }
+                } catch (android.os.RemoteException | RuntimeException e) {
+                    System.err.println("uxdroid: an alarm of " + callingPackage + " failed: " + e);
                 }
             };
             alarm.future = interval > 0
@@ -302,17 +316,19 @@ final class AppServices {
             this.app = app;
         }
 
+        /** Adds or replaces the list whole, or refuses it whole when it would pass the limit. */
         private boolean add(ParceledListSlice list, boolean replace) {
-            List<?> shortcuts = list.getList();
-            if (replace) dynamic.clear();
-            for (Object shortcut : shortcuts) {
+            Map<String, ShortcutInfo> next = replace ? new LinkedHashMap<>() : new LinkedHashMap<>(dynamic);
+            for (Object shortcut : list.getList()) {
                 ShortcutInfo info = (ShortcutInfo) shortcut;
-                info.addFlags(ShortcutInfo.FLAG_DYNAMIC);
-                dynamic.put(info.getId(), info);
+                next.put(info.getId(), info);
+                if (next.size() > MAX_PER_ACTIVITY) {
+                    throw new IllegalArgumentException("Max number of dynamic shortcuts exceeded");
+                }
             }
-            if (dynamic.size() > MAX_PER_ACTIVITY) {
-                throw new IllegalArgumentException("Max number of dynamic shortcuts exceeded");
-            }
+            for (ShortcutInfo info : next.values()) info.addFlags(ShortcutInfo.FLAG_DYNAMIC);
+            dynamic.clear();
+            dynamic.putAll(next);
             return true;
         }
 
@@ -324,8 +340,11 @@ final class AppServices {
             return add(list, false);
         }
 
+        /** As ShortcutService does, a push over the limit drops the oldest dynamic shortcut. */
         public synchronized void pushDynamicShortcut(String packageName, ShortcutInfo shortcut, int userId) {
             shortcut.addFlags(ShortcutInfo.FLAG_DYNAMIC);
+            dynamic.remove(shortcut.getId());
+            if (dynamic.size() >= MAX_PER_ACTIVITY) dynamic.remove(dynamic.keySet().iterator().next());
             dynamic.put(shortcut.getId(), shortcut);
         }
 

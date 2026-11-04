@@ -12,7 +12,7 @@ import java.nio.IntBuffer;
  * nativeWriteToParcel and nativeCreateFromParcel. AOSP's host library cannot reach a parcel that is
  * not its C++ one, so the pixels travel as unpremultiplied ARGB words in a blob, after a header of
  * mutability, config, width, height, density, premultiplication and alpha. Semi-transparent pixels
- * of a premultiplied bitmap can change by rounding on the way.
+ * of a premultiplied bitmap can change by rounding on the way; an unpremultiplied one's do not.
  */
 final class BitmapParcels {
     private BitmapParcels() {}
@@ -42,19 +42,29 @@ final class BitmapParcels {
         boolean mutable = !(Boolean) immutable.invoke(null, bitmap);
         Bitmap pixels = (Bitmap) copy.invoke(null, bitmap, ARGB_8888, false);
         if (pixels == null) return false;
-        int width = pixels.getWidth(), height = pixels.getHeight();
-        int[] colors = new int[width * height];
-        pixels.getPixels(colors, 0, width, 0, 0, width, height);
+        // Everything is read before anything is written, so a failure leaves the parcel as it was.
+        int width, height;
+        boolean premultiplied, alpha;
+        ByteBuffer bytes;
+        try {
+            width = pixels.getWidth();
+            height = pixels.getHeight();
+            premultiplied = pixels.isPremultiplied();
+            alpha = pixels.hasAlpha();
+            int[] colors = new int[width * height];
+            pixels.getPixels(colors, 0, width, 0, 0, width, height);
+            bytes = ByteBuffer.allocate(colors.length * 4).order(ByteOrder.LITTLE_ENDIAN);
+            bytes.asIntBuffer().put(colors);
+        } finally {
+            pixels.recycle();
+        }
         parcel.writeInt(mutable ? 1 : 0);
         parcel.writeInt(nativeConfig);
         parcel.writeInt(width);
         parcel.writeInt(height);
         parcel.writeInt(density);
-        parcel.writeInt(pixels.isPremultiplied() ? 1 : 0);
-        parcel.writeInt(pixels.hasAlpha() ? 1 : 0);
-        pixels.recycle();
-        ByteBuffer bytes = ByteBuffer.allocate(colors.length * 4).order(ByteOrder.LITTLE_ENDIAN);
-        bytes.asIntBuffer().put(colors);
+        parcel.writeInt(premultiplied ? 1 : 0);
+        parcel.writeInt(alpha ? 1 : 0);
         parcel.writeBlob(bytes.array());
         return true;
     }
@@ -73,6 +83,9 @@ final class BitmapParcels {
         IntBuffer words = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
         words.get(colors);
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        // Before the pixels go in: setPixels premultiplies them into a premultiplied bitmap, and
+        // changing that later only changes how the stored words are read.
+        bitmap.setPremultiplied(premultiplied);
         bitmap.setPixels(colors, 0, width, 0, 0, width, height);
         Bitmap.Config wanted = config(nativeConfig);
         if (wanted != Bitmap.Config.ARGB_8888 || !mutable) {
@@ -83,9 +96,7 @@ final class BitmapParcels {
         }
         bitmap.setDensity(density);
         bitmap.setHasAlpha(alpha);
-        if (bitmap.getConfig() == Bitmap.Config.ARGB_8888 || bitmap.getConfig() == Bitmap.Config.RGBA_F16) {
-            bitmap.setPremultiplied(premultiplied);
-        }
+        if (bitmap.getConfig() == Bitmap.Config.RGBA_F16) bitmap.setPremultiplied(premultiplied);
         return bitmap;
     }
 

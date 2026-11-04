@@ -168,7 +168,7 @@ unsafe extern "system" fn control_create(
     name: jstring,
     width: jint,
     height: jint,
-    _format: jint,
+    format: jint,
     flags: jint,
     parent: jlong,
     _metadata: jobject,
@@ -185,7 +185,16 @@ unsafe extern "system" fn control_create(
         Platform::default(),
     );
     layer.set_size(width, height);
+    layer.set_opaque(opaque(format, flags));
     SURFACE_CONTROLS.add(layer)
+}
+
+/// Whether a layer made with `format` and `flags` covers itself entirely: `SurfaceControl.OPAQUE`, or
+/// a `PixelFormat` without alpha. A dialog's window is `TRANSLUCENT`, for its shadow.
+fn opaque(format: jint, flags: jint) -> bool {
+    const OPAQUE: jint = 0x400;
+    // PixelFormat.OPAQUE, RGBX_8888, RGB_888 and RGB_565.
+    flags & OPAQUE != 0 || matches!(format, -1 | 2 | 3 | 4)
 }
 
 unsafe extern "system" fn control_copy(_env: *mut JNIEnv, _class: jclass, control: jlong) -> jlong {
@@ -721,7 +730,7 @@ impl Target {
                 return Err(Failure::Message(format!("{} was removed", layer.name)));
             }
             let (x, y) = placement.map_or((0, 0), |placement| placement.surface());
-            let window = Window::open(&layer.name, width, height, x, y)
+            let window = Window::open(&layer.name, width, height, x, y, layer.is_opaque())
                 .map_err(|error| Failure::Message(format!("cannot open a window: {error}")))?;
             let key = window.key();
             locked(&WINDOWS).push((key, Arc::downgrade(layer)));
@@ -816,9 +825,15 @@ unsafe fn lock(
     if target.is_none() {
         // SAFETY: as above.
         let opened = unsafe { Target::open(env, layer)? };
-        if opened.window.is_some() {
+        // Input between frames needs the watch, the frame does not: a watch that cannot be set up
+        // is reported, and the window still draws, reading input after each frame's round trip.
+        // SAFETY: as above.
+        if opened.window.is_some() && unsafe { watch(env) }.is_err() {
             // SAFETY: as above.
-            unsafe { watch(env)? };
+            unsafe { crate::clear_exception(env) };
+            uxdroid_bridge::report!(
+                "uxdroid: the display's connection is not watched; input is read only when a frame is drawn"
+            );
         }
         *target = Some(opened);
     }
@@ -1099,15 +1114,24 @@ fn present(target: &mut Target, window_layer: &Arc<Layer>) -> Result<(), Failure
     let Some(window) = window.as_mut() else {
         return Ok(());
     };
+    // A window made opaque or translucent since gets a buffer of its format, all drawn again.
+    if window
+        .set_opaque(window_layer.is_opaque())
+        .map_err(|error| Failure::Message(format!("cannot change a window's format: {error}")))?
+    {
+        *composer = Composer::default();
+    }
     let frame = window.frame();
     let (width, height) = (frame.width, frame.height);
     let damage = composer.compose(window_layer, frame.pixels, width, height);
     if damage.is_empty() {
         return Ok(());
     }
-    window
-        .present(damage)
-        .map_err(|error| Failure::Message(format!("cannot present a frame: {error}")))?;
+    if let Err(error) = window.present(damage) {
+        // The composer already counts this damage as shown: the next frame redraws everything.
+        *composer = Composer::default();
+        return Err(Failure::Message(format!("cannot present a frame: {error}")));
+    }
     PRESENTED.fetch_add(1, Ordering::Relaxed);
     // The round trip may have read input, which the Looper will not see as readable.
     route();

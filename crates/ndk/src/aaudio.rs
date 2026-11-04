@@ -144,6 +144,13 @@ struct Stream {
     watched: AtomicBool,
 }
 
+impl Stream {
+    /// Released with AAudioStream_release: only its getters still answer.
+    fn released(&self) -> bool {
+        *lock(&self.status.state) == STATE_CLOSED
+    }
+}
+
 static STREAMS: Live<Stream> = Live::new();
 
 /// How often the watch looks at a device that may fail.
@@ -567,6 +574,12 @@ pub(crate) unsafe extern "C" fn release(pointer: *mut c_void) -> i32 {
             // SAFETY: as for request_stop.
             unsafe { request_stop(pointer) };
             stream.status.set(STATE_CLOSED);
+            // The device goes now: a read or write blocked on it returns, and later ones are refused.
+            match stream.io.get() {
+                Some(Io::Output(output)) => output.release(),
+                Some(Io::Input(input)) => input.release(),
+                None => {}
+            }
             OK
         }
         None => ERROR_INVALID_HANDLE,
@@ -696,7 +709,7 @@ pub(crate) unsafe extern "C" fn write(
     let Some(Io::Output(output)) = stream.io.get() else {
         return ERROR_UNIMPLEMENTED;
     };
-    if stream.settings.data.is_some() {
+    if stream.settings.data.is_some() || stream.released() {
         return ERROR_INVALID_STATE;
     }
     if buffer.is_null() || frames < 0 {
@@ -726,7 +739,7 @@ pub(crate) unsafe extern "C" fn read(
     let Some(Io::Input(input)) = stream.io.get() else {
         return ERROR_UNIMPLEMENTED;
     };
-    if stream.settings.data.is_some() {
+    if stream.settings.data.is_some() || stream.released() {
         return ERROR_INVALID_STATE;
     }
     if buffer.is_null() || frames < 0 {
@@ -1245,6 +1258,56 @@ mod tests {
             assert_eq!(request_flush(stream), OK);
             assert_eq!(get_state(stream), STATE_FLUSHED);
             close(stream);
+            delete_builder(builder);
+        }
+    }
+
+    #[test]
+    fn release_returns_a_blocked_write_and_refuses_later_ones() {
+        let builder = builder();
+        // SAFETY: a live builder.
+        unsafe {
+            set_rate(builder, 8_000);
+            set_channels(builder, 1);
+            set_format(builder, FORMAT_FLOAT);
+        }
+        let stream = open(builder).unwrap() as usize;
+        let frames = [0.25f32; 320];
+        // SAFETY: a live stream and 320 mono float frames, its whole capacity; never started.
+        unsafe {
+            assert_eq!(
+                write(stream as *mut c_void, frames.as_ptr().cast(), 320, 0),
+                320
+            )
+        };
+        let (done, written) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let more = [0.5f32; 10];
+            // SAFETY: the stream is released, not closed, until the answer came.
+            let result = unsafe {
+                write(
+                    stream as *mut c_void,
+                    more.as_ptr().cast(),
+                    10,
+                    10_000_000_000,
+                )
+            };
+            let _ = done.send(result);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // SAFETY: a live stream, released and then closed.
+        unsafe {
+            assert_eq!(release(stream as *mut c_void), OK);
+            assert_eq!(
+                written.recv_timeout(std::time::Duration::from_secs(1)),
+                Ok(0)
+            );
+            assert_eq!(
+                write(stream as *mut c_void, frames.as_ptr().cast(), 1, 0),
+                ERROR_INVALID_STATE
+            );
+            assert_eq!(get_state(stream as *mut c_void), STATE_CLOSED);
+            close(stream as *mut c_void);
             delete_builder(builder);
         }
     }

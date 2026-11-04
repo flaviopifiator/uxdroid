@@ -18,6 +18,8 @@ public class CompatActivity extends Activity {
         startActivity(new android.content.Intent(this, SecondActivity.class).putExtra("by", "class"));
         startActivity(new android.content.Intent("com.example.compat.SECOND").putExtra("by", "action"));
         pendingIntents();
+        // A result comes back to the activity that asked, as an app's picker or login screen answers.
+        startActivityForResult(new android.content.Intent(this, ResultActivity.class).putExtra("question", 21), 7);
         try {
             startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
                     android.net.Uri.parse("https://example.org/")));
@@ -37,6 +39,12 @@ public class CompatActivity extends Activity {
         start.start();
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        System.out.println("result request " + requestCode + " code " + resultCode + " answer "
+                + (data == null ? "none" : data.getIntExtra("answer", -1)));
+    }
+
     /** Loop Habit Tracker makes PendingIntents for its reminders and widgets. */
     private void pendingIntents() {
         android.content.Intent reminder = new android.content.Intent("com.example.compat.REMIND").setPackage(getPackageName());
@@ -48,6 +56,21 @@ public class CompatActivity extends Activity {
                 android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_NO_CREATE);
         System.out.println("pending broadcast " + (first != null) + " same " + first.equals(again)
                 + " creator " + first.getCreatorPackage() + " absent " + (other == null));
+        // The flags a PendingIntent is made with are part of its identity, as PendingIntentRecord's key;
+        // a canceled one is not sent.
+        android.app.PendingIntent shot = android.app.PendingIntent.getBroadcast(this, 1, reminder,
+                android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_ONE_SHOT);
+        shot.cancel();
+        String canceled;
+        try {
+            shot.send();
+            canceled = "sent";
+        } catch (android.app.PendingIntent.CanceledException e) {
+            canceled = "refused";
+        }
+        System.out.println("pending flags apart " + !shot.equals(first) + " first kept "
+                + (android.app.PendingIntent.getBroadcast(this, 1, reminder, android.app.PendingIntent.FLAG_IMMUTABLE
+                        | android.app.PendingIntent.FLAG_NO_CREATE) != null) + " canceled " + canceled);
         try {
             android.app.PendingIntent.getActivity(this, 0,
                     new android.content.Intent(this, SecondActivity.class).putExtra("by", "pending intent"),

@@ -210,6 +210,18 @@ public class ParcelSmoke {
                 + " mutable " + copy.isMutable() + " same " + copy.sameAs(bitmap));
         p.recycle();
         q.recycle();
+        // An unpremultiplied bitmap keeps its semi-transparent pixels exactly: they are not
+        // premultiplied on the way back.
+        Bitmap straight = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+        straight.setPremultiplied(false);
+        straight.setPixel(0, 0, 0x40ff8020);
+        Parcel s = Parcel.obtain();
+        straight.writeToParcel(s, 0);
+        s.setDataPosition(0);
+        Bitmap back = Bitmap.CREATOR.createFromParcel(s);
+        System.out.println("bitmap unpremultiplied " + Integer.toHexString(back.getPixel(0, 0))
+                + " premultiplied " + back.isPremultiplied());
+        s.recycle();
         // A forged header asks for 40 GB of pixels and holds 4 bytes: refused before allocating.
         Parcel forged = Parcel.obtain();
         for (int value : new int[] {1, 5, 100000, 100000, 160, 1, 1}) forged.writeInt(value);

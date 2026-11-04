@@ -97,41 +97,78 @@ struct State {
 /// The frame callbacks windows wait for. Each commit asks for one, so a callback the compositor
 /// never answers, such as one asked before the surface was hidden, is replaced by the next frame's
 /// instead of pinning the surface; the vsync counts each surface once and follows its newest.
+///
+/// A compositor keeps the callbacks of a hidden surface unanswered, and each is an object on both
+/// sides, so a surface has at most [`MAX_PENDING_FRAMES`] of them: a frame past that asks for none,
+/// and the vsync's own fallback paces the app until the compositor answers.
 #[derive(Default)]
-struct Frames(Vec<(u32, u32)>);
+struct Frames {
+    /// The newest callback each waiting surface asked for.
+    newest: Vec<(u32, u32)>,
+    /// Callbacks asked for and not answered yet, per surface.
+    pending: Vec<(u32, u32)>,
+}
+
+/// Unanswered frame callbacks a surface may have.
+const MAX_PENDING_FRAMES: u32 = 4;
 
 impl Frames {
-    /// A callback for `surface` was asked: its number, and whether the surface waits anew.
-    fn request(&mut self, surface: u32) -> (u32, bool) {
-        match self.0.iter_mut().find(|(key, _)| *key == surface) {
-            Some((_, number)) => {
-                *number = number.wrapping_add(1);
-                (*number, false)
-            }
+    /// A frame of `surface` is committed: the number of the callback to ask for, and whether the
+    /// surface waits anew; None when it has as many unanswered callbacks as it may have.
+    fn request(&mut self, surface: u32) -> Option<(u32, bool)> {
+        let pending = match self.pending.iter_mut().find(|(key, _)| *key == surface) {
+            Some((_, count)) => count,
             None => {
-                self.0.push((surface, 0));
-                (0, true)
+                self.pending.push((surface, 0));
+                &mut self.pending.last_mut().expect("just pushed").1
             }
+        };
+        if *pending >= MAX_PENDING_FRAMES {
+            return None;
         }
+        *pending += 1;
+        Some(
+            match self.newest.iter_mut().find(|(key, _)| *key == surface) {
+                Some((_, number)) => {
+                    *number = number.wrapping_add(1);
+                    (*number, false)
+                }
+                None => {
+                    self.newest.push((surface, 0));
+                    (0, true)
+                }
+            },
+        )
     }
 
     /// The compositor answered callback `number` of `surface`: true when the surface stops waiting,
     /// which only its newest callback does.
     fn answer(&mut self, surface: u32, number: u32) -> bool {
-        match self.0.iter().position(|entry| *entry == (surface, number)) {
+        if let Some(at) = self.pending.iter().position(|(key, _)| *key == surface) {
+            self.pending[at].1 = self.pending[at].1.saturating_sub(1);
+            if self.pending[at].1 == 0 {
+                self.pending.remove(at);
+            }
+        }
+        match self
+            .newest
+            .iter()
+            .position(|entry| *entry == (surface, number))
+        {
             Some(at) => {
-                self.0.remove(at);
+                self.newest.remove(at);
                 true
             }
             None => false,
         }
     }
 
-    /// The surface is gone: true when it was waiting.
+    /// The surface is gone, and its callbacks with it: true when it was waiting.
     fn forget(&mut self, surface: u32) -> bool {
-        let before = self.0.len();
-        self.0.retain(|(key, _)| *key != surface);
-        self.0.len() != before
+        self.pending.retain(|(key, _)| *key != surface);
+        let before = self.newest.len();
+        self.newest.retain(|(key, _)| *key != surface);
+        self.newest.len() != before
     }
 }
 
@@ -422,6 +459,18 @@ pub struct Window {
     pixels: Option<Pixels>,
     width: i32,
     height: i32,
+    /// XRGB8888 when opaque, else ARGB8888 with premultiplied alpha, so the compositor shows what is
+    /// below the window's transparent parts, such as a dialog's shadow.
+    opaque: bool,
+}
+
+/// The pixel format of a window's buffer.
+fn format(opaque: bool) -> wl_shm::Format {
+    if opaque {
+        wl_shm::Format::Xrgb8888
+    } else {
+        wl_shm::Format::Argb8888
+    }
 }
 
 /// The pixels of a frame, 0xAARRGGBB, row after row.
@@ -443,6 +492,7 @@ fn allocate(
     queue: &QueueHandle<State>,
     width: i32,
     height: i32,
+    opaque: bool,
 ) -> Result<Pixels, Box<dyn Error>> {
     checked_size(width, height)?;
     let stride = width * BYTES_PER_PIXEL;
@@ -470,15 +520,7 @@ fn allocate(
         return Err(std::io::Error::last_os_error().into());
     }
     let pool = shm.create_pool(file.as_fd(), size, queue, ());
-    let buffer = pool.create_buffer(
-        0,
-        width,
-        height,
-        stride,
-        wl_shm::Format::Xrgb8888,
-        queue,
-        (),
-    );
+    let buffer = pool.create_buffer(0, width, height, stride, format(opaque), queue, ());
     pool.destroy();
     Ok(Pixels {
         mapping,
@@ -490,12 +532,14 @@ fn allocate(
 impl Window {
     /// Opens the display's toplevel, or when it is open, a subsurface of it at `(x, y)` on the
     /// display. Either has exactly this size; a size the compositor asks for comes as a request.
+    /// A window that is not `opaque` has an alpha channel.
     pub fn open(
         title: &str,
         width: i32,
         height: i32,
         x: i32,
         y: i32,
+        opaque: bool,
     ) -> Result<Window, Box<dyn Error>> {
         with_display(|display| {
             let handle = display.queue.handle();
@@ -508,7 +552,7 @@ impl Window {
                 subsurface.set_desync();
                 subsurface.set_position(x, y);
                 parent.commit();
-                let pixels = allocate(&display.shm, &handle, width, height)?;
+                let pixels = allocate(&display.shm, &handle, width, height, opaque)?;
                 display.windows += 1;
                 return Ok(Window {
                     surface,
@@ -516,6 +560,7 @@ impl Window {
                     pixels: Some(pixels),
                     width,
                     height,
+                    opaque,
                 });
             }
             if display.toplevel.is_some() {
@@ -534,7 +579,7 @@ impl Window {
             // The first frame has the size the app asked for. A size the compositor chose stays
             // requested, so the window manager lays the windows out again for it.
             checked_size(width, height)?;
-            let pixels = allocate(&display.shm, &handle, width, height)?;
+            let pixels = allocate(&display.shm, &handle, width, height, opaque)?;
             display.toplevel = Some(surface.clone());
             display.size = (width, height);
             display.windows += 1;
@@ -544,6 +589,7 @@ impl Window {
                 pixels: Some(pixels),
                 width,
                 height,
+                opaque,
             })
         })
     }
@@ -573,7 +619,7 @@ impl Window {
         }
         let pixels = with_display(|display| {
             let handle = display.queue.handle();
-            let pixels = allocate(&display.shm, &handle, width, height)?;
+            let pixels = allocate(&display.shm, &handle, width, height, self.opaque)?;
             if matches!(self.role, Role::Toplevel(..)) {
                 display.size = (width, height);
             }
@@ -582,6 +628,22 @@ impl Window {
         self.pixels = Some(pixels);
         (self.width, self.height) = (width, height);
         Ok(())
+    }
+
+    /// Follows the window's opacity: a new buffer of the other format, whose frame is all to be
+    /// drawn again. Returns whether it changed.
+    pub fn set_opaque(&mut self, opaque: bool) -> Result<bool, Box<dyn Error>> {
+        if opaque == self.opaque {
+            return Ok(false);
+        }
+        let (width, height) = (self.width, self.height);
+        let pixels = with_display(|display| {
+            let handle = display.queue.handle();
+            allocate(&display.shm, &handle, width, height, opaque)
+        })?;
+        self.pixels = Some(pixels);
+        self.opaque = opaque;
+        Ok(true)
     }
 
     /// Moves a subsurface to `(x, y)` on the display. The toplevel does not move.
@@ -623,10 +685,11 @@ impl Window {
             .buffer;
         with_display(|display| {
             let key = self.key();
-            let (number, waits) = display.state.frames.request(key);
-            self.surface.frame(&display.queue.handle(), (key, number));
-            if waits {
-                vsync::frame_requested();
+            if let Some((number, waits)) = display.state.frames.request(key) {
+                self.surface.frame(&display.queue.handle(), (key, number));
+                if waits {
+                    vsync::frame_requested();
+                }
             }
             self.surface.attach(Some(buffer), 0, 0);
             self.surface
@@ -1033,17 +1096,35 @@ mod tests {
     #[test]
     fn each_commit_asks_for_a_frame_and_the_newest_ends_the_wait() {
         let mut frames = Frames::default();
-        assert_eq!(frames.request(7), (0, true));
+        assert_eq!(frames.request(7), Some((0, true)));
         // A second frame before the first was answered asks again, and the surface counts once.
-        assert_eq!(frames.request(7), (1, false));
-        assert_eq!(frames.request(9), (0, true));
+        assert_eq!(frames.request(7), Some((1, false)));
+        assert_eq!(frames.request(9), Some((0, true)));
         // The stale callback, never answered or answered late, does not end the wait.
         assert!(!frames.answer(7, 0));
         assert!(frames.answer(7, 1));
         assert!(!frames.answer(7, 1), "answered once");
         assert!(frames.forget(9));
         assert!(!frames.forget(9));
-        assert_eq!(frames.request(7), (0, true));
+        assert_eq!(frames.request(7), Some((0, true)));
+    }
+
+    #[test]
+    fn a_surface_whose_callbacks_go_unanswered_asks_for_no_more_than_a_few() {
+        let mut frames = Frames::default();
+        for number in 0..MAX_PENDING_FRAMES {
+            assert!(frames.request(7).is_some(), "callback {number}");
+        }
+        // Hidden, as the compositor answers nothing: no more callbacks pile up.
+        assert_eq!(frames.request(7), None);
+        assert_eq!(frames.request(7), None);
+        // One answered, even a stale one, makes room for one more.
+        assert!(!frames.answer(7, 0));
+        assert_eq!(frames.request(7), Some((MAX_PENDING_FRAMES, false)));
+        assert_eq!(frames.request(7), None);
+        // A surface gone takes its count with it.
+        frames.forget(7);
+        assert_eq!(frames.request(7), Some((0, true)));
     }
 
     #[test]
