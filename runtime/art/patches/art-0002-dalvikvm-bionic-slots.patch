@@ -1,0 +1,43 @@
+Reserve bionic's thread pointer slots in dalvikvm on arm64 glibc hosts.
+
+arm64 code built for Android reads its stack canary at TPIDR_EL0 + 40, which under glibc is the
+first module's TLS. dalvikvm's first TLS is now 48 bytes for bionic's slots 2 to 7, found by
+uxdroid's native bridge through uxdroid_bionic_slots_address. Other hosts are unchanged.
+
+diff --git a/dalvikvm/dalvikvm.cc b/dalvikvm/dalvikvm.cc
+index a550846..60f80c2 100644
+--- a/dalvikvm/dalvikvm.cc
++++ b/dalvikvm/dalvikvm.cc
+@@ -253,6 +253,32 @@ static int dalvikvm(int argc, char** argv) {
+ 
+ }  // namespace art
+ 
++#if defined(__aarch64__) && defined(__GLIBC__)
++// uxdroid: arm64 code built for Android reads bionic's thread pointer slots at fixed offsets from
++// TPIDR_EL0, its stack canary at TPIDR_EL0 + 40, where glibc puts the first module's TLS. These 48
++// bytes are slots 2 to 7, the executable's first TLS, which glibc places right after its 16-byte
++// thread control block. uxdroid's native bridge finds them through the exported function below,
++// checks where they landed on its thread and writes the canary (crates/bridge/src/bionic_tls.rs).
++asm(R"(
++    .section .tdata.uxdroid_bionic_slots, "awT", %progbits
++    .p2align 4
++    .type uxdroid_bionic_slots, %object
++uxdroid_bionic_slots:
++    .zero 48
++    .size uxdroid_bionic_slots, 48
++    .text
++    .p2align 2
++    .globl uxdroid_bionic_slots_address
++    .type uxdroid_bionic_slots_address, %function
++uxdroid_bionic_slots_address:
++    mrs x0, tpidr_el0
++    add x0, x0, #:tprel_hi12:uxdroid_bionic_slots, lsl #12
++    add x0, x0, #:tprel_lo12_nc:uxdroid_bionic_slots
++    ret
++    .size uxdroid_bionic_slots_address, . - uxdroid_bionic_slots_address
++)");
++#endif
++
+ // TODO(b/141622862): stop leaks
+ extern "C" const char *__asan_default_options() {
+     return "detect_leaks=0";

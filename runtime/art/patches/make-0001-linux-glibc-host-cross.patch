@@ -1,0 +1,14 @@
+diff --git a/core/envsetup.mk b/core/envsetup.mk
+index f82e861..6986218 100644
+--- a/core/envsetup.mk
++++ b/core/envsetup.mk
+@@ -154,7 +154,8 @@ ifeq ($(HOST_OS),linux)
+       HOST_CROSS_2ND_ARCH := x86_64
+       2ND_HOST_CROSS_IS_64_BIT := true
+     endif
+-  else ifeq ($(HOST_CROSS_OS),linux_bionic)
++  # uxdroid: linux_glibc arm64 is a host-cross target too, built against a pinned aarch64 sysroot.
++  else ifneq (,$(filter linux_bionic linux_glibc,$(HOST_CROSS_OS)))
+     ifeq (,$(HOST_CROSS_ARCH))
+       $(error HOST_CROSS_ARCH missing.)
+     endif
