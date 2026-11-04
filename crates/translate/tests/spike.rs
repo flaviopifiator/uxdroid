@@ -25,6 +25,23 @@ fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../bridge/tests/fixtures/arm64")
 }
 
+/// A new directory only this user can write, never one that existed: a name another user
+/// could have made first would let them swap the library the test loads.
+fn private_dir() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut random = [0u8; 8];
+    // SAFETY: writes at most 8 bytes into `random`.
+    let read = unsafe { libc::getrandom(random.as_mut_ptr().cast(), 8, 0) };
+    assert_eq!(read, 8);
+    let out = std::env::temp_dir().join(format!(
+        "uxdroid-spike-{}-{:016x}",
+        std::process::id(),
+        u64::from_le_bytes(random)
+    ));
+    std::fs::DirBuilder::new().mode(0o700).create(&out).unwrap();
+    out
+}
+
 /// Builds the arm64 test library once per test process.
 fn library() -> &'static Library {
     static LIBRARY: OnceLock<&'static Library> = OnceLock::new();
@@ -32,8 +49,7 @@ fn library() -> &'static Library {
         let ndk = std::env::var_os("ANDROID_NDK_ROOT").expect("run in the dev image");
         let clang = Path::new(&ndk)
             .join("toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++");
-        let out = std::env::temp_dir().join(format!("uxdroid-spike-{}", std::process::id()));
-        std::fs::create_dir_all(&out).unwrap();
+        let out = private_dir();
         let path = out.join("libspike.so");
         let status = Command::new(clang)
             .args([
@@ -176,6 +192,17 @@ fn variadic_host_calls_follow_the_format() {
         "int 42, string guest, double 2.50, long 1234567890123"
     );
     assert_eq!(written as usize, text.len());
+}
+
+#[test]
+fn raw_system_calls_run_by_their_arm64_number() {
+    if !engine_available() {
+        return;
+    }
+    let getpid: extern "C" fn() -> i64 = function("spike_raw_getpid", "i64()");
+    assert_eq!(getpid(), i64::from(std::process::id()));
+    let unknown: extern "C" fn() -> i64 = function("spike_raw_unknown", "i64()");
+    assert_eq!(unknown(), -i64::from(libc::ENOSYS));
 }
 
 /// Runs in a child process, so its log line can be read from the child's stderr.

@@ -11,4 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 uxdroid-bridge = { path = "../bridge" }
 uxdroid-ndk = { path = "../ndk" }
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))'.dependencies]
+# The arm64 engine exists only for x86_64 hosts; another host's package runs its own ABI natively.
 uxdroid-translate = { path = "../translate" }

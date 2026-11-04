@@ -238,7 +238,17 @@ pub struct Dynamic {
     pub init_arraysz: u64,
 }
 
+/// Reads the dynamic section of an x86_64 library.
 pub fn parse_dynamic(section: &[u8]) -> Result<Dynamic> {
+    parse_dynamic_for(section, Machine::X86_64)
+}
+
+/// Reads the dynamic section of a library for `machine`, which only changes the errors' wording.
+pub fn parse_dynamic_for(section: &[u8], machine: Machine) -> Result<Dynamic> {
+    let rel = match machine {
+        Machine::X86_64 => "REL relocations on x86_64",
+        Machine::Aarch64 => "REL relocations on arm64",
+    };
     const DF_TEXTREL: u64 = 4;
     const DT_RELA_TAG: u64 = 7;
 
@@ -264,12 +274,12 @@ pub fn parse_dynamic(section: &[u8]) -> Result<Dynamic> {
             12 => dynamic.init = value,
             17 | 18 => {
                 if value != 0 {
-                    return Err(ElfError::Unsupported("REL relocations"));
+                    return Err(ElfError::Unsupported(rel));
                 }
             }
             20 => {
                 if value != DT_RELA_TAG {
-                    return Err(ElfError::Unsupported("REL relocations"));
+                    return Err(ElfError::Unsupported(rel));
                 }
             }
             22 => return Err(ElfError::Unsupported("text relocations")),

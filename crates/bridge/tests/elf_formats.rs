@@ -2,8 +2,8 @@
 #![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 
 use uxdroid_bridge::elf::{
-    ElfError, Machine, Rela, for_each_packed, for_each_relr, gnu_hash, parse_dynamic, parse_header,
-    parse_program_headers, sysv_hash,
+    ElfError, Machine, Rela, for_each_packed, for_each_relr, gnu_hash, parse_dynamic,
+    parse_dynamic_for, parse_header, parse_program_headers, sysv_hash,
 };
 
 const R_RELATIVE: u64 = 8;
@@ -249,6 +249,24 @@ fn dynamic_sections_reject_what_the_loader_cannot_honor() {
     assert!(parse_dynamic(&entries(&[(22, 0), (0, 0)])).is_err());
     assert!(parse_dynamic(&entries(&[(30, 4), (0, 0)])).is_err());
     assert!(parse_dynamic(&entries(&[(20, 17), (0, 0)])).is_err());
+}
+
+#[test]
+fn rel_relocations_are_refused_naming_the_library_machine() {
+    let rel = [17u64, 0x200, 0, 0]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect::<Vec<u8>>();
+    assert_eq!(
+        parse_dynamic(&rel).unwrap_err().to_string(),
+        "unsupported ELF: REL relocations on x86_64"
+    );
+    assert_eq!(
+        parse_dynamic_for(&rel, Machine::Aarch64)
+            .unwrap_err()
+            .to_string(),
+        "unsupported ELF: REL relocations on arm64"
+    );
 }
 
 #[test]

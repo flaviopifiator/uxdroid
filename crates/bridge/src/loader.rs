@@ -17,7 +17,7 @@ use crate::elf::{
     R_AARCH64_TLSDESC, R_X86_64_64, R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_GLOB_DAT,
     R_X86_64_IRELATIVE, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, RELA_SIZE, Rela, STB_WEAK, STT_FUNC,
     STT_GNU_IFUNC, STT_TLS, SYM_SIZE, Symbol, for_each_packed, for_each_relr, gnu_hash,
-    parse_dynamic, parse_header, parse_program_headers, sysv_hash,
+    parse_dynamic_for, parse_header, parse_program_headers, sysv_hash,
 };
 use crate::guest;
 use crate::image::Image;
@@ -582,7 +582,7 @@ fn map_library(path: &Path) -> Result<&'static Library, Error> {
     let image = Image::map(&file, file_len, &headers).map_err(invalid)?;
     let dynamic = image
         .bytes(dynamic_header.vaddr, dynamic_header.filesz)
-        .and_then(parse_dynamic);
+        .and_then(|section| parse_dynamic_for(section, machine));
     let dynamic = match dynamic {
         Ok(dynamic) => dynamic,
         Err(error) => {
@@ -1093,8 +1093,23 @@ pub unsafe extern "C" fn dl_iterate_phdr(
 }
 
 /// `library+offset` for an address in a loaded library, or the bare address.
+///
+/// Used on the way to stopping the program, possibly from a thread that holds the registry, so it
+/// never waits for the lock: a busy registry gives the bare address.
 pub(crate) fn describe_address(address: u64) -> String {
-    let owner = snapshot()
+    let libraries = match REGISTRY.try_lock() {
+        Ok(mut guard) => guard
+            .get_or_insert_with(Registry::default)
+            .libraries
+            .clone(),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned
+            .into_inner()
+            .get_or_insert_with(Registry::default)
+            .libraries
+            .clone(),
+        Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
+    };
+    let owner = libraries
         .into_iter()
         .find(|library| library.image.contains_address(address as usize));
     match owner {
@@ -1118,4 +1133,21 @@ pub fn is_guest_address(address: usize) -> bool {
     snapshot().into_iter().any(|library| {
         library.machine != Machine::X86_64 && library.image.contains_address(address)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describing_an_address_never_waits_for_the_registry() {
+        let held = lock();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(describe_address(0x1234));
+        });
+        let described = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        assert_eq!(described.as_deref(), Ok("0x1234"));
+    }
 }

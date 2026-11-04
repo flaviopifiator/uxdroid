@@ -249,15 +249,49 @@ unsafe extern "C" fn get_trampoline_for_function_pointer(
     shorty_length: u32,
     _call_type: c_int,
 ) -> *mut c_void {
-    if !is_guest_address(method as usize) || shorty.is_null() {
+    // SAFETY: ART passes the method's shorty with its length, or null.
+    let shorty = (!shorty.is_null()).then(|| unsafe {
+        std::slice::from_raw_parts(shorty.cast::<u8>(), shorty_length as usize)
+    });
+    function_pointer(method, is_guest_address(method as usize), shorty)
+}
+
+/// What a function pointer becomes: itself for host code, a wrapper for guest code. Guest code
+/// with no shorty to wrap it by gets null and an error, never its own address, which the host
+/// would run as x86-64 instructions.
+fn function_pointer(method: *const c_void, is_guest: bool, shorty: Option<&[u8]>) -> *mut c_void {
+    if !is_guest {
         return method.cast_mut();
     }
-    // SAFETY: ART passes the method's shorty with its length.
-    let shorty = unsafe { std::slice::from_raw_parts(shorty.cast::<u8>(), shorty_length as usize) };
-    guest::jni_method_trampoline(method as u64, shorty).unwrap_or(null_mut())
+    let Some(shorty) = shorty else {
+        set_error("a guest function pointer came without a shorty");
+        return null_mut();
+    };
+    guest::jni_method_trampoline(method as u64, shorty).unwrap_or_else(|| {
+        set_error("a guest function pointer has a shorty that cannot be carried");
+        null_mut()
+    })
 }
 
 /// Only functions in guest libraries need translation; with none loaded this is one atomic load.
 unsafe extern "C" fn is_native_bridge_function_pointer(method: *const c_void) -> bool {
     is_guest_address(method as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_guest_function_pointer_without_a_shorty_is_refused() {
+        let method = 0x7000_1000usize as *const c_void;
+        assert_eq!(function_pointer(method, false, None), method.cast_mut());
+        assert!(function_pointer(method, true, None).is_null());
+        // SAFETY: the error is this thread's C string.
+        let error = unsafe { CStr::from_ptr(get_error()) };
+        assert_eq!(
+            error.to_str(),
+            Ok("a guest function pointer came without a shorty")
+        );
+    }
 }

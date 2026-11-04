@@ -74,7 +74,7 @@ pub trait Engine: Send + Sync {
 type Loader = fn() -> Result<Box<dyn Engine>, String>;
 
 static LOADER: OnceLock<Loader> = OnceLock::new();
-static ENGINE: OnceLock<Result<Box<dyn Engine>, String>> = OnceLock::new();
+static ENGINE: EngineSlot = EngineSlot::new();
 
 /// Names how to get the engine, which is loaded the first time a guest library loads, so a
 /// process with host libraries only never pays for it.
@@ -83,20 +83,51 @@ pub fn set_engine_loader(loader: Loader) {
 }
 
 pub(crate) fn engine() -> Result<&'static dyn Engine, String> {
-    ENGINE
-        .get_or_init(|| match LOADER.get() {
-            Some(loader) => loader(),
-            None => Err("no translator is installed in this process".to_string()),
-        })
-        .as_ref()
-        .map(|engine| engine.as_ref())
-        .map_err(Clone::clone)
+    ENGINE.get(LOADER.get().copied())
+}
+
+/// The engine once loaded. Only a success is kept: a failed load, such as a translator file that
+/// was missing, is tried again by the next guest library.
+struct EngineSlot {
+    engine: OnceLock<Box<dyn Engine>>,
+    loading: Mutex<()>,
+}
+
+impl EngineSlot {
+    const fn new() -> EngineSlot {
+        EngineSlot {
+            engine: OnceLock::new(),
+            loading: Mutex::new(()),
+        }
+    }
+
+    fn get(&'static self, loader: Option<Loader>) -> Result<&'static dyn Engine, String> {
+        if let Some(engine) = self.engine.get() {
+            return Ok(engine.as_ref());
+        }
+        let _loading = self
+            .loading
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(engine) = self.engine.get() {
+            return Ok(engine.as_ref());
+        }
+        let loader = loader.ok_or("no translator is installed in this process")?;
+        let engine = loader()?;
+        Ok(self.engine.get_or_init(|| engine).as_ref())
+    }
 }
 
 // --- Services: guest calls into the host ---
 
+/// `svc` takes a 16-bit number.
 const MAX_SERVICES: usize = 1 << 16;
-const RETURN_SERVICE: u32 = 0;
+/// `svc #0` is how arm64 Linux code makes a system call, with its number in x8, so it is never a
+/// service: guest code that calls the kernel directly, as Go and hand-written assembly do, gets
+/// the system call.
+const SYSCALL_SERVICE: u32 = 0;
+/// The return service takes the last number, which `add_service` never hands out.
+const RETURN_SERVICE: u32 = (MAX_SERVICES - 1) as u32;
 
 /// How the arguments after a variadic function's fixed ones are found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,7 +174,7 @@ static NEXT_SERVICE: AtomicUsize = AtomicUsize::new(1);
 
 fn add_service(service: Service) -> Result<u64, ElfError> {
     let number = NEXT_SERVICE.fetch_add(1, Ordering::Relaxed);
-    if number >= MAX_SERVICES {
+    if number >= RETURN_SERVICE as usize {
         return Err(ElfError::Unsupported("too many guest imports"));
     }
     service_at(number as u32, service)
@@ -163,6 +194,10 @@ fn return_address() -> Result<u64, String> {
 }
 
 fn supervisor(cpu: &dyn Cpu, number: u32) -> bool {
+    if number == SYSCALL_SERVICE {
+        libc::raw_syscall(cpu);
+        return false;
+    }
     let service = SERVICES
         .get(number as usize)
         .map_or(std::ptr::null_mut(), |slot| slot.load(Ordering::Acquire));
@@ -628,5 +663,61 @@ fn enter(callback: &Callback, frame: &mut native::EntryFrame) {
             frame.xmm0 = normalize(callback.returns, vector);
         }
         Err(reason) => crate::shims::die(format_args!("uxdroid: guest code stopped: {reason}\n")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    struct NoCpus;
+
+    impl Engine for NoCpus {
+        fn name(&self) -> &str {
+            "test"
+        }
+        unsafe fn cpu(&self, _: *mut u64, _: Supervisor) -> Result<Box<dyn Cpu>, String> {
+            Err("no CPUs".to_string())
+        }
+    }
+
+    static AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+    fn flaky() -> Result<Box<dyn Engine>, String> {
+        match AVAILABLE.load(Ordering::SeqCst) {
+            true => Ok(Box::new(NoCpus)),
+            false => Err("cannot open libuxdroid_dynarmic.so".to_string()),
+        }
+    }
+
+    #[test]
+    fn services_never_take_the_system_call_number() {
+        assert_eq!(SYSCALL_SERVICE, 0);
+        assert_eq!(RETURN_SERVICE, 0xFFFF);
+        assert!(NEXT_SERVICE.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn a_failed_engine_load_is_tried_again() {
+        static SLOT: EngineSlot = EngineSlot::new();
+        assert_eq!(
+            SLOT.get(None).err().as_deref(),
+            Some("no translator is installed in this process")
+        );
+        assert_eq!(
+            SLOT.get(Some(flaky)).err().as_deref(),
+            Some("cannot open libuxdroid_dynarmic.so")
+        );
+        AVAILABLE.store(true, Ordering::SeqCst);
+        assert_eq!(
+            SLOT.get(Some(flaky)).map(|engine| engine.name()),
+            Ok("test")
+        );
+        AVAILABLE.store(false, Ordering::SeqCst);
+        assert_eq!(
+            SLOT.get(Some(flaky)).map(|engine| engine.name()),
+            Ok("test")
+        );
     }
 }

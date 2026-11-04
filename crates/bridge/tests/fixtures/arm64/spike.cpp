@@ -90,6 +90,20 @@ __attribute__((visibility("default"))) int spike_format(char* out, size_t size) 
                     1234567890123L);
 }
 
+// A system call made directly, as Go, Rust's std and hand-written assembly do: `svc #0` with the
+// arm64 number in x8.
+static long raw_syscall(long number) {
+    register long x8 asm("x8") = number;
+    register long x0 asm("x0") = 0;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    return x0;
+}
+
+__attribute__((visibility("default"))) long spike_raw_getpid(void) { return raw_syscall(172); }
+
+// A number no kernel has: the kernel's answer is -ENOSYS in x0.
+__attribute__((visibility("default"))) long spike_raw_unknown(void) { return raw_syscall(4095); }
+
 // --- JNI ---
 
 static jint native_add(JNIEnv*, jclass, jint a, jint b) { return a + b; }

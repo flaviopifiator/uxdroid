@@ -16,6 +16,10 @@ use uxdroid_bridge::guest::{Cpu, Engine, Supervisor, set_engine_loader};
 
 const ABI_VERSION: u32 = 1;
 const LIBRARY: &str = "libuxdroid_dynarmic.so";
+/// Dynarmic's `HaltReason` bits that `uxd_cpu_run` returns.
+const HALT_CACHE_INVALIDATION: u32 = 0x0000_0002;
+/// Set by `HaltExecution()`, which the shim calls when a service ends the run or code faults.
+const HALT_USER_DEFINED_1: u32 = 0x0100_0000;
 
 /// Makes the bridge load this engine for the first guest library.
 pub fn install() {
@@ -88,27 +92,39 @@ fn load() -> Result<Box<dyn Engine>, String> {
         // SAFETY: the handle is open and the name a C string.
         let address = unsafe { libc::dlsym(handle, name.as_ptr()) };
         if address.is_null() {
-            Err(format!(
-                "{} lacks {}",
-                path.display(),
-                name.to_string_lossy()
-            ))
+            Err(format!("lacks {}", name.to_string_lossy()))
         } else {
             Ok(address)
         }
     };
     // SAFETY: each symbol is the shim's function of the declared signature; the version check
     // below refuses a library made for another interface.
+    let api = unsafe { api(&symbol) };
+    match api {
+        Ok(api) => Ok(Box::new(Dynarmic {
+            api: Box::leak(Box::new(api)),
+        })),
+        Err(reason) => {
+            // SAFETY: the handle is open, and nothing of the library is in use.
+            unsafe { libc::dlclose(handle) };
+            Err(format!("{}: {reason}", path.display()))
+        }
+    }
+}
+
+/// The shim's functions, found with `symbol`.
+///
+/// # Safety
+/// `symbol` must return addresses of the shim's functions by those names.
+unsafe fn api(symbol: &dyn Fn(&CStr) -> Result<*mut c_void, String>) -> Result<Api, String> {
+    // SAFETY: the caller's contract.
     unsafe {
         let version: unsafe extern "C" fn() -> u32 = cast(symbol(c"uxd_abi_version")?);
-        if version() != ABI_VERSION {
-            return Err(format!(
-                "{} has interface {}, not {ABI_VERSION}",
-                path.display(),
-                version()
-            ));
+        let version = version();
+        if version != ABI_VERSION {
+            return Err(format!("interface {version}, not {ABI_VERSION}"));
         }
-        let api = Api {
+        Ok(Api {
             cpu_new: cast(symbol(c"uxd_cpu_new")?),
             cpu_free: cast(symbol(c"uxd_cpu_free")?),
             run: cast(symbol(c"uxd_cpu_run")?),
@@ -120,10 +136,7 @@ fn load() -> Result<Box<dyn Engine>, String> {
             set_pc: cast(symbol(c"uxd_set_pc")?),
             get_v: cast(symbol(c"uxd_get_v")?),
             set_v: cast(symbol(c"uxd_set_v")?),
-        };
-        Ok(Box::new(Dynarmic {
-            api: Box::leak(Box::new(api)),
-        }))
+        })
     }
 }
 
@@ -166,12 +179,23 @@ impl Engine for Dynarmic {
         cpu.callbacks.context = std::ptr::from_ref::<DynarmicCpu>(&cpu).cast_mut().cast();
         let mut error = [0 as c_char; 256];
         // SAFETY: the callbacks live in the box with the CPU; the caller keeps `tpidr_el0` valid
-        // for the CPU's life; the error buffer is writable for its length.
-        let raw = unsafe { (self.api.cpu_new)(&cpu.callbacks, tpidr_el0, error.as_mut_ptr(), 256) };
+        // for the CPU's life; the error buffer is writable for its length, less one byte, so it
+        // stays terminated whatever the shim writes.
+        let raw = unsafe {
+            (self.api.cpu_new)(
+                &cpu.callbacks,
+                tpidr_el0,
+                error.as_mut_ptr(),
+                error.len() - 1,
+            )
+        };
         if raw.is_null() {
-            // SAFETY: the shim writes a terminated string on failure.
-            let reason = unsafe { CStr::from_ptr(error.as_ptr()) };
-            return Err(format!("dynarmic: {}", reason.to_string_lossy()));
+            let bytes: Vec<u8> = error
+                .iter()
+                .take_while(|&&byte| byte != 0)
+                .map(|&byte| byte as u8)
+                .collect();
+            return Err(format!("dynarmic: {}", String::from_utf8_lossy(&bytes)));
         }
         cpu.raw = raw;
         Ok(cpu)
@@ -250,17 +274,126 @@ impl Cpu for DynarmicCpu {
         unsafe { (self.api.set_v)(self.raw, index as u32, value.as_ptr()) }
     }
     fn run(&self) -> Result<(), String> {
-        unsafe { (self.api.run)(self.raw) };
-        match self.fault.borrow_mut().take() {
-            Some(fault) => Err(fault),
-            None => Ok(()),
+        loop {
+            let reason = unsafe { (self.api.run)(self.raw) };
+            if let Some(fault) = self.fault.borrow_mut().take() {
+                return Err(fault);
+            }
+            if reason & HALT_USER_DEFINED_1 != 0 {
+                return Ok(());
+            }
+            // Another thread invalidated translated code; the guest goes on where it was.
+            if reason == HALT_CACHE_INVALIDATION {
+                continue;
+            }
+            return Err(format!("the engine stopped with halt reason {reason:#x}"));
         }
     }
 }
 
 impl Drop for DynarmicCpu {
     fn drop(&mut self) {
+        // A CPU the shim failed to make has nothing to free.
+        if self.raw.is_null() {
+            return;
+        }
         // SAFETY: the CPU this struct made, no longer running.
         unsafe { (self.api.cpu_free)(self.raw) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static FREED: AtomicU32 = AtomicU32::new(0);
+    static RUNS: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn refuse(
+        _: *const Callbacks,
+        _: *mut u64,
+        error: *mut c_char,
+        len: usize,
+    ) -> *mut RawCpu {
+        let reason = b"too many guest CPUs\0";
+        // SAFETY: the caller passes `len` writable bytes; the test's reason fits.
+        unsafe {
+            std::ptr::copy_nonoverlapping(reason.as_ptr().cast(), error, reason.len().min(len))
+        };
+        std::ptr::null_mut()
+    }
+    unsafe extern "C" fn make(
+        _: *const Callbacks,
+        _: *mut u64,
+        _: *mut c_char,
+        _: usize,
+    ) -> *mut RawCpu {
+        std::ptr::dangling_mut()
+    }
+    unsafe extern "C" fn free(_: *mut RawCpu) {
+        FREED.fetch_add(1, Ordering::SeqCst);
+    }
+    /// Invalidated once, then halted by a service.
+    unsafe extern "C" fn run(_: *mut RawCpu) -> u32 {
+        match RUNS.fetch_add(1, Ordering::SeqCst) {
+            0 => HALT_CACHE_INVALIDATION,
+            _ => HALT_USER_DEFINED_1,
+        }
+    }
+    unsafe extern "C" fn get(_: *const RawCpu) -> u64 {
+        0
+    }
+    unsafe extern "C" fn get_x(_: *const RawCpu, _: u32) -> u64 {
+        0
+    }
+    unsafe extern "C" fn set(_: *mut RawCpu, _: u64) {}
+    unsafe extern "C" fn set_x(_: *mut RawCpu, _: u32, _: u64) {}
+    unsafe extern "C" fn get_v(_: *const RawCpu, _: u32, _: *mut u64) {}
+    unsafe extern "C" fn set_v(_: *mut RawCpu, _: u32, _: *const u64) {}
+    fn supervisor(_: &dyn Cpu, _: u32) -> bool {
+        true
+    }
+
+    fn engine(
+        cpu_new: unsafe extern "C" fn(
+            *const Callbacks,
+            *mut u64,
+            *mut c_char,
+            usize,
+        ) -> *mut RawCpu,
+    ) -> Dynarmic {
+        Dynarmic {
+            api: Box::leak(Box::new(Api {
+                cpu_new,
+                cpu_free: free,
+                run,
+                get_x,
+                set_x,
+                get_sp: get,
+                set_sp: set,
+                get_pc: get,
+                set_pc: set,
+                get_v,
+                set_v,
+            })),
+        }
+    }
+
+    #[test]
+    fn a_cpu_the_shim_refused_is_never_freed() {
+        let mut tpidr = 0u64;
+        // SAFETY: `tpidr` outlives the attempt.
+        let made = unsafe { engine(refuse).cpu(&mut tpidr, supervisor) };
+        assert_eq!(made.err().as_deref(), Some("dynarmic: too many guest CPUs"));
+        assert_eq!(FREED.load(Ordering::SeqCst), 0);
+
+        // SAFETY: as above.
+        let cpu = unsafe { engine(make).cpu(&mut tpidr, supervisor) }.unwrap();
+        // A run the engine broke off to invalidate code goes on until a service halts it.
+        assert_eq!(cpu.run(), Ok(()));
+        assert_eq!(RUNS.load(Ordering::SeqCst), 2);
+        drop(cpu);
+        assert_eq!(FREED.load(Ordering::SeqCst), 1);
     }
 }

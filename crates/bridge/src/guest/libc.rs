@@ -383,25 +383,46 @@ const SYSCALLS: &[(u64, i64)] = &[
     (278, libc::SYS_getrandom),
 ];
 
-fn syscall(cpu: &dyn Cpu) {
-    let Some(&(_, host)) = SYSCALLS.iter().find(|(guest, _)| *guest == cpu.x(0)) else {
-        // SAFETY: errno is this thread's.
-        unsafe { *libc::__errno_location() = libc::ENOSYS };
-        cpu.set_x(0, u64::MAX);
-        return;
-    };
+/// The host's result of the guest's system call, or `None` for an arm64 number with no mapping.
+fn host_syscall(number: u64, arguments: [u64; 6]) -> Option<i64> {
+    let &(_, host) = SYSCALLS.iter().find(|(guest, _)| *guest == number)?;
     // SAFETY: each listed call takes integers and pointers with the same meaning on both
     // architectures, passed through as the guest gave them.
-    let result = unsafe {
+    Some(unsafe {
         libc::syscall(
             host,
-            cpu.x(1),
-            cpu.x(2),
-            cpu.x(3),
-            cpu.x(4),
-            cpu.x(5),
-            cpu.x(6),
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            arguments[3],
+            arguments[4],
+            arguments[5],
         )
+    })
+}
+
+/// bionic's `syscall(number, ...)`: -1 and errno on failure.
+fn syscall(cpu: &dyn Cpu) {
+    let arguments = [cpu.x(1), cpu.x(2), cpu.x(3), cpu.x(4), cpu.x(5), cpu.x(6)];
+    match host_syscall(cpu.x(0), arguments) {
+        Some(result) => cpu.set_x(0, result as u64),
+        None => {
+            // SAFETY: errno is this thread's.
+            unsafe { *libc::__errno_location() = libc::ENOSYS };
+            cpu.set_x(0, u64::MAX);
+        }
+    }
+}
+
+/// `svc #0`: the kernel's convention, number in x8, arguments in x0 to x5, and -errno in x0 on
+/// failure.
+pub(super) fn raw_syscall(cpu: &dyn Cpu) {
+    let arguments = [cpu.x(0), cpu.x(1), cpu.x(2), cpu.x(3), cpu.x(4), cpu.x(5)];
+    let result = match host_syscall(cpu.x(8), arguments) {
+        // SAFETY: errno is this thread's, set by the call just made.
+        Some(-1) => -i64::from(unsafe { *libc::__errno_location() }),
+        Some(result) => result,
+        None => -i64::from(libc::ENOSYS),
     };
     cpu.set_x(0, result as u64);
 }
