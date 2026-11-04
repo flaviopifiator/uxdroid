@@ -29,7 +29,8 @@ services:
   # nodes are passed in and the host driver's user-space libraries are mounted read-only, the same
   # set a CDI spec would inject, so they always match the host's kernel driver. Mesa's llvmpipe
   # stays in the image as the fallback. Paths are for the host's NVIDIA 595 driver; another host
-  # adjusts them or uses only /dev/dri with Mesa's own drivers.
+  # adjusts them or uses only /dev/dri with Mesa's own drivers. A missing file stops the start
+  # instead of being created on the host.
   dev-gpu:
     extends: dev
     profiles: [gpu]
@@ -43,19 +44,19 @@ services:
       - /dev/nvidia-modeset
       - /dev/nvidia-uvm
     volumes:
-      - /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro
-      - /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json:/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json:ro
-      - /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0:/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0:ro
-      - /usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2:/usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2:ro
-      - /usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1:/usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.99.02:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.595.99.02:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.99.02:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-tls.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-tls.so.595.99.02:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.99.02:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1:ro
-      - /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so:/usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so:ro
+      - {type: bind, source: /usr/share/glvnd/egl_vendor.d/10_nvidia.json, target: /usr/share/glvnd/egl_vendor.d/10_nvidia.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json, target: /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0, target: /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2, target: /usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1, target: /usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-tls.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-tls.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1, target: /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1, target: /usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so, target: /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so, read_only: true, bind: {create_host_path: false}}
 
   # Compares loader performance against competitors. Offline, with real libraries read-only.
   bench:

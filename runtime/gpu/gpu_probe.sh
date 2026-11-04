@@ -10,7 +10,7 @@ set -u -o pipefail
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 cc -O1 -o "$WORK/egl_probe" /work/runtime/gpu/egl_probe.c -ldl || { echo "FAIL: build"; exit 1; }
-"$WORK/egl_probe" | tee "$WORK/out"
+"$WORK/egl_probe" | tee "$WORK/out" || { echo "FAIL: the probe found no usable EGL device"; exit 1; }
 if [ -n "${EXPECT:-}" ]; then
     grep -q -F -- "$EXPECT" "$WORK/out" || { echo "FAIL: no renderer with \"$EXPECT\""; exit 1; }
     echo "ok: a GLES 2 context renders on \"$EXPECT\""

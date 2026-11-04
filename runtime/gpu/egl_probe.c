@@ -40,10 +40,14 @@ int main(void) {
     EGLContext (*create_context)(EGLDisplay, EGLConfig, EGLContext, const EGLint *) = dlsym(egl, "eglCreateContext");
     EGLSurface (*create_pbuffer)(EGLDisplay, EGLConfig, const EGLint *) = dlsym(egl, "eglCreatePbufferSurface");
     EGLBoolean (*make_current)(EGLDisplay, EGLSurface, EGLSurface, EGLContext) = dlsym(egl, "eglMakeCurrent");
+    int usable = 0;
     for (EGLint i = 0; i < count; i++) {
         EGLDisplay display = platform_display(EGL_PLATFORM_DEVICE_EXT, devices[i], NULL);
         EGLint major, minor;
-        if (!display || !initialize(display, &major, &minor)) continue;
+        if (!display || !initialize(display, &major, &minor)) {
+            printf("device %d: cannot initialize\n", i);
+            continue;
+        }
         const EGLint attributes[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE,
                                      EGL_OPENGL_ES2_BIT, EGL_NONE};
         EGLConfig config;
@@ -54,10 +58,14 @@ int main(void) {
         EGLContext context = create_context(display, config, NULL, version);
         const EGLint size[] = {EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE};
         EGLSurface surface = create_pbuffer(display, config, size);
-        if (!context || !surface || !make_current(display, surface, surface, context)) continue;
+        if (!context || !surface || !make_current(display, surface, surface, context)) {
+            printf("device %d: no GLES 2 context\n", i);
+            continue;
+        }
+        usable++;
         const char *(*gl_string)(unsigned) = proc("glGetString");
         printf("device %d: EGL %d.%d vendor %s, GL vendor %s, renderer %s\n", i, major, minor,
                query_string(display, EGL_VENDOR), gl_string(GL_VENDOR), gl_string(GL_RENDERER));
     }
-    return 0;
+    return usable ? 0 : 1;
 }
