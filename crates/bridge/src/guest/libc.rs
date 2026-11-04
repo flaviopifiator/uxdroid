@@ -131,6 +131,7 @@ const SPECIALS: &[(&str, Special)] = &[
     ("pthread_create", pthread_create),
     ("pthread_once", pthread_once),
     ("pthread_key_create", pthread_key_create),
+    ("pthread_getattr_np", pthread_getattr_np),
     ("qsort", qsort),
     ("bsearch", bsearch),
     ("atexit", atexit),
@@ -241,6 +242,32 @@ fn pthread_key_create(cpu: &dyn Cpu) {
     let status = unsafe {
         libc::pthread_key_create(cpu.x(0) as usize as *mut libc::pthread_key_t, destructor)
     };
+    set_i32(cpu, status);
+}
+
+/// The host's attributes of a thread, but for the calling thread the stack is the guest stack its
+/// code runs on, not the host's: runtimes such as Dart's find their stack limit this way. Another
+/// thread's attributes keep its host stack.
+fn pthread_getattr_np(cpu: &dyn Cpu) {
+    let thread = cpu.x(0) as libc::pthread_t;
+    let attributes = cpu.x(1) as usize as *mut libc::pthread_attr_t;
+    // SAFETY: `pthread_attr_t` has the same size in both libcs, and the guest passes a writable one
+    // with a thread ID that pthread_self or pthread_create gave it.
+    let mut status = unsafe { libc::pthread_getattr_np(thread, attributes) };
+    // SAFETY: pthread_self has no preconditions.
+    if status == 0
+        && thread == unsafe { libc::pthread_self() }
+        && let Some((bottom, top)) = super::current_stack()
+    {
+        // SAFETY: the attributes were just initialized by pthread_getattr_np.
+        status = unsafe {
+            libc::pthread_attr_setstack(
+                attributes,
+                bottom as usize as *mut c_void,
+                (top - bottom) as usize,
+            )
+        };
+    }
     set_i32(cpu, status);
 }
 

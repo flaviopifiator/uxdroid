@@ -168,7 +168,39 @@ struct HostFunction {
     variadic: Variadic,
     /// Parameters that are guest functions the host will call, with their signatures.
     callbacks: &'static [(usize, &'static str)],
+    /// The first parameter is a `JNIEnv*`: guest code passes its guest env, the host needs its own.
+    takes_env: bool,
 }
+
+/// NDK functions whose first parameter is a `JNIEnv*`, from the NDK's headers. The tables declare
+/// it as a plain pointer; the guest's env there becomes the host env it stands for.
+const ENV_FUNCTIONS: &[&str] = &[
+    "AAssetManager_fromJava",
+    "AFileDescriptor_create",
+    "AFileDescriptor_getFd",
+    "AFileDescriptor_setFd",
+    "AHardwareBuffer_fromHardwareBuffer",
+    "AHardwareBuffer_toHardwareBuffer",
+    "AIBinder_fromJavaBinder",
+    "AIBinder_toJavaBinder",
+    "AInputQueue_fromJava",
+    "AKeyEvent_fromJava",
+    "AMidiDevice_fromJava",
+    "AMotionEvent_fromJava",
+    "ANativeWindow_fromSurface",
+    "ANativeWindow_toSurface",
+    "APerformanceHint_borrowSessionFromJava",
+    "AParcel_fromJavaParcel",
+    "ASharedMemory_dupFromJava",
+    "ASurfaceControl_fromJava",
+    "ASurfaceTexture_fromSurfaceTexture",
+    "ASurfaceTransaction_fromJava",
+    "AndroidBitmap_getDataSpace",
+    "AndroidBitmap_getHardwareBuffer",
+    "AndroidBitmap_getInfo",
+    "AndroidBitmap_lockPixels",
+    "AndroidBitmap_unlockPixels",
+];
 
 /// NDK functions that take a callback, which the tables declare as a plain pointer: the index of
 /// that parameter and the callback's signature. A guest function there becomes a host thunk.
@@ -412,6 +444,7 @@ fn va_list_service(
             false => Variadic::FormatVaList,
         },
         callbacks: &[],
+        takes_env: false,
     }))
     .map(Some)
 }
@@ -447,6 +480,7 @@ fn host_service(name: &str, target: Target, signature: &str) -> Result<u64, ElfE
         parameters,
         variadic,
         callbacks: callback_parameters(name),
+        takes_env: ENV_FUNCTIONS.contains(&name),
     }))
 }
 
@@ -637,6 +671,7 @@ fn call_host(cpu: &dyn Cpu, function: &HostFunction) {
         }
         if index == 0 {
             value = match function.target {
+                Target::Fixed(_) if function.takes_env => jni::host_env(value),
                 Target::Fixed(_) => value,
                 Target::JniEnv(_) => jni::host_env(value),
                 Target::JavaVm(_) => jni::host_vm(value),
@@ -801,6 +836,14 @@ pub(crate) fn call(target: u64, parameters: &[Type], values: &[u64]) -> Result<(
         })?;
         Ok((cpu.x(0), cpu.v(0)[0]))
     }
+}
+
+/// The low and high end of the calling thread's guest stack, which every guest run on the thread
+/// uses; none before its first guest call.
+pub(super) fn current_stack() -> Option<(u64, u64)> {
+    let thread = THREAD.with(Cell::get);
+    // SAFETY: this thread's own state, alive until the thread exits; only the stack is read.
+    (!thread.is_null()).then(|| unsafe { ((*thread).stack.bottom(), (*thread).stack.top()) })
 }
 
 /// The calling thread's guest state, as an identity, and how many guest runs it is inside.

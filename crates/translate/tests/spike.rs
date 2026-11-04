@@ -61,7 +61,7 @@ fn library() -> &'static Library {
                 "-Wl,--gc-sections",
             ])
             .arg(fixture_dir().join("spike.cpp"))
-            .arg("-llog")
+            .args(["-llog", "-landroid"])
             .arg("-o")
             .arg(&path)
             .status()
@@ -121,13 +121,31 @@ static FAKE_GLES: Table = Table {
     )],
 };
 
+/// 7 when called with the host's env, as the host's `AAssetManager_fromJava` must be.
+extern "C" fn fake_asset_manager(env: usize, manager: usize) -> usize {
+    match (env == host_env() as usize, manager) {
+        (true, MANAGER) => 7,
+        (false, _) => 1,
+        (true, _) => 2,
+    }
+}
+
+const MANAGER: usize = 0x5a5a;
+
 static FAKE_ANDROID: Table = Table {
     library: "libandroid.so",
-    exports: &[Export::function(
-        c"ALooper_addFd",
-        "i32(ptr,i32,i32,i32,ptr,ptr)",
-        fake_add_fd as *const (),
-    )],
+    exports: &[
+        Export::function(
+            c"ALooper_addFd",
+            "i32(ptr,i32,i32,i32,ptr,ptr)",
+            fake_add_fd as *const (),
+        ),
+        Export::function(
+            c"AAssetManager_fromJava",
+            "ptr(ptr,ptr)",
+            fake_asset_manager as *const (),
+        ),
+    ],
 };
 
 /// A typed host pointer to a guest function.
@@ -219,6 +237,25 @@ fn a_guest_thread_runs_with_its_own_thread_local() {
     let thread: extern "C" fn(i32) -> i32 = function("spike_thread", "i32(i32)");
     // The worker returns 21 * 2 + its fresh counter (0) + 5; the main thread's stays at 100.
     assert_eq!(thread(21), 47 + 100_000);
+}
+
+#[test]
+fn libdl_answers_a_guest_destructor_run_as_its_thread_exits() {
+    if !engine_available() {
+        return;
+    }
+    // glibc runs pthread key destructors after the host's thread_local values are destroyed.
+    let exit: extern "C" fn() -> i32 = function("spike_thread_exit", "i32()");
+    assert_eq!(exit(), 1);
+}
+
+#[test]
+fn a_guest_thread_s_stack_bounds_hold_its_stack_pointer() {
+    if !engine_available() {
+        return;
+    }
+    let bounds: extern "C" fn() -> i32 = function("spike_stack_bounds", "i32()");
+    assert_eq!(bounds(), 11);
 }
 
 #[test]
@@ -722,4 +759,17 @@ fn guest_calls_into_java_carry_every_argument_form() {
         calls(host_env(), 0x0b1ec7),
         59.75 + 42.0 + 42.0 + 8.0 + 10.0 + 9.0
     );
+}
+
+#[test]
+fn ndk_functions_taking_the_env_get_the_host_one() {
+    if !engine_available() {
+        return;
+    }
+    let trampoline =
+        jni_trampoline(library(), "Java_dev_uxdroid_Spike_assets", Some(b"IL")).unwrap();
+    // SAFETY: the C signature of shorty IL on a static method.
+    let assets: extern "C" fn(*mut Env, usize, usize) -> i32 =
+        unsafe { std::mem::transmute(trampoline) };
+    assert_eq!(assets(host_env(), CLASS, MANAGER), 7);
 }

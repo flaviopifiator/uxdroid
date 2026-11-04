@@ -1,6 +1,7 @@
 // The arm64 translation spike's test library: one exported function per case the bridge must
 // carry across the guest boundary. Built for arm64-v8a with the NDK; each function returns a value
 // the test checks.
+#include <android/asset_manager_jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -75,6 +76,71 @@ __attribute__((visibility("default"))) int spike_thread(int value) {
     }
     // The worker's writes did not reach this thread's counter.
     return static_cast<int>(reinterpret_cast<intptr_t>(result)) + counter * 1000;
+}
+
+static pthread_key_t exit_key;
+static int exit_seen = 0;
+
+// Runs as its thread exits, after the host's thread_local values are gone.
+static void at_thread_exit(void*) {
+    void* missing = dlopen("libuxdroid-spike-missing.so", RTLD_NOW);
+    const char* error = dlerror();
+    exit_seen = missing == nullptr && error != nullptr && strstr(error, "missing") != nullptr ? 1 : 2;
+}
+
+static void* exit_worker(void*) {
+    pthread_setspecific(exit_key, reinterpret_cast<void*>(1));
+    // Uses the per-thread error before the thread ends.
+    dlerror();
+    return nullptr;
+}
+
+// A pthread key destructor calling the bridge's libdl as its thread exits.
+__attribute__((visibility("default"))) int spike_thread_exit() {
+    if (pthread_key_create(&exit_key, at_thread_exit) != 0) {
+        return -1;
+    }
+    pthread_t thread;
+    if (pthread_create(&thread, nullptr, exit_worker, nullptr) != 0) {
+        return -2;
+    }
+    pthread_join(thread, nullptr);
+    return exit_seen;
+}
+
+// Whether this thread's stack, as pthread_getattr_np reports it, holds a local of the caller,
+// which is how the Dart VM finds its stack limit.
+static int stack_holds_locals() {
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) != 0) {
+        return -1;
+    }
+    void* base = nullptr;
+    size_t size = 0;
+    int status = pthread_attr_getstack(&attr, &base, &size);
+    pthread_attr_destroy(&attr);
+    if (status != 0) {
+        return -2;
+    }
+    volatile int local = 0;
+    uintptr_t at = reinterpret_cast<uintptr_t>(&local);
+    uintptr_t low = reinterpret_cast<uintptr_t>(base);
+    return at > low && at < low + size ? 1 : 0;
+}
+
+static void* stack_worker(void*) {
+    return reinterpret_cast<void*>(static_cast<intptr_t>(stack_holds_locals()));
+}
+
+// The stack bounds of the calling thread and of a new one; 11 when both hold their locals.
+__attribute__((visibility("default"))) int spike_stack_bounds() {
+    pthread_t thread;
+    if (pthread_create(&thread, nullptr, stack_worker, nullptr) != 0) {
+        return -10;
+    }
+    void* result = nullptr;
+    pthread_join(thread, &result);
+    return stack_holds_locals() + 10 * static_cast<int>(reinterpret_cast<intptr_t>(result));
 }
 
 // A C++ exception thrown and caught inside the guest, through its own unwinder.
@@ -479,6 +545,12 @@ __attribute__((visibility("default"))) jdouble Java_dev_uxdroid_Spike_jniCalls(J
 __attribute__((visibility("default"))) jlong Java_dev_uxdroid_Spike_scale(JNIEnv*, jclass, jlong value,
                                                                           jint factor) {
     return value * factor;
+}
+
+// An NDK function that takes the JNIEnv, called with the guest's.
+__attribute__((visibility("default"))) jint Java_dev_uxdroid_Spike_assets(JNIEnv* env, jclass,
+                                                                          jobject manager) {
+    return static_cast<jint>(reinterpret_cast<intptr_t>(AAssetManager_fromJava(env, manager)));
 }
 
 }  // extern "C"

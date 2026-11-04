@@ -937,14 +937,33 @@ fn run_initializers(libraries: &[&'static Library]) -> Result<(), Error> {
 /// Handle of the libraries that have no file of their own.
 const SYSTEM_HANDLE: *mut c_void = std::ptr::dangling_mut::<u8>().cast();
 
+/// libdl's error: the pending text, then the one the last `dlerror` returned, which stays valid
+/// until the next call.
+type DlError = (Option<CString>, Option<CString>);
+
 thread_local! {
-    static DL_ERROR: RefCell<(Option<CString>, Option<CString>)> =
-        const { RefCell::new((None, None)) };
+    static DL_ERROR: RefCell<DlError> = const { RefCell::new((None, None)) };
+}
+
+/// The error of threads whose thread_local values are already destroyed. glibc runs pthread key
+/// destructors after them, and guest destructors there still call libdl.
+static EXITING_DL_ERROR: Mutex<DlError> = Mutex::new((None, None));
+
+/// Runs `f` on this thread's libdl error, or on the shared one once the thread's is gone.
+fn with_dl_error<T>(f: impl FnOnce(&mut DlError) -> T) -> T {
+    let mut f = Some(f);
+    if let Ok(result) = DL_ERROR.try_with(|state| (f.take().unwrap())(&mut state.borrow_mut())) {
+        return result;
+    }
+    let mut state = EXITING_DL_ERROR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (f.take().unwrap())(&mut state)
 }
 
 fn set_dl_error(message: String) {
     let text = CString::new(message.replace('\0', " ")).unwrap_or_default();
-    DL_ERROR.with(|state| state.borrow_mut().0 = Some(text));
+    with_dl_error(|state| state.0 = Some(text));
 }
 
 pub unsafe extern "C" fn dlopen(name: *const c_char, _flags: c_int) -> *mut c_void {
@@ -1085,8 +1104,7 @@ pub extern "C" fn dlclose(_handle: *mut c_void) -> c_int {
 }
 
 pub extern "C" fn dlerror() -> *const c_char {
-    DL_ERROR.with(|state| {
-        let mut state = state.borrow_mut();
+    with_dl_error(|state| {
         // The returned text must stay valid until the next call, so it moves to the second slot.
         state.1 = state.0.take();
         state
