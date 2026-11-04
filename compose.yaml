@@ -121,6 +121,23 @@ services:
       - art_runtime:/runtime
       - .:/work:ro
 
+  # Builds libandroid_runtime and ICU for the arm64 host from part of android-16.0.0_r1
+  # (runtime/framework/android16), next to the master-art tree, whose sysroot and libc++ it shares.
+  # Network access only for the download; output stays in volumes.
+  android16-builder:
+    profiles: [art]
+    build: runtime/art
+    user: "1000:1000"
+    mem_limit: 22g
+    memswap_limit: 22g
+    cpus: 10
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - android16_src:/a16
+      - art_src:/aosp
+      - art_runtime:/runtime
+      - .:/work:ro
+
   # Runs packaged ART in a plain Ubuntu with no AOSP tree, no network and a read-only system.
   art-runtime:
     profiles: [art]
@@ -168,5 +185,7 @@ volumes:
     name: uxdroid-art_art_src
   art_runtime:
     name: uxdroid-art_art_runtime
+  android16_src:
+    name: uxdroid-android16_src
   art_competitor:
     name: uxdroid-art_art_competitor

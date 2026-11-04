@@ -1,0 +1,74 @@
+# The android-16.0.0_r1 projects libandroid_runtime's host build needs: path, then sparse paths for
+# projects of which only part is needed. Read by sync.sh.
+
+# The build system.
+build/make
+build/soong
+build/blueprint
+build/release
+build/bazel
+build/bazel_common_rules
+external/golang-protobuf
+external/go-cmp
+external/starlark-go
+external/spdx-tools
+external/licenseclassifier
+external/bazelbuild-rules_license
+toolchain/pgo-profiles
+prebuilts/go/linux-x86
+prebuilts/build-tools
+prebuilts/jdk/jdk21
+prebuilts/clang/host/linux-x86 /Android.bp /BUILD.bazel /go.mod /soong /clang-r547379
+
+# libandroid_runtime and what its host variant links.
+frameworks/base /* !tests/ !integration-tests/ !robotests/ !multivalentTests/ !/packages/ !/services/ !/tools/ !/cmds/ !/libs/WindowManager/ !/ravenwood/
+frameworks/native
+frameworks/minikin
+frameworks/proto_logging
+hardware/interfaces /Android.bp /graphics/Android.bp /graphics/common/ /common/
+libnativehelper
+system/core
+system/libbase
+system/logging
+system/libziparchive
+system/libhidl
+system/libhwbinder
+system/libfmq
+system/libprocinfo
+system/tools/aidl
+system/tools/hidl
+system/tools/xsdc
+system/tools/sysprop
+test/app_compat/csuite
+system/unwinding
+system/media
+system/incremental_delivery
+system/server_configurable_flags
+system/memory/libmeminfo
+system/memory/libmemtrack
+system/memory/libmemunreachable
+external/skia
+external/harfbuzz_ng
+external/freetype
+external/icu
+external/libpng
+external/libjpeg-turbo
+external/webp
+external/zlib
+external/expat
+external/sqlite
+external/piex
+external/dng_sdk
+external/libultrahdr
+external/image_io
+external/wuffs-mirror-release-c
+external/protobuf
+external/fmtlib
+external/vulkan-headers
+external/boringssl
+external/conscrypt /* !/apex/
+external/tinyxml2
+external/googletest
+external/lz4
+external/zstd
+external/jsoncpp
