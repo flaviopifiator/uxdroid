@@ -266,7 +266,7 @@ fn objects_are_found_only_where_they_were_written() {
     let mut p = P::new();
     p.write_i32(0).unwrap();
     p.write_binder(Some("service")).unwrap();
-    let forged = p.marshall_unchecked();
+    let forged = p.marshall_unchecked().unwrap();
     // The same bytes, from outside: no object table, so nothing is found.
     let mut q = P::new();
     q.unmarshall(&forged).unwrap();
