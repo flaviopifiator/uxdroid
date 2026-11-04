@@ -76,12 +76,13 @@ public final class Launcher {
         }
         if (app == null) app = App.parse(apk, activityName);
         String packageName = app.application.packageName;
-        // Before ActivityThread runs: the framework reads the app's uid once and keeps it.
-        Natives.becomeApplication(packageName);
         if (!claimInstance(packageName)) {
             if (Control.activated()) refuseActivation(packageName);
             forward(packageName, intent);
         }
+        // Only the instance that runs the app takes its identity, before ActivityThread runs: the
+        // framework reads the app's uid once and keeps it.
+        Natives.becomeApplication(packageName);
         App started = app;
         Permissions.declare(() -> {
             String[] names = started.packageInfo(android.content.pm.PackageManager.GET_PERMISSIONS, 0)
