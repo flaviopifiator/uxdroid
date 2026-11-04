@@ -43,7 +43,7 @@ fn handle() -> *mut c_void {
         let status = Command::new(clang)
             .args(["-O2", "-fPIC", "-shared", "-static-libstdc++"])
             .arg(source)
-            .args(["-llog", "-landroid", "-o"])
+            .args(["-llog", "-o"])
             .arg(&path)
             .status()
             .unwrap();

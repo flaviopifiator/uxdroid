@@ -1,7 +1,6 @@
 // The arm64 translation spike's test library: one exported function per case the bridge must
 // carry across the guest boundary. Built for arm64-v8a with the NDK; each function returns a value
 // the test checks.
-#include <android/asset_manager_jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -547,10 +546,16 @@ __attribute__((visibility("default"))) jlong Java_dev_uxdroid_Spike_scale(JNIEnv
     return value * factor;
 }
 
-// An NDK function that takes the JNIEnv, called with the guest's.
+// An NDK function that takes the JNIEnv, called with the guest's. Found with dlsym, as the looper
+// case does, so the library needs no libandroid.so where the tests load it without one.
 __attribute__((visibility("default"))) jint Java_dev_uxdroid_Spike_assets(JNIEnv* env, jclass,
                                                                           jobject manager) {
-    return static_cast<jint>(reinterpret_cast<intptr_t>(AAssetManager_fromJava(env, manager)));
+    using FromJava = void* (*)(JNIEnv*, jobject);
+    auto from_java =
+        reinterpret_cast<FromJava>(dlsym(dlopen("libandroid.so", RTLD_NOW), "AAssetManager_fromJava"));
+    return from_java == nullptr
+               ? -1
+               : static_cast<jint>(reinterpret_cast<intptr_t>(from_java(env, manager)));
 }
 
 }  // extern "C"

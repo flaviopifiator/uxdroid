@@ -61,7 +61,7 @@ fn library() -> &'static Library {
                 "-Wl,--gc-sections",
             ])
             .arg(fixture_dir().join("spike.cpp"))
-            .args(["-llog", "-landroid"])
+            .arg("-llog")
             .arg("-o")
             .arg(&path)
             .status()
