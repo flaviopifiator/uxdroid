@@ -64,6 +64,7 @@ grep -E "^(audiotrack|audiorecord|opensl|aaudio): |uxdroid: |Exception" "$WORK/o
 
 expect "^audiotrack: rate 48000, burst 480, min buffer [0-9]+, wrote 4800, played 4800, underruns 0, sample rate 48000$" \
     "AudioTrack did not play the whole tone"
+expect "^audiotrack marker 1200 period 480$" "AudioTrack does not keep its marker and period"
 expect "^opensl: played 4410 frames in 10 buffers, " "the OpenSL ES player did not play its buffers"
 expect "^aaudio: rate 32000, burst 320, callbacks [0-9]+, written [0-9]+, xruns 0, " "AAudio did not play"
 
