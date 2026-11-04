@@ -111,7 +111,32 @@ fn provide_system_libraries() {
         // Only an x86_64 host has a translator; an arm64 host runs arm64-v8a code itself.
         #[cfg(target_arch = "x86_64")]
         uxdroid_translate::install();
+        #[cfg(target_arch = "aarch64")]
+        reserve_bionic_slots();
     });
+}
+
+/// arm64 app code reads bionic's TLS slots from `TPIDR_EL0`, so the loader refuses it until the
+/// executable has reserved them. uxdroid's `dalvikvm` reserves them as its first TLS and exports
+/// `uxdroid_bionic_slots_address` (runtime/art/patches/art-0002-dalvikvm-bionic-slots.patch); the
+/// bridge checks the reservation on this thread and writes the stack canary. Threads ART started
+/// before this keep a zero canary, which still never changes under them. Without the export, or if
+/// the check fails, the loader names why when the first arm64 library loads.
+#[cfg(target_arch = "aarch64")]
+fn reserve_bionic_slots() {
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    // SAFETY: a lookup by name in the process's global scope, glibc's RTLD_DEFAULT (null).
+    let symbol = unsafe { dlsym(null_mut(), c"uxdroid_bionic_slots_address".as_ptr()) };
+    if symbol.is_null() {
+        return;
+    }
+    // SAFETY: the patched dalvikvm exports this name as `uintptr_t (void)`, as SlotsAddress is.
+    let address: uxdroid_bridge::bionic_tls::SlotsAddress = unsafe { std::mem::transmute(symbol) };
+    if let Err(error) = uxdroid_bridge::bionic_tls::reserve(address) {
+        set_error(&error);
+    }
 }
 
 unsafe extern "C" fn initialize(

@@ -1,4 +1,5 @@
-//! Writes the APK that the first Activity smoke test runs.
+//! Writes the APK that the first Activity smoke test runs, its library under the ABI of the CPU
+//! this tool is built for (`x86_64`, or `arm64-v8a` on aarch64).
 //! usage: make-first-apk <classes.dex> <libfirstnative.so | -> <output.apk> [extra entry name]
 
 use std::path::Path;
@@ -65,8 +66,13 @@ fn main() {
         .manifest(&manifest())
         .file("classes.dex", &std::fs::read(dex).unwrap());
     if library != "-" {
+        let abi = if cfg!(target_arch = "aarch64") {
+            "arm64-v8a"
+        } else {
+            "x86_64"
+        };
         apk = apk.file(
-            "lib/x86_64/libfirstnative.so",
+            &format!("lib/{abi}/libfirstnative.so"),
             &std::fs::read(library).unwrap(),
         );
     }

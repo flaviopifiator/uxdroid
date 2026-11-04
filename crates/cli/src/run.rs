@@ -12,7 +12,9 @@ use std::process::{Command, ExitCode};
 use uxdroid_apk::{ExecutionPath, extract_native_libs, fingerprint, host_abi, inspect};
 
 use crate::install::valid_package;
-use crate::runtime::{boot_class_path, default_runtime, failure, home_dir, runtime_environment};
+use crate::runtime::{
+    INSTRUCTION_SET, boot_class_path, default_runtime, failure, home_dir, runtime_environment,
+};
 use crate::{EXIT_FAILURE, EXIT_USAGE, RUN_USAGE, fail};
 
 const LAUNCHER_CLASS: &str = "dev.uxdroid.runtime.Launcher";
@@ -64,7 +66,7 @@ fn compile_app(
     let mut command = Command::new(runtime.join("bin/dex2oat64"));
     command
         .arg("--compiler-filter=speed")
-        .arg("--instruction-set=x86_64")
+        .arg(format!("--instruction-set={INSTRUCTION_SET}"))
         .arg("--host")
         .arg(format!("--android-root={}", runtime.display()))
         .args(["--runtime-arg", &format!("-Xbootclasspath:{boot}")])
@@ -87,7 +89,10 @@ fn compile_app(
         ))
         .arg(format!(
             "--oat-file={}",
-            work.join("oat/x86_64/app.odex").display()
+            work.join("oat")
+                .join(INSTRUCTION_SET)
+                .join("app.odex")
+                .display()
         ));
     runtime_environment(&mut command, runtime, data, library_path);
     let output = command
@@ -114,7 +119,8 @@ fn install_id(apk: &Path, runtime: &Path) -> Result<String, String> {
         }
     };
     mix(runtime.as_os_str().as_encoded_bytes());
-    for dependency in ["framework/x86_64/boot.oat", "platform/platform.jar"] {
+    let boot_oat = format!("framework/{INSTRUCTION_SET}/boot.oat");
+    for dependency in [boot_oat.as_str(), "platform/platform.jar"] {
         let meta = std::fs::metadata(runtime.join(dependency))
             .map_err(|error| format!("cannot read the runtime: {error}"))?;
         mix(&meta.mtime().to_le_bytes());
@@ -177,7 +183,7 @@ fn install(
         let cannot =
             |error: std::io::Error| format!("cannot install in {}: {error}", work.display());
         let _ = std::fs::remove_dir_all(&work);
-        std::fs::create_dir_all(work.join("oat/x86_64")).map_err(cannot)?;
+        std::fs::create_dir_all(work.join("oat").join(INSTRUCTION_SET)).map_err(cannot)?;
         std::fs::create_dir_all(work.join("lib")).map_err(cannot)?;
         File::create(work.join(IN_USE_MARKER)).map_err(cannot)?;
         // A read-only APK must not make its copy impossible to replace, so contents are copied
@@ -276,7 +282,7 @@ fn prepare_and_exec(args: &RunArgs) -> Result<std::convert::Infallible, String> 
         .join("uxdroid")
         .join(&apk.manifest.package);
     let data = package_dir.join("data");
-    std::fs::create_dir_all(data.join("dalvik-cache/x86_64"))
+    std::fs::create_dir_all(data.join("dalvik-cache").join(INSTRUCTION_SET))
         .map_err(|error| format!("cannot prepare {}: {error}", package_dir.display()))?;
     // Class paths separate entries with a colon, and have no way to escape one.
     let package_dir = std::fs::canonicalize(&package_dir).map_err(|error| error.to_string())?;

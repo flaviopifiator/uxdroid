@@ -3,6 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// ART's name for this host's instruction set, which names the boot image's, the oat files' and the
+/// dalvik-cache's directories and is dex2oat's `--instruction-set`: one runtime package per CPU.
+pub(crate) const INSTRUCTION_SET: &str = if cfg!(target_arch = "aarch64") {
+    "arm64"
+} else {
+    "x86_64"
+};
+
 /// The boot class path, in the order the boot image was compiled with.
 const BOOT_JARS: [&str; 7] = [
     "core-oj",
@@ -89,4 +97,19 @@ pub(crate) fn failure(log: &[u8], first: &[&str]) -> String {
         .or(log.lines().last())
         .unwrap_or("");
     line.escape_debug().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_instruction_set_is_art_s_name_for_this_cpu() {
+        // ART names its oat, dalvik-cache and boot image directories by instruction set.
+        let expected = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            _ => "x86_64",
+        };
+        assert_eq!(INSTRUCTION_SET, expected);
+    }
 }

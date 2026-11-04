@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use uxdroid_apk::{ExecutionPath, extract_native_libs, host_abi, inspect};
 
-use crate::runtime::{boot_class_path, default_runtime, failure, runtime_environment};
+use crate::runtime::{
+    INSTRUCTION_SET, boot_class_path, default_runtime, failure, runtime_environment,
+};
 use crate::{EXIT_FAILURE, EXIT_USAGE, INSTALL_USAGE, fail, print};
 
 /// Measured on RustDesk from disk: verified code started 13% sooner than none and used 5 MiB less
@@ -198,7 +200,8 @@ fn prepare(
     data: &Path,
 ) -> Result<(String, u64), String> {
     let base = staged.join("base.apk");
-    std::fs::create_dir_all(staged.join("oat/x86_64")).map_err(|error| cannot(staged, error))?;
+    std::fs::create_dir_all(staged.join("oat").join(INSTRUCTION_SET))
+        .map_err(|error| cannot(staged, error))?;
     // A read-only APK must not make its copy impossible to replace, so contents are copied, not mode.
     let mut source = std::fs::File::open(apk)
         .map_err(|error| format!("cannot read APK {}: {error}", apk.display()))?;
@@ -206,7 +209,7 @@ fn prepare(
     std::io::copy(&mut source, &mut copy).map_err(|error| cannot(&base, error))?;
     drop(copy);
 
-    std::fs::create_dir_all(data.join("dalvik-cache/x86_64"))
+    std::fs::create_dir_all(data.join("dalvik-cache").join(INSTRUCTION_SET))
         .map_err(|error| cannot(data, error))?;
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
     let native_dir = exe.parent().ok_or("cannot locate this program")?;
@@ -260,7 +263,7 @@ fn prepare(
     let mut dex2oat = Command::new(runtime.join("bin/dex2oat64"));
     dex2oat
         .arg(format!("--compiler-filter={COMPILER_FILTER}"))
-        .arg("--instruction-set=x86_64")
+        .arg(format!("--instruction-set={INSTRUCTION_SET}"))
         .arg("--host")
         .arg(format!("--android-root={}", runtime.display()))
         .args(["--runtime-arg", &format!("-Xbootclasspath:{boot}")])
@@ -280,7 +283,11 @@ fn prepare(
         ))
         .arg(format!(
             "--oat-file={}",
-            staged.join("oat/x86_64/base.odex").display()
+            staged
+                .join("oat")
+                .join(INSTRUCTION_SET)
+                .join("base.odex")
+                .display()
         ));
     runtime_environment(&mut dex2oat, runtime, data, &library_path);
     let output = output_within(&mut dex2oat, "dex2oat", STEP_LIMIT)?;

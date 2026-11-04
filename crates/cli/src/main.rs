@@ -81,20 +81,32 @@ fn app_command(_args: &[OsString]) -> ExitCode {
 
 #[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"))]
 mod bionic_slots;
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux",
+    target_env = "gnu"
+))]
 mod run;
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 mod translation;
 
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux",
+    target_env = "gnu"
+))]
 fn run_command(args: &[OsString]) -> ExitCode {
     run::run_app(args)
 }
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")))]
+#[cfg(not(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux",
+    target_env = "gnu"
+)))]
 fn run_command(_args: &[OsString]) -> ExitCode {
     fail(
-        "error: uxdroid run needs an x86_64 glibc host",
+        "error: uxdroid run needs an x86_64 or aarch64 glibc host",
         EXIT_FAILURE,
     )
 }
