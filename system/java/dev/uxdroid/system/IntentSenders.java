@@ -130,16 +130,23 @@ final class IntentSenders {
         if (stack == null) return ActivityManager.START_CANCELED;
         if (Looper.myLooper() == Looper.getMainLooper()) {
             try {
-                return stack.startFromApp(intent);
+                return stack.startFromApp(intent, false);
             } catch (android.os.RemoteException e) {
                 throw new IllegalStateException("cannot start " + intent, e);
             }
         }
+        // As for the app's own startActivity off the main thread: refused now, else queued there.
+        try {
+            int refused = stack.startFromApp(intent, true);
+            if (refused != ActivityManager.START_SUCCESS) return refused;
+        } catch (android.os.RemoteException e) {
+            throw new IllegalStateException("cannot start " + intent, e);
+        }
         new android.os.Handler(Looper.getMainLooper()).post(() -> {
             try {
-                stack.startFromApp(intent);
+                stack.startFromApp(intent, false);
             } catch (android.os.RemoteException e) {
-                throw new IllegalStateException("cannot start " + intent, e);
+                System.err.println("uxdroid: cannot start " + intent + ": " + e);
             }
         });
         return ActivityManager.START_SUCCESS;
