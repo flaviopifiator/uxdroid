@@ -296,6 +296,10 @@ The loader maps and links an arm64 library as it does a host one (`crates/bridge
 
 Not yet: install-time import resolution and a translation cache, ELF TLS (TLSDESC) and ifuncs in guest code, `va_list` and struct conversion for the functions whose layouts differ on arm64 (`stat`, `sigaction`, `sigset_t`, `jmp_buf`, `ucontext_t`, `epoll_event`) and `open`'s flags, guest signal handlers, guest `dlsym` and `dlopen`, function pointers handed to the guest by `eglGetProcAddress` and OpenSL ES, and faults mapped back to the guest PC.
 
+#### One package per host CPU
+
+uxdroid ships one package per host architecture, `x86_64` and `arm64`, each built natively for its CPU, and the install picks the APK's ABI that host runs directly. On an arm64 host, `arm64-v8a` libraries load and run as host code with no translator, exactly as `x86_64` ones do here; the translator is only for an APK whose native code exists solely for the other CPU. What is x86_64-specific today, and must be ported for the arm64 package: AOSP's host `libandroid_runtime.so` comes from Robolectric's jar only for Linux x86_64, so an arm64 build of it (and of ART's host runtime) has to come from AOSP; the default-native stubs in `crates/system/src/defaults.rs` and the host thunks are x86-64 machine code behind `cfg(target_arch)`; and running `x86_64`-only libraries on an arm64 host needs an x86-to-arm64 engine behind the same `guest::Engine` trait (Dynarmic translates ARM guests only).
+
 ## Roadmap
 
 Each milestone removes the largest remaining risk first.
@@ -308,8 +312,9 @@ Each milestone removes the largest remaining risk first.
 | 3 | Launcher and first `Activity` | An APK opens a Wayland window |
 | 4 | AOSP's framework | A real app, RustDesk's `x86_64` build, opens its screen |
 | 5 | `arm64-v8a` translation | ARM-only native apps run on x86_64 |
-| 6 | Google Play | See below |
-| 7 | macOS | Once the product is complete and optimized on Linux. iOS is out of scope. |
+| 6 | `arm64` Linux hosts | A uxdroid package built for arm64 runs `arm64-v8a` apps natively, the same way the x86_64 package runs `x86_64` apps; only apps with x86-only native code need translation there |
+| 7 | Google Play | See below |
+| 8 | macOS | Once the product is complete and optimized on Linux. iOS is out of scope. |
 
 ## Known limit: Google Play
 
