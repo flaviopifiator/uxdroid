@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use jni_sys::{JNIEnv, jarray, jboolean, jclass, jfloat, jint, jlong, jobject};
 
-use super::jni::{GL_COLOR, GL_CURRENT_VERTEX_ATTRIB, GL_TEXTURE_BORDER_COLOR, Method, array, buffer, get_needed, gl, pixel_bytes, string, unsupported};
+use super::jni::{GL_COLOR, GL_CURRENT_VERTEX_ATTRIB, GL_TEXTURE_BORDER_COLOR, Method, array, buffer, get_needed, gl, index_bytes, pixel_bytes, string, unsupported};
 
 unsafe extern "system" fn glActiveTexture_0(env: *mut JNIEnv, _class: jclass, a0: jint) {
     static ADDRESS: OnceLock<usize> = OnceLock::new();
@@ -395,7 +395,7 @@ unsafe extern "system" fn glDrawElements_46(env: *mut JNIEnv, _class: jclass, a0
     static ADDRESS: OnceLock<usize> = OnceLock::new();
     // SAFETY: the host's glDrawElements has this C signature.
     let Some(f) = (unsafe { gl::<unsafe extern "C" fn(i32, i32, i32, *mut c_void)>(env, &ADDRESS, c"glDrawElements") }) else { return ; };
-    let Some(p3) = (unsafe { buffer(env, a3, 0, true, c"glDrawElements") }) else { return ; };
+    let Some(p3) = (unsafe { buffer(env, a3, index_bytes(a1, a2 as u32), false, c"glDrawElements") }) else { return ; };
     // SAFETY: the arguments were checked against what the function reads and writes.
     unsafe { f(a0, a1, a2, p3.pointer()) };
 }
@@ -1588,7 +1588,7 @@ unsafe extern "system" fn glDrawRangeElements_184(env: *mut JNIEnv, _class: jcla
     static ADDRESS: OnceLock<usize> = OnceLock::new();
     // SAFETY: the host's glDrawRangeElements has this C signature.
     let Some(f) = (unsafe { gl::<unsafe extern "C" fn(i32, i32, i32, i32, i32, *mut c_void)>(env, &ADDRESS, c"glDrawRangeElements") }) else { return ; };
-    let Some(p5) = (unsafe { buffer(env, a5, 0, true, c"glDrawRangeElements") }) else { return ; };
+    let Some(p5) = (unsafe { buffer(env, a5, index_bytes(a3, a4 as u32), false, c"glDrawRangeElements") }) else { return ; };
     // SAFETY: the arguments were checked against what the function reads and writes.
     unsafe { f(a0, a1, a2, a3, a4, p5.pointer()) };
 }
@@ -2444,7 +2444,7 @@ unsafe extern "system" fn glDrawElementsInstanced_282(env: *mut JNIEnv, _class: 
     static ADDRESS: OnceLock<usize> = OnceLock::new();
     // SAFETY: the host's glDrawElementsInstanced has this C signature.
     let Some(f) = (unsafe { gl::<unsafe extern "C" fn(i32, i32, i32, *mut c_void, i32)>(env, &ADDRESS, c"glDrawElementsInstanced") }) else { return ; };
-    let Some(p3) = (unsafe { buffer(env, a3, 0, true, c"glDrawElementsInstanced") }) else { return ; };
+    let Some(p3) = (unsafe { buffer(env, a3, index_bytes(a1, a2 as u32), false, c"glDrawElementsInstanced") }) else { return ; };
     // SAFETY: the arguments were checked against what the function reads and writes.
     unsafe { f(a0, a1, a2, p3.pointer(), a4) };
 }
@@ -3612,7 +3612,7 @@ unsafe extern "system" fn glGetBooleani_v_416(env: *mut JNIEnv, _class: jclass, 
     static ADDRESS: OnceLock<usize> = OnceLock::new();
     // SAFETY: the host's glGetBooleani_v has this C signature.
     let Some(f) = (unsafe { gl::<unsafe extern "C" fn(i32, i32, *mut c_void)>(env, &ADDRESS, c"glGetBooleani_v") }) else { return ; };
-    let Some(p2) = (unsafe { array(env, a2, a3, 1, 1, c"glGetBooleani_v") }) else { return ; };
+    let Some(p2) = (unsafe { array(env, a2, a3, get_needed(a0 as u32), 1, c"glGetBooleani_v") }) else { return ; };
     // SAFETY: the arguments were checked against what the function reads and writes.
     unsafe { f(a0, a1, p2.pointer()) };
 }
@@ -3621,7 +3621,7 @@ unsafe extern "system" fn glGetBooleani_v_417(env: *mut JNIEnv, _class: jclass, 
     static ADDRESS: OnceLock<usize> = OnceLock::new();
     // SAFETY: the host's glGetBooleani_v has this C signature.
     let Some(f) = (unsafe { gl::<unsafe extern "C" fn(i32, i32, *mut c_void)>(env, &ADDRESS, c"glGetBooleani_v") }) else { return ; };
-    let Some(p2) = (unsafe { buffer(env, a2, usize::saturating_mul(1, 4), false, c"glGetBooleani_v") }) else { return ; };
+    let Some(p2) = (unsafe { buffer(env, a2, usize::saturating_mul(get_needed(a0 as u32), 4), false, c"glGetBooleani_v") }) else { return ; };
     // SAFETY: the arguments were checked against what the function reads and writes.
     unsafe { f(a0, a1, p2.pointer()) };
 }
@@ -3941,7 +3941,7 @@ unsafe extern "system" fn glDrawElementsBaseVertex_458(env: *mut JNIEnv, _class:
     static ADDRESS: OnceLock<usize> = OnceLock::new();
     // SAFETY: the host's glDrawElementsBaseVertex has this C signature.
     let Some(f) = (unsafe { gl::<unsafe extern "C" fn(i32, i32, i32, *mut c_void, i32)>(env, &ADDRESS, c"glDrawElementsBaseVertex") }) else { return ; };
-    let Some(p3) = (unsafe { buffer(env, a3, 0, true, c"glDrawElementsBaseVertex") }) else { return ; };
+    let Some(p3) = (unsafe { buffer(env, a3, index_bytes(a1, a2 as u32), false, c"glDrawElementsBaseVertex") }) else { return ; };
     // SAFETY: the arguments were checked against what the function reads and writes.
     unsafe { f(a0, a1, a2, p3.pointer(), a4) };
 }
@@ -3950,7 +3950,7 @@ unsafe extern "system" fn glDrawRangeElementsBaseVertex_459(env: *mut JNIEnv, _c
     static ADDRESS: OnceLock<usize> = OnceLock::new();
     // SAFETY: the host's glDrawRangeElementsBaseVertex has this C signature.
     let Some(f) = (unsafe { gl::<unsafe extern "C" fn(i32, i32, i32, i32, i32, *mut c_void, i32)>(env, &ADDRESS, c"glDrawRangeElementsBaseVertex") }) else { return ; };
-    let Some(p5) = (unsafe { buffer(env, a5, 0, true, c"glDrawRangeElementsBaseVertex") }) else { return ; };
+    let Some(p5) = (unsafe { buffer(env, a5, index_bytes(a3, a4 as u32), false, c"glDrawRangeElementsBaseVertex") }) else { return ; };
     // SAFETY: the arguments were checked against what the function reads and writes.
     unsafe { f(a0, a1, a2, a3, a4, p5.pointer(), a6) };
 }
@@ -3959,7 +3959,7 @@ unsafe extern "system" fn glDrawElementsInstancedBaseVertex_460(env: *mut JNIEnv
     static ADDRESS: OnceLock<usize> = OnceLock::new();
     // SAFETY: the host's glDrawElementsInstancedBaseVertex has this C signature.
     let Some(f) = (unsafe { gl::<unsafe extern "C" fn(i32, i32, i32, *mut c_void, i32, i32)>(env, &ADDRESS, c"glDrawElementsInstancedBaseVertex") }) else { return ; };
-    let Some(p3) = (unsafe { buffer(env, a3, 0, true, c"glDrawElementsInstancedBaseVertex") }) else { return ; };
+    let Some(p3) = (unsafe { buffer(env, a3, index_bytes(a1, a2 as u32), false, c"glDrawElementsInstancedBaseVertex") }) else { return ; };
     // SAFETY: the arguments were checked against what the function reads and writes.
     unsafe { f(a0, a1, a2, p3.pointer(), a4, a5) };
 }

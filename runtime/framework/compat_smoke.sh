@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|features|textservices|pending|activity|no activity|launched|result|broadcast) " "$WORK/out"
+grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|graphics32|features|textservices|pending|activity|no activity|launched|result|broadcast) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -92,6 +92,8 @@ expect "^graphics EGL 1\.[0-9]+ current true GL true pixel ff(7f|80)00ff shader 
 # GLES31 and GLES32 reach the host's GL too, with the same checks on what GL writes.
 expect "^graphics31 pipeline true log true border \[1, 2, 3, 4\] short border refused$" \
     "GLES31 or GLES32 does not reach the host's GL"
+expect "^graphics32 mask \[true, true, true, true\] short mask refused short indices refused$" \
+    "an indexed query or client indices are not checked against what GL writes and reads"
 
 # 8. The log and the console stay where the process started even after the app points its stderr
 # at a pipe it copies to the log, as AnkiDroid's backend does: otherwise each line loops back.

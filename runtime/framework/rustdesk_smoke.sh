@@ -44,6 +44,7 @@ grep -q -E "^prepared $PACKAGE in $ANDROID_DATA/app/$PACKAGE: code compiled " "$
 reached "installed ($(grep -o '[0-9]* native libraries' "$WORK/install"), $(grep -o '[0-9]* default bodies' "$WORK/install"))"
 
 source /work/runtime/art/test_lib.sh
+source /work/runtime/gpu/compositor.sh
 start_compositor
 
 export LD_LIBRARY_PATH="$RUNTIME/lib64:$TARGET"

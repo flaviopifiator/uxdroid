@@ -70,6 +70,9 @@ pub struct Layer<X> {
     /// Whether the layer's frames cover it entirely, as `SurfaceControl.OPAQUE` and an opaque pixel
     /// format say. A translucent window is composed over nothing, so what is below shows through.
     opaque: std::sync::atomic::AtomicBool,
+    /// The size of the frames a surface of its own shows, such as GPU frames handed to the
+    /// compositor whole; its window leaves it out and reports where it is.
+    external: Mutex<Option<(i32, i32)>>,
     pub extra: X,
 }
 
@@ -81,6 +84,16 @@ impl<X> Layer<X> {
 
     pub fn is_opaque(&self) -> bool {
         self.opaque.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Shows the layer on a surface of its own, with frames of this size, or with None, in its
+    /// window again.
+    pub fn set_external(&self, size: Option<(i32, i32)>) {
+        *locked(&self.external) = size;
+    }
+
+    pub fn external(&self) -> Option<(i32, i32)> {
+        *locked(&self.external)
     }
 
     /// A layer under `parent`, or a window's own layer when there is none.
@@ -107,6 +120,7 @@ impl<X> Layer<X> {
             relatives: Mutex::new(Vec::new()),
             content: Mutex::new(Content::default()),
             opaque: std::sync::atomic::AtomicBool::new(true),
+            external: Mutex::new(None),
             extra,
         });
         if parent.is_some() {
@@ -119,6 +133,11 @@ impl<X> Layer<X> {
     /// The last frame. Lock it alone, or after the tree: never hold it while locking another.
     pub fn content(&self) -> MutexGuard<'_, Content> {
         locked(&self.content)
+    }
+
+    /// Whether any layer is a child of this one or placed relative to it.
+    pub fn has_children(&self) -> bool {
+        !live(&self.children).is_empty() || !live(&self.relatives).is_empty()
     }
 
     pub fn parent(&self) -> Option<Arc<Layer<X>>> {
@@ -323,6 +342,48 @@ struct Placement {
 pub struct Composer {
     shown: HashMap<usize, (Placement, Rect, usize)>,
     size: (i32, i32),
+    /// The layers on surfaces of their own, bottom first.
+    externals: Vec<External>,
+    over_nothing: bool,
+}
+
+/// Where a layer on a surface of its own shows in its window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct External {
+    /// The layer, by address.
+    pub layer: usize,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// Below the window's own frame, which must then be clear where it shows.
+    pub below: bool,
+    /// Whether a surface shows it exactly: moved by whole pixels, with no scale, turn, transform,
+    /// alpha, rounded corners or clip. Otherwise only composition can.
+    pub plain: bool,
+}
+
+impl Placement {
+    fn external(&self, layer: usize, width: i32, height: i32, below: bool) -> External {
+        let t = &self.transform;
+        let screen = t.bounds([0.0, 0.0, width as f32, height as f32]);
+        let plain = (t.a, t.b, t.c, t.d) == (1.0, 0.0, 0.0, 1.0)
+            && t.tx.fract() == 0.0
+            && t.ty.fract() == 0.0
+            && self.alpha >= 1.0
+            && self.buffer_transform == 0
+            && self.round.is_none()
+            && self.clip.intersect(&screen) == screen;
+        External {
+            layer,
+            x: t.tx as i32,
+            y: t.ty as i32,
+            width,
+            height,
+            below,
+            plain,
+        }
+    }
 }
 
 /// The geometry each visible layer gets from its parents.
@@ -341,10 +402,17 @@ impl<X> Walk<X> {
                 parent
                     .transform
                     .then(&Affine::placed(geometry.x, geometry.y, geometry.matrix));
-            let content = locked(&layer.content);
-            let (width, height) =
-                compose::transformed_size(content.width, content.height, geometry.buffer_transform);
-            drop(content);
+            let (width, height) = match *locked(&layer.external) {
+                Some(size) => size,
+                None => {
+                    let content = locked(&layer.content);
+                    compose::transformed_size(
+                        content.width,
+                        content.height,
+                        geometry.buffer_transform,
+                    )
+                }
+            };
             // The layer's own bounds: its crop, within its frame when it has one.
             let mut bounds: Option<[f32; 4]> = geometry.crop;
             if width > 0 && height > 0 {
@@ -429,6 +497,17 @@ fn live<X>(layers: &Mutex<Vec<Weak<Layer<X>>>>) -> Vec<Arc<Layer<X>>> {
 }
 
 impl Composer {
+    /// The layers on surfaces of their own at the last composition, bottom first.
+    pub fn externals(&self) -> &[External] {
+        &self.externals
+    }
+
+    /// Whether the last composition was over nothing, so the window needs an alpha channel: the
+    /// window is translucent, or a layer on a surface of its own shows below it.
+    pub fn over_nothing(&self) -> bool {
+        self.over_nothing
+    }
+
     /// Redraws what changed in `window`'s frame, `width` by `height`, since the last call, and
     /// returns the damaged rectangle, empty when nothing changed. The first call, and the first
     /// after the size changes, redraws everything.
@@ -456,15 +535,27 @@ impl Composer {
             walk.order(window, &mut HashSet::new(), &mut order);
             (walk, order)
         };
-        let contents: Vec<(MutexGuard<'_, Content>, Placement, usize)> = order
-            .iter()
-            .filter_map(|key| walk.placements.get(key).map(|entry| (*key, entry)))
-            .map(|(key, (layer, placement))| (layer.content(), *placement, key))
-            .collect();
+        let own = Arc::as_ptr(window) as usize;
+        let mut externals = Vec::new();
+        let mut contents: Vec<(MutexGuard<'_, Content>, Placement, usize)> = Vec::new();
+        let mut above = false;
+        for key in &order {
+            let Some((layer, placement)) = walk.placements.get(key) else {
+                continue;
+            };
+            above |= *key == own;
+            match layer.external() {
+                Some((w, h)) => externals.push(placement.external(*key, w, h, !above)),
+                None => contents.push((layer.content(), *placement, *key)),
+            }
+        }
+        let over_nothing = !window.is_opaque() || externals.iter().any(|external| external.below);
         let mut damage = Rect::EMPTY;
-        if self.size != (width, height) {
+        if self.size != (width, height) || over_nothing != self.over_nothing {
             damage = Rect::sized(width, height);
         }
+        self.externals = externals;
+        self.over_nothing = over_nothing;
         let mut shown = HashMap::with_capacity(contents.len());
         let mut items = Vec::with_capacity(contents.len());
         for (index, (content, placement, key)) in contents.iter().enumerate() {
@@ -512,10 +603,10 @@ impl Composer {
         self.shown = shown;
         self.size = (width, height);
         let damage = damage.intersect(&Rect::sized(width, height));
-        let background = if window.is_opaque() {
-            compose::OPAQUE
-        } else {
+        let background = if over_nothing {
             compose::TRANSPARENT
+        } else {
+            compose::OPAQUE
         };
         compose::compose(frame, width, height, damage, &items, background);
         drop(items);
@@ -668,6 +759,83 @@ mod tests {
         assert_eq!(one(&root, 3, 1), [RED, BLUE, RED]);
         apply(vec![(&surface, Change::Position(1.0, 0.0))]);
         assert_eq!(one(&root, 3, 1), [RED, BLACK, BLUE]);
+    }
+
+    #[test]
+    fn a_layer_on_its_own_surface_leaves_its_window_which_reports_where_to_show_it() {
+        // As SurfaceView: relative to the window, below, through a hole in the window's frame.
+        let root = window(3, 1, RED);
+        root.content().pixels[1] = CLEAR;
+        let bounds = Layer::new("bounds".into(), Some(root.clone()), false, ());
+        apply(vec![(&bounds, Change::Position(1.0, 0.0))]);
+        let surface = Layer::new("surface".into(), Some(bounds.clone()), false, ());
+        apply(vec![(&surface, Change::RelativeLayer(root.clone(), -2))]);
+        post(&surface, 1, 1, BLUE);
+        let mut composer = Composer::default();
+        assert_eq!(compose(&mut composer, &root, 3, 1).0, [RED, BLUE, RED]);
+        assert!(composer.externals().is_empty());
+        assert!(!composer.over_nothing());
+
+        // Its frames now go to a surface of their own, of this size: the window leaves it out and,
+        // as something shows below it, is composed over nothing, so the hole stays clear.
+        surface.set_external(Some((1, 1)));
+        let (frame, damage) = compose(&mut composer, &root, 3, 1);
+        assert_eq!(frame, [RED, CLEAR, RED]);
+        assert_eq!(
+            damage,
+            Rect::sized(3, 1),
+            "the background changed everywhere"
+        );
+        assert!(composer.over_nothing());
+        let key = Arc::as_ptr(&surface) as usize;
+        let place = External {
+            layer: key,
+            x: 1,
+            y: 0,
+            width: 1,
+            height: 1,
+            below: true,
+            plain: true,
+        };
+        assert_eq!(composer.externals(), [place]);
+        // Nothing changed: nothing to redraw, and the same place.
+        assert_eq!(compose(&mut composer, &root, 3, 1).1, Rect::EMPTY);
+
+        // Scaled or translucent, a surface of its own cannot show it as SurfaceFlinger would.
+        apply(vec![(&surface, Change::Alpha(0.5))]);
+        compose(&mut composer, &root, 3, 1);
+        assert!(!composer.externals()[0].plain);
+        apply(vec![
+            (&surface, Change::Alpha(1.0)),
+            (&surface, Change::Matrix([2.0, 0.0, 0.0, 1.0])),
+        ]);
+        compose(&mut composer, &root, 3, 1);
+        assert!(!composer.externals()[0].plain);
+        apply(vec![
+            (&surface, Change::Matrix([1.0, 0.0, 0.0, 1.0])),
+            (&surface, Change::Layer(1)),
+        ]);
+        compose(&mut composer, &root, 3, 1);
+        assert_eq!(
+            composer.externals(),
+            [External {
+                below: false,
+                ..place
+            }]
+        );
+        assert!(
+            !composer.over_nothing(),
+            "above the window, nothing shows through it"
+        );
+
+        // Back to frames in memory: composed into the window again.
+        surface.set_external(None);
+        apply(vec![(&surface, Change::Layer(-2))]);
+        let (frame, damage) = compose(&mut composer, &root, 3, 1);
+        assert_eq!(damage, Rect::new(1, 0, 2, 1));
+        assert_eq!(frame[1], BLUE);
+        assert!(composer.externals().is_empty());
+        assert_eq!(one(&root, 3, 1), [RED, BLUE, RED]);
     }
 
     #[test]

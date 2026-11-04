@@ -6,20 +6,32 @@
 //! surface they came from, and the connection is read without blocking, so the Looper can watch it
 //! while the windows are idle and answer the compositor's pings. A configure with a new size and a
 //! close are kept for the window manager to act on.
+//!
+//! A frame the GPU drew can also come as a dmabuf, through `zwp_linux_dmabuf_v1` when the compositor
+//! offers it: on a window's own surface, or on a [`Plane`], a subsurface that shows one child layer,
+//! such as a `SurfaceView`'s, without copies. Each dmabuf gets its `wl_buffer` once, and a buffer is
+//! busy from its attach until the compositor releases it, so the GPU does not draw into what the
+//! compositor still reads. Shared memory stays the path for everything else.
 
 use std::error::Error;
 use std::ffi::c_void;
 use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::FileExt;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
-    wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
+    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer, wl_region, wl_registry,
+    wl_seat, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
 };
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, delegate_noop};
+use wayland_client::{
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
+};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
+};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 use crate::compose::Rect;
@@ -92,7 +104,157 @@ struct State {
     events: Vec<(Target, Event)>,
     /// Surfaces waiting for a frame callback.
     frames: Frames,
+    /// What `zwp_linux_dmabuf_v1` imports.
+    formats: Formats,
 }
+
+/// `DRM_FORMAT_ARGB8888` and `DRM_FORMAT_XRGB8888`, the fourcc codes of Wayland's two shm formats.
+pub const ARGB8888: u32 = 0x3432_5241;
+pub const XRGB8888: u32 = 0x3432_5258;
+/// `DRM_FORMAT_MOD_LINEAR` and `DRM_FORMAT_MOD_INVALID`, the driver's implicit layout.
+#[cfg(test)]
+const LINEAR: u64 = 0;
+pub const INVALID_MODIFIER: u64 = 0x00ff_ffff_ffff_ffff;
+
+/// The format and modifier pairs the compositor imports dmabufs with, as it listed them.
+#[derive(Default)]
+struct Formats {
+    pairs: Vec<(u32, u64)>,
+}
+
+impl Formats {
+    fn add(&mut self, format: u32, modifier: u64) {
+        if !self.pairs.contains(&(format, modifier)) {
+            self.pairs.push((format, modifier));
+        }
+    }
+
+    /// Whether the compositor listed anything yet.
+    fn offered(&self) -> bool {
+        !self.pairs.is_empty()
+    }
+
+    fn modifiers(&self, format: u32) -> Vec<u64> {
+        self.pairs
+            .iter()
+            .filter(|(listed, _)| *listed == format)
+            .map(|(_, modifier)| *modifier)
+            .collect()
+    }
+
+    fn supports(&self, format: u32, modifier: u64) -> bool {
+        self.pairs.contains(&(format, modifier))
+    }
+}
+
+/// The `wl_buffer`s of one surface's dmabufs, by the id the GPU side gives each buffer and the
+/// format it is shown as. `B` is the buffer, generic so the bookkeeping is tested without a
+/// compositor.
+struct Buffers<B> {
+    entries: Vec<Entry<B>>,
+}
+
+impl<B> Default for Buffers<B> {
+    fn default() -> Self {
+        Buffers {
+            entries: Vec::new(),
+        }
+    }
+}
+
+struct Entry<B> {
+    id: u64,
+    format: u32,
+    buffer: B,
+    /// Set at each attach, cleared by `wl_buffer.release`.
+    busy: Arc<AtomicBool>,
+}
+
+/// The `wl_buffer`s a surface keeps: a swapchain of two or three, each perhaps in two formats.
+const MAX_BUFFERS: usize = 8;
+
+impl<B> Buffers<B> {
+    fn get(&self, id: u64, format: u32) -> Option<&Entry<B>> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id && entry.format == format)
+    }
+
+    /// Keeps `buffer`, whose release clears `busy`, and returns the buffers it pushed out, oldest
+    /// free ones first, for the caller to destroy.
+    fn insert(&mut self, id: u64, format: u32, buffer: B, busy: Arc<AtomicBool>) -> Vec<B> {
+        let mut dropped = Vec::new();
+        while self.entries.len() >= MAX_BUFFERS {
+            let Some(at) = self
+                .entries
+                .iter()
+                .position(|entry| !entry.busy.load(Ordering::Acquire))
+            else {
+                break;
+            };
+            dropped.push(self.entries.remove(at).buffer);
+        }
+        self.entries.push(Entry {
+            id,
+            format,
+            buffer,
+            busy,
+        });
+        dropped
+    }
+
+    /// Buffer `id` was attached: busy until released.
+    fn attached(&mut self, id: u64) {
+        for entry in self.entries.iter().filter(|entry| entry.id == id) {
+            entry.busy.store(true, Ordering::Release);
+        }
+    }
+
+    fn busy(&self, id: u64) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.id == id && entry.busy.load(Ordering::Acquire))
+    }
+
+    /// Takes out every `wl_buffer` of `id`, for the caller to destroy.
+    fn forget(&mut self, id: u64) -> Vec<B> {
+        let mut taken = Vec::new();
+        let mut at = 0;
+        while at < self.entries.len() {
+            if self.entries[at].id == id {
+                taken.push(self.entries.remove(at).buffer);
+            } else {
+                at += 1;
+            }
+        }
+        taken
+    }
+
+    fn take_all(&mut self) -> Vec<B> {
+        self.entries.drain(..).map(|entry| entry.buffer).collect()
+    }
+}
+
+/// A frame the GPU drew into a one-plane dmabuf.
+#[derive(Clone, Copy, Debug)]
+pub struct Dmabuf {
+    pub fd: RawFd,
+    pub width: i32,
+    pub height: i32,
+    pub stride: u32,
+    pub offset: u32,
+    pub format: u32,
+    pub modifier: u64,
+    /// The GPU side's name for the buffer, the same for every frame drawn into it.
+    pub id: u64,
+}
+
+/// A dmabuf's `wl_buffer`: the busy flag its release clears.
+pub struct Release(Arc<AtomicBool>);
+
+/// What the compositor answered a `zwp_linux_buffer_params_v1`: the buffer, or None when it
+/// refused the dmabuf.
+type Answer = Arc<Mutex<Option<Option<wl_buffer::WlBuffer>>>>;
 
 /// The frame callbacks windows wait for. Each commit asks for one, so a callback the compositor
 /// never answers, such as one asked before the surface was hidden, is replaced by the next frame's
@@ -225,6 +387,8 @@ struct Display {
     subcompositor: Option<wl_subcompositor::WlSubcompositor>,
     shm: wl_shm::WlShm,
     shell: xdg_wm_base::XdgWmBase,
+    /// `zwp_linux_dmabuf_v1`, version 3, when the compositor offers it.
+    dmabuf: Option<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1>,
     _seat: Option<wl_seat::WlSeat>,
     toplevel: Option<wl_surface::WlSurface>,
     /// The toplevel's size, once a window has it.
@@ -300,6 +464,9 @@ impl Display {
         let shell = globals.bind(&handle, 1..=6, ())?;
         // A compositor without a seat shows the windows all the same, with no input.
         let seat = globals.bind(&handle, 1..=7, ()).ok();
+        // Its formats come as events, read the first time a GPU frame asks for them. Version 3 lists
+        // them with modifiers; later versions only through feedback objects.
+        let dmabuf = globals.bind(&handle, 3..=3, ()).ok();
         Ok(Display {
             connection,
             queue,
@@ -308,6 +475,7 @@ impl Display {
             subcompositor,
             shm,
             shell,
+            dmabuf,
             _seat: seat,
             toplevel: None,
             size: (0, 0),
@@ -315,6 +483,120 @@ impl Display {
             orphan: None,
         })
     }
+}
+
+impl Display {
+    /// The modifiers the compositor imports `format` with, reading its list the first time; None
+    /// when it offers no dmabufs.
+    fn modifiers(&mut self, format: u32) -> Result<Option<Vec<u64>>, Box<dyn Error>> {
+        if self.dmabuf.is_none() {
+            return Ok(None);
+        }
+        if !self.state.formats.offered() {
+            self.queue.roundtrip(&mut self.state)?;
+        }
+        Ok(Some(self.state.formats.modifiers(format)))
+    }
+
+    /// Shows `frame` on `surface`: its `wl_buffer`, made the first time, attached with the whole
+    /// buffer damaged, with a frame callback for the vsync.
+    fn attach_dmabuf(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+        buffers: &mut Buffers<wl_buffer::WlBuffer>,
+        frame: &Dmabuf,
+    ) -> Result<(), Box<dyn Error>> {
+        checked_size(frame.width, frame.height)?;
+        if buffers.get(frame.id, frame.format).is_none() {
+            let buffer = self.import(frame)?;
+            let Some(Release(busy)) = buffer.data::<Release>() else {
+                return Err("a dmabuf's wl_buffer has no release flag".into());
+            };
+            let busy = busy.clone();
+            destroy_buffers(buffers.insert(frame.id, frame.format, buffer, busy));
+        }
+        let buffer = &buffers
+            .get(frame.id, frame.format)
+            .expect("made above")
+            .buffer;
+        let key = surface.id().protocol_id();
+        if let Some((number, waits)) = self.state.frames.request(key) {
+            surface.frame(&self.queue.handle(), (key, number));
+            if waits {
+                vsync::frame_requested();
+            }
+        }
+        surface.attach(Some(buffer), 0, 0);
+        surface.damage_buffer(0, 0, frame.width, frame.height);
+        buffers.attached(frame.id);
+        surface.commit();
+        self.queue.flush()?;
+        Ok(())
+    }
+
+    /// A `wl_buffer` for `frame`'s dmabuf, or an error when the compositor refuses it.
+    fn import(&mut self, frame: &Dmabuf) -> Result<wl_buffer::WlBuffer, Box<dyn Error>> {
+        let Some(dmabuf) = &self.dmabuf else {
+            return Err("the compositor offers no zwp_linux_dmabuf_v1".into());
+        };
+        if frame.fd < 0 {
+            return Err("no dmabuf".into());
+        }
+        let answer: Answer = Arc::new(Mutex::new(None));
+        let params = dmabuf.create_params(&self.queue.handle(), answer.clone());
+        // SAFETY: the caller keeps the descriptor open for the call; the request only sends it.
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(frame.fd) };
+        params.add(
+            fd,
+            0,
+            frame.offset,
+            frame.stride,
+            (frame.modifier >> 32) as u32,
+            frame.modifier as u32,
+        );
+        params.create(
+            frame.width,
+            frame.height,
+            frame.format,
+            zwp_linux_buffer_params_v1::Flags::empty(),
+        );
+        while answer.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+            self.queue.blocking_dispatch(&mut self.state)?;
+        }
+        params.destroy();
+        let answered = answer.lock().unwrap_or_else(|p| p.into_inner()).take();
+        match answered.flatten() {
+            Some(buffer) => Ok(buffer),
+            None => Err(format!(
+                "the compositor refused a {}x{} dmabuf of format {:#x}, modifier {:#x}",
+                frame.width, frame.height, frame.format, frame.modifier
+            )
+            .into()),
+        }
+    }
+}
+
+/// The modifiers the compositor imports dmabufs of `format` with; None when it offers no dmabufs
+/// or no window is open yet.
+pub fn dmabuf_modifiers(format: u32) -> Option<Vec<u64>> {
+    let mut display = display();
+    let display = display.as_mut()?;
+    match display.modifiers(format) {
+        Ok(modifiers) => modifiers,
+        Err(error) => {
+            uxdroid_bridge::report!(
+                "uxdroid: cannot read the compositor's dmabuf formats: {error}"
+            );
+            None
+        }
+    }
+}
+
+/// Whether the compositor listed `format` with `modifier`.
+pub fn dmabuf_supports(format: u32, modifier: u64) -> bool {
+    display()
+        .as_ref()
+        .is_some_and(|display| display.state.formats.supports(format, modifier))
 }
 
 /// Runs `f` on the display, connecting to the compositor the first time.
@@ -462,6 +744,8 @@ pub struct Window {
     /// XRGB8888 when opaque, else ARGB8888 with premultiplied alpha, so the compositor shows what is
     /// below the window's transparent parts, such as a dialog's shadow.
     opaque: bool,
+    /// The `wl_buffer`s of dmabufs this surface showed.
+    dmabufs: Buffers<wl_buffer::WlBuffer>,
 }
 
 /// The pixel format of a window's buffer.
@@ -561,6 +845,7 @@ impl Window {
                     width,
                     height,
                     opaque,
+                    dmabufs: Buffers::default(),
                 });
             }
             if display.toplevel.is_some() {
@@ -590,6 +875,7 @@ impl Window {
                 width,
                 height,
                 opaque,
+                dmabufs: Buffers::default(),
             })
         })
     }
@@ -701,6 +987,128 @@ impl Window {
             Ok(())
         })
     }
+
+    /// Shows a dmabuf the GPU drew as this window's frame, in place of its shared memory.
+    pub fn present_dmabuf(&mut self, frame: &Dmabuf) -> Result<(), Box<dyn Error>> {
+        let (surface, buffers) = (&self.surface, &mut self.dmabufs);
+        with_display(|display| display.attach_dmabuf(surface, buffers, frame))
+    }
+
+    /// Whether the compositor still reads dmabuf `id`, after reading what it sent.
+    pub fn dmabuf_busy(&self, id: u64) -> bool {
+        let _ = dispatch();
+        self.dmabufs.busy(id)
+    }
+
+    /// Forgets dmabuf `id`, which the GPU side no longer draws into.
+    pub fn forget_dmabuf(&mut self, id: u64) {
+        destroy_buffers(self.dmabufs.forget(id));
+    }
+
+    /// Commits the surface with nothing new, which applies its subsurfaces' new positions.
+    fn commit(&self) -> Result<(), Box<dyn Error>> {
+        with_display(|display| {
+            self.surface.commit();
+            display.queue.flush()?;
+            Ok(())
+        })
+    }
+
+    /// A subsurface of this window for one child layer's GPU frames: shown above the window until
+    /// placed, without input, so the window under it keeps every event.
+    pub fn plane(&self) -> Result<Plane, Box<dyn Error>> {
+        let Some(subcompositor) = with_display(|display| Ok(display.subcompositor.clone()))? else {
+            return Err("the compositor has no wl_subcompositor".into());
+        };
+        with_display(|display| {
+            let handle = display.queue.handle();
+            let surface = display.compositor.create_surface(&handle, ());
+            let subsurface = subcompositor.get_subsurface(&surface, &self.surface, &handle, ());
+            subsurface.set_desync();
+            let region = display.compositor.create_region(&handle, ());
+            surface.set_input_region(Some(&region));
+            region.destroy();
+            Ok(Plane {
+                surface,
+                subsurface,
+                buffers: Buffers::default(),
+                place: None,
+            })
+        })
+    }
+}
+
+fn destroy_buffers(buffers: Vec<wl_buffer::WlBuffer>) {
+    for buffer in buffers {
+        buffer.destroy();
+    }
+}
+
+/// A subsurface showing one child layer's GPU frames in its window, as SurfaceFlinger shows a
+/// `SurfaceView`'s buffers on a layer of their own.
+pub struct Plane {
+    surface: wl_surface::WlSurface,
+    subsurface: wl_subsurface::WlSubsurface,
+    buffers: Buffers<wl_buffer::WlBuffer>,
+    /// Where it was last placed: position and whether below its window.
+    place: Option<(i32, i32, bool)>,
+}
+
+impl Plane {
+    /// Puts the plane at `(x, y)` in `window`, below or above the window's own frame. The new place
+    /// applies with the window's next commit, which this makes when it changed.
+    pub fn place(
+        &mut self,
+        window: &Window,
+        x: i32,
+        y: i32,
+        below: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.place == Some((x, y, below)) {
+            return Ok(());
+        }
+        self.subsurface.set_position(x, y);
+        if below {
+            self.subsurface.place_below(&window.surface);
+        } else {
+            self.subsurface.place_above(&window.surface);
+        }
+        self.place = Some((x, y, below));
+        window.commit()
+    }
+
+    pub fn present_dmabuf(&mut self, frame: &Dmabuf) -> Result<(), Box<dyn Error>> {
+        let (surface, buffers) = (&self.surface, &mut self.buffers);
+        with_display(|display| display.attach_dmabuf(surface, buffers, frame))
+    }
+
+    pub fn dmabuf_busy(&self, id: u64) -> bool {
+        let _ = dispatch();
+        self.buffers.busy(id)
+    }
+
+    pub fn forget_dmabuf(&mut self, id: u64) {
+        destroy_buffers(self.buffers.forget(id));
+    }
+}
+
+// SAFETY: Wayland proxies may be used from any thread; the plane is used behind its layer's mutex.
+unsafe impl Send for Plane {}
+
+impl Drop for Plane {
+    fn drop(&mut self) {
+        let mut guard = display();
+        let Some(display) = guard.as_mut() else {
+            return;
+        };
+        if display.state.frames.forget(self.surface.id().protocol_id()) {
+            vsync::frame_dropped();
+        }
+        destroy_buffers(self.buffers.take_all());
+        self.subsurface.destroy();
+        self.surface.destroy();
+        let _ = display.queue.flush();
+    }
 }
 
 impl Drop for Window {
@@ -713,6 +1121,7 @@ impl Drop for Window {
         if display.state.frames.forget(key) {
             vsync::frame_dropped();
         }
+        destroy_buffers(self.dmabufs.take_all());
         display.windows = display.windows.saturating_sub(1);
         let close = on_close(
             matches!(self.role, Role::Toplevel(..)),
@@ -1081,7 +1490,74 @@ impl Dispatch<wl_callback::WlCallback, (u32, u32)> for State {
     }
 }
 
+impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+        event: zwp_linux_dmabuf_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_linux_dmabuf_v1::Event::Format { format } => {
+                state.formats.add(format, INVALID_MODIFIER)
+            }
+            zwp_linux_dmabuf_v1::Event::Modifier {
+                format,
+                modifier_hi,
+                modifier_lo,
+            } => state.formats.add(
+                format,
+                (u64::from(modifier_hi) << 32) | u64::from(modifier_lo),
+            ),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, Answer> for State {
+    fn event(
+        _: &mut Self,
+        _: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+        event: zwp_linux_buffer_params_v1::Event,
+        answer: &Answer,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let answered = match event {
+            zwp_linux_buffer_params_v1::Event::Created { buffer } => Some(buffer),
+            zwp_linux_buffer_params_v1::Event::Failed => None,
+            _ => return,
+        };
+        *answer.lock().unwrap_or_else(|p| p.into_inner()) = Some(answered);
+    }
+
+    event_created_child!(State, zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, [
+        zwp_linux_buffer_params_v1::EVT_CREATED_OPCODE => (
+            wl_buffer::WlBuffer,
+            Release(Arc::new(AtomicBool::new(false)))
+        ),
+    ]);
+}
+
+impl Dispatch<wl_buffer::WlBuffer, Release> for State {
+    fn event(
+        _: &mut Self,
+        _: &wl_buffer::WlBuffer,
+        event: wl_buffer::Event,
+        Release(busy): &Release,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            busy.store(false, Ordering::Release);
+        }
+    }
+}
+
 delegate_noop!(State: ignore wl_compositor::WlCompositor);
+delegate_noop!(State: ignore wl_region::WlRegion);
 delegate_noop!(State: ignore wl_surface::WlSurface);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
@@ -1125,6 +1601,71 @@ mod tests {
         // A surface gone takes its count with it.
         frames.forget(7);
         assert_eq!(frames.request(7), Some((0, true)));
+    }
+
+    #[test]
+    fn the_compositor_imports_the_pairs_it_listed() {
+        let mut formats = Formats::default();
+        assert!(!formats.offered(), "no zwp_linux_dmabuf_v1 yet");
+        formats.add(ARGB8888, 0x0300_0000_00e0_8012);
+        formats.add(ARGB8888, LINEAR);
+        formats.add(XRGB8888, LINEAR);
+        // A format listed without modifiers takes the driver's implicit one.
+        formats.add(XRGB8888, INVALID_MODIFIER);
+        formats.add(ARGB8888, LINEAR);
+        assert!(formats.offered());
+        assert_eq!(
+            formats.modifiers(ARGB8888),
+            vec![0x0300_0000_00e0_8012, LINEAR]
+        );
+        assert!(formats.supports(XRGB8888, LINEAR));
+        assert!(!formats.supports(XRGB8888, 0x0300_0000_00e0_8012));
+        assert!(formats.supports(XRGB8888, INVALID_MODIFIER));
+        assert!(
+            formats.modifiers(0x3231_5258).is_empty(),
+            "XR12, never listed"
+        );
+    }
+
+    #[test]
+    fn a_buffer_is_busy_from_its_attach_until_the_compositor_releases_it() {
+        let mut buffers: Buffers<u8> = Buffers::default();
+        assert!(buffers.get(1, ARGB8888).is_none());
+        let release = Arc::new(AtomicBool::new(false));
+        assert!(buffers.insert(1, ARGB8888, 10, release.clone()).is_empty());
+        // Not attached yet: free.
+        assert!(!buffers.busy(1));
+        buffers.attached(1);
+        assert!(buffers.busy(1));
+        assert!(!buffers.busy(2), "an unknown buffer is not busy");
+        release.store(false, Ordering::Release);
+        assert!(!buffers.busy(1));
+        // The same memory shown as another format is another wl_buffer.
+        assert!(buffers.get(1, XRGB8888).is_none());
+        buffers.insert(1, XRGB8888, 11, Arc::default());
+        buffers.attached(1);
+        assert!(buffers.busy(1), "busy while either of its wl_buffers is");
+        assert_eq!(buffers.forget(1), vec![10, 11]);
+        assert!(buffers.get(1, ARGB8888).is_none());
+    }
+
+    #[test]
+    fn a_surface_keeps_a_bounded_number_of_buffers_and_drops_free_ones_first() {
+        let mut buffers: Buffers<u64> = Buffers::default();
+        for id in 0..MAX_BUFFERS as u64 {
+            buffers.insert(id, ARGB8888, id, Arc::default());
+            buffers.attached(id);
+        }
+        buffers
+            .get(0, ARGB8888)
+            .unwrap()
+            .busy
+            .store(false, Ordering::Release);
+        // A new one pushes out the oldest free buffer, never one the compositor still reads.
+        let dropped = buffers.insert(99, ARGB8888, 99, Arc::default());
+        assert_eq!(dropped, vec![0]);
+        assert!(buffers.get(0, ARGB8888).is_none());
+        assert!(buffers.get(1, ARGB8888).is_some());
     }
 
     #[test]

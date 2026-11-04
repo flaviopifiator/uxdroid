@@ -97,6 +97,12 @@ impl Window {
         }
     }
 
+    /// The Surface's `mNativeObject`, which names its layer to `libuxdroid_system.so`.
+    pub fn handle(&self, jni: Jni) -> Result<i64, Thrown> {
+        // SAFETY: a live Surface, whose private field holds a long.
+        unsafe { jni.field(self.surface, c"mNativeObject", c"J") }
+    }
+
     fn geometry(&self) -> Geometry {
         *self.geometry.lock().unwrap_or_else(|p| p.into_inner())
     }

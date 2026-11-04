@@ -243,6 +243,32 @@ Every difference is inside the other row's interquartile range, so composition, 
 
 Frame pacing itself is checked, not benchmarked, by `runtime/framework/compose_smoke.sh`: with the compositor's frame callbacks at 30 Hz an endless animation drew 30 frames per second (60 before this branch), with immediate callbacks 60, never more, and with none, as for a hidden window, 15.
 
+## EGL frames on the GPU
+
+[`gpu.sh`](gpu.sh) measures what an EGL frame costs the app on each path, while Mindustry's main menu, a `GLSurfaceView`, redraws continuously: frame time, CPU time of the whole process per frame (`/proc/<pid>/stat`), and the cost of `eglSwapBuffers` itself, from the reports `UXDROID_EGL_STATS` turns on. 10 s of warm-up after the first frame, then 20 s measured, three fresh processes per path. The compositor is weston's headless backend with its GL renderer for every path, so only the app's side differs. Mindustry is untrusted, so it ran with the sandbox's isolation (no network, read-only system, tmpfs `/tmp`, data on a Docker volume on ext4) plus the GPU devices and driver libraries of `dev-gpu`, not in `dev`.
+
+2026-11-04, branch `feat/compat-gpu` (c3436d6), RTX 3060 with NVIDIA 595.99.02, two sessions of three runs each (the second while a build ran in another container for part of the llvmpipe runs). Per-run values:
+
+| Path | Frame | CPU per frame | `eglSwapBuffers` |
+|------|-------|---------------|------------------|
+| dmabuf: GPU through GBM, frames handed over (`MODE=dmabuf`) | 4.17 ms (all 6 runs) | 0.32-0.33 ms | 1.14-1.23 ms |
+| GPU, read back (`MODE=readback`) | 4.12-4.17 ms | 6.53-6.71 ms | 3.19-3.25 ms |
+| llvmpipe, read back (`MODE=llvmpipe`) | 4.70-5.43 ms | 23.1-29.6 ms | 3.89-4.06 ms |
+
+- Mindustry caps itself at 240 frames per second (4.17 ms), which both GPU paths reach; nothing paces `eglSwapBuffers` by the compositor yet, as Android's buffer queue would at 60 Hz, so these are throughput numbers, not a display's frame rate. llvmpipe stays below the cap.
+- Handing frames over as dmabufs cuts the app's CPU per frame 20 times against reading them back on the same GPU, and about 80 times against llvmpipe: the readback's `glReadPixels`, the row flip and the three copies to Wayland are gone, and the swap's own 1.1 ms is mostly waiting on the fence for the GPU to finish the frame, not CPU.
+- RustDesk was not measured here: its Flutter engine never calls EGL on uxdroid (no `eglGetDisplay`, no GPU display opened in the same isolation), it draws in software through `ANativeWindow`, so this path does not apply to it yet.
+- The NDK sample draws a single EGL frame, so it has no frame time; `runtime/gpu/gpu_smoke.sh` checks that frame instead.
+
+Startup and memory, base (3e7648b) and branch alternated in two rounds, `run.sh` with `RUNS=10` in `dev`, llvmpipe, warm medians:
+
+| Workload | Base | Branch |
+|----------|------|--------|
+| Framework sample APK to first frame, installed | 123.7 / 123.3 ms, 19.3 MiB private dirty, 129.4 / 129.3 MiB PSS | 123.7 / 123.5 ms, 19.3 MiB, 129.6 / 129.6 MiB |
+| Milestone 3 platform to first frame | 18.0 / 18.0 ms, 5.0 MiB | 17.8 ms, 5.0 MiB |
+
+Startup and private dirty memory did not change; PSS is 0.2 MiB higher, the size of the new code's pages. The GPU display opens only when an app first calls `eglGetDisplay`, and binding `zwp_linux_dmabuf_v1` costs no round trip.
+
 ## Limits
 
 - The install-time preparation rows were measured with other workloads running on the machine; their warm rows are tight, their cold rows are not.
@@ -268,4 +294,4 @@ No competitor runs these workloads here, so **no claim of being faster or smalle
 | Android emulator | No `/dev/kvm` on this machine; without KVM an x86_64 system image runs under full software emulation, which is no fair comparison | No |
 | A real Android device | None available | |
 
-Also not measured: frame rate on a real compositor, frame time of GPU-drawn apps, input latency on a real compositor or against any competitor, memory over time, GPU rendering, and RustDesk with its data on tmpfs (only on disk).
+Also not measured: frame rate on a real compositor (the GPU path ran on weston's headless GL renderer only, never on the host's desktop session), GPU paths on another vendor's driver (only NVIDIA 595 here), input latency on a real compositor or against any competitor, memory over time, GPU memory, RustDesk on the GPU (it does not use EGL here), and RustDesk with its data on tmpfs (only on disk).
