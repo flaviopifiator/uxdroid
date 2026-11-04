@@ -345,6 +345,7 @@ public final class Launcher {
             // Created only with --once: a report needs no window, so it runs with no compositor.
             ActivityStack stack = new ActivityStack(app, thread, !once);
             ActivityStack.current = stack;
+            Broadcasts.attach(app, thread);
             Control.start(info.packageName);
             try {
                 Intent launch = Control.intentOf(intent);
@@ -354,6 +355,30 @@ public final class Launcher {
                 throw new IllegalArgumentException("cannot launch " + info.packageName + ": " + e.getMessage(), e);
             }
             if (once) exitWhenLaunched(stack.top());
+        }
+
+        /** Context.registerReceiver: see {@link Broadcasts}. */
+        public Intent registerReceiverWithFeature(IApplicationThread caller, String callerPackage, String featureId,
+                String receiverId, android.content.IIntentReceiver receiver, android.content.IntentFilter filter,
+                String permission, int userId, int flags) throws RemoteException {
+            return Broadcasts.register(receiver, filter);
+        }
+
+        public void unregisterReceiver(android.content.IIntentReceiver receiver) {
+            Broadcasts.unregister(receiver);
+        }
+
+        /** Context.sendBroadcast and its ordered and sticky kinds, to the app's own receivers. */
+        public int broadcastIntentWithFeature(IApplicationThread caller, String featureId, Intent intent,
+                String resolvedType, android.content.IIntentReceiver resultTo, int resultCode, String resultData,
+                Bundle resultExtras, String[] permissions, String[] excludedPermissions, String[] excludedPackages,
+                int appOp, Bundle options, boolean serialized, boolean sticky, int userId) throws RemoteException {
+            return Broadcasts.send(new Intent(intent), resultTo, resultCode, resultData, resultExtras, serialized, sticky);
+        }
+
+        public void finishReceiver(IBinder who, int resultCode, String resultData, Bundle resultExtras,
+                boolean abort, int flags) throws RemoteException {
+            Broadcasts.finished(who, resultCode, resultData, resultExtras, abort);
         }
 
         /** PendingIntent.getActivity, getBroadcast and their kind: see {@link IntentSenders}. */

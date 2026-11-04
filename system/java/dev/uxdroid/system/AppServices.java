@@ -124,8 +124,8 @@ final class AppServices {
     /**
      * The handler of IAlarmManager. An alarm with a listener, as AlarmManager.set with an
      * OnAlarmListener makes, fires on time from a timer thread and the listener runs on its own handler;
-     * repeating ones fire again. An alarm with a PendingIntent is kept, so getNextAlarmClock sees it,
-     * but not delivered: broadcasts are not delivered yet, which is said once.
+     * repeating ones fire again. An alarm with a PendingIntent sends it at its time, which for a
+     * broadcast reaches the app's receivers ({@link Broadcasts}).
      */
     public static final class Alarms {
         private final java.util.concurrent.ScheduledExecutorService timer =
@@ -135,7 +135,6 @@ final class AppServices {
                     return thread;
                 });
         private final List<Alarm> alarms = new ArrayList<>();
-        private boolean warned;
 
         private static final class Alarm {
             final android.app.PendingIntent operation;
@@ -172,19 +171,16 @@ final class AppServices {
             remove(operation, listener);
             Alarm alarm = new Alarm(operation, listener, clock);
             alarms.add(alarm);
-            if (listener == null) {
-                if (!warned) {
-                    warned = true;
-                    System.err.println("uxdroid: alarms of " + callingPackage + " with a PendingIntent are kept but not"
-                            + " delivered: broadcasts are not delivered yet");
-                }
-                return;
-            }
             Runnable fire = () -> {
                 try {
-                    listener.doAlarm(COMPLETE);
-                } catch (android.os.RemoteException e) {
-                    throw new IllegalStateException(e);
+                    if (listener != null) {
+                        listener.doAlarm(COMPLETE);
+                    } else if (operation != null) {
+                        // As AlarmManagerService sends an alarm's operation: its broadcast, activity or service.
+                        IntentSenders.send(operation.getTarget(), null);
+                    }
+                } catch (android.os.RemoteException | RuntimeException e) {
+                    System.err.println("uxdroid: an alarm of " + callingPackage + " failed: " + e);
                 }
                 if (interval <= 0) {
                     synchronized (this) {

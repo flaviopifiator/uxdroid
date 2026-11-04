@@ -17,8 +17,8 @@ import java.util.List;
  * Loop Habit Tracker stops when PendingIntent.getBroadcast gives null, as it did with no activity
  * manager to make one.
  *
- * <p>Sending one that starts an activity starts it in the app's task. Broadcasts and services are not
- * delivered yet, which is said once.
+ * <p>Sending one that starts an activity starts it in the app's task, and one for a broadcast delivers
+ * it to the app's receivers ({@link Broadcasts}). Services are not started yet, which is said once.
  */
 final class IntentSenders {
     private IntentSenders() {}
@@ -60,7 +60,7 @@ final class IntentSenders {
 
         public void send(int code, Intent fillIn, String resolvedType, IBinder allowlistToken,
                 android.content.IIntentReceiver finishedReceiver, String requiredPermission, Bundle options) {
-            IntentSenders.send(sender, fillIn);
+            IntentSenders.send(sender, fillIn, finishedReceiver);
         }
     }
 
@@ -108,19 +108,34 @@ final class IntentSenders {
     static int send(IIntentSender binder, Intent fillIn) {
         Sender sender = find(binder);
         if (sender == null) return ActivityManager.START_CANCELED;
-        return send(sender, fillIn);
+        return send(sender, fillIn, null);
     }
 
-    private static int send(Sender sender, Intent fillIn) {
+    /** Sends {@code binder}; a broadcast's {@code finishedReceiver} gets its result, as PendingIntent.send's. */
+    static int send(IIntentSender binder, Intent fillIn, android.content.IIntentReceiver finishedReceiver) {
+        Sender sender = find(binder);
+        if (sender == null) return ActivityManager.START_CANCELED;
+        return send(sender, fillIn, finishedReceiver);
+    }
+
+    private static int send(Sender sender, Intent fillIn, android.content.IIntentReceiver finishedReceiver) {
         Intent intent = new Intent(sender.intent);
         if (fillIn != null && (sender.flags & PendingIntent.FLAG_IMMUTABLE) == 0) intent.fillIn(fillIn, 0);
         if ((sender.flags & PendingIntent.FLAG_ONE_SHOT) != 0) cancel(sender.binder);
+        if (sender.type == ActivityManager.INTENT_SENDER_BROADCAST) {
+            try {
+                // A finished receiver waits for the result, so the broadcast is ordered, as on Android.
+                return Broadcasts.send(intent, finishedReceiver, 0, null, null, finishedReceiver != null, false);
+            } catch (android.os.RemoteException e) {
+                throw new IllegalStateException("cannot broadcast " + intent, e);
+            }
+        }
         if (sender.type != ActivityManager.INTENT_SENDER_ACTIVITY) {
             synchronized (IntentSenders.class) {
                 if (!warned) {
                     warned = true;
-                    System.err.println("uxdroid: a PendingIntent of " + sender.packageName + " for a broadcast or a"
-                            + " service was sent but not delivered: only activities are started yet");
+                    System.err.println("uxdroid: a PendingIntent of " + sender.packageName + " for a service was sent"
+                            + " but not delivered: services are not started yet");
                 }
             }
             return ActivityManager.START_SUCCESS;

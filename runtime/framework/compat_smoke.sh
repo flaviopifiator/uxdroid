@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|pending|activity|no activity|launched|result) " "$WORK/out"
+grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|pending|activity|no activity|launched|result|broadcast) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -89,6 +89,15 @@ expect "^no activity takes No Activity found to handle Intent$" "an intent no ac
 expect "^pending broadcast true same true creator com\.example\.compat absent true$" "PendingIntents are not made as on Android"
 expect "^activity created com\.example\.compat\.SecondActivity by pending intent$" "a PendingIntent for an activity did not start it"
 expect "^off the main thread, no activity takes it$" "a start off the main thread was told it succeeded"
+# Broadcasts inside the app: registered and manifest receivers on the main thread, an ordered one
+# through its receivers by priority to its result receiver, an alarm's PendingIntent when it is due
+# and not before, and no implicit broadcast to a manifest receiver, as on Android since 8.0.
+expect "^broadcast registered com\.example\.compat\.PING main true$" "a registered receiver did not get its broadcast"
+expect "^broadcast manifest com\.example\.compat\.REMIND by package main true$" "a manifest receiver did not get a broadcast for its package"
+expect "^broadcast ordered result ab code 2$" "an ordered broadcast did not pass its receivers by priority to its result"
+expect "^broadcast manifest com\.example\.compat\.REMIND by alarm main true$" "a due alarm's PendingIntent did not broadcast"
+grep -q "^broadcast manifest .* by implicit" "$WORK/out" && fail "an implicit broadcast reached a manifest receiver"
+grep -q "^broadcast manifest .* by later alarm" "$WORK/out" && fail "an alarm broadcast before its time"
 # A result set before finish reaches the activity that started it for one, with its request code.
 expect "^result request 7 code -1 answer 42$" "a result of startActivityForResult did not come back"
 expect "^launched com\.example\.compat/\.CompatActivity " "the activity was not launched"

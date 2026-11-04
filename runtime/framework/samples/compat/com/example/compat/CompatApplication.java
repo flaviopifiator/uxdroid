@@ -19,6 +19,59 @@ public class CompatApplication extends Application {
         device();
         graphics();
         redirect();
+        broadcasts();
+    }
+
+    /**
+     * Broadcasts inside the app: a receiver it registers, one of its manifest, an ordered broadcast
+     * through receivers by priority to a result receiver, and an alarm whose PendingIntent is a
+     * broadcast. An implicit broadcast reaches no manifest receiver, as on Android since 8.0.
+     */
+    private void broadcasts() {
+        registerReceiver(new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context, android.content.Intent intent) {
+                System.out.println("broadcast registered " + intent.getAction() + " main "
+                        + (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()));
+            }
+        }, new android.content.IntentFilter("com.example.compat.PING"), RECEIVER_NOT_EXPORTED);
+        sendBroadcast(new android.content.Intent("com.example.compat.PING"));
+        sendBroadcast(new android.content.Intent("com.example.compat.REMIND").setPackage(getPackageName())
+                .putExtra("by", "package"));
+        sendBroadcast(new android.content.Intent("com.example.compat.REMIND").putExtra("by", "implicit"));
+
+        android.content.IntentFilter first = new android.content.IntentFilter("com.example.compat.ORDERED");
+        first.setPriority(10);
+        android.content.IntentFilter second = new android.content.IntentFilter("com.example.compat.ORDERED");
+        second.setPriority(1);
+        registerReceiver(new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context, android.content.Intent intent) {
+                setResult(getResultCode() + 1, getResultData() + "b", null);
+            }
+        }, second, RECEIVER_NOT_EXPORTED);
+        registerReceiver(new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context, android.content.Intent intent) {
+                setResult(getResultCode() + 1, getResultData() + "a", null);
+            }
+        }, first, RECEIVER_NOT_EXPORTED);
+        sendOrderedBroadcast(new android.content.Intent("com.example.compat.ORDERED"), null,
+                new android.content.BroadcastReceiver() {
+                    @Override
+                    public void onReceive(android.content.Context context, android.content.Intent intent) {
+                        System.out.println("broadcast ordered result " + getResultData() + " code " + getResultCode());
+                    }
+                }, null, 0, "", null);
+
+        android.app.AlarmManager alarms = getSystemService(android.app.AlarmManager.class);
+        android.content.Intent due = new android.content.Intent("com.example.compat.REMIND")
+                .setPackage(getPackageName()).putExtra("by", "alarm");
+        alarms.setExact(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime() - 1,
+                android.app.PendingIntent.getBroadcast(this, 10, due, android.app.PendingIntent.FLAG_IMMUTABLE));
+        alarms.setExact(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime() + 3_600_000,
+                android.app.PendingIntent.getBroadcast(this, 11, new android.content.Intent(due).putExtra("by", "later alarm"),
+                        android.app.PendingIntent.FLAG_IMMUTABLE));
     }
 
     /**
