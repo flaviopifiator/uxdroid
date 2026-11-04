@@ -28,6 +28,9 @@ static KEEP_STDERR: extern "C" fn() = keep_stderr;
 
 /// The descriptor messages go to: the kept stderr, or descriptor 2 when none was kept.
 pub fn stderr_fd() -> libc::c_int {
+    // A library links this crate as an rlib, whose objects the linker takes only when something in
+    // them is referenced; naming the initializer here keeps it wherever messages are written.
+    std::hint::black_box(&KEEP_STDERR);
     match STDERR.load(Ordering::Relaxed) {
         -1 => libc::STDERR_FILENO,
         fd => fd,
