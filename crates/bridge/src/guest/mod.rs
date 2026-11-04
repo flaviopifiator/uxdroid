@@ -22,6 +22,7 @@ mod format;
 mod jni;
 mod jni_table;
 mod libc;
+mod libc_table;
 mod native;
 
 use std::cell::Cell;
@@ -380,6 +381,16 @@ fn record_missing(name: &str) {
     if !missing.iter().any(|known| known == name) {
         missing.push(name.to_string());
     }
+}
+
+/// bionic's libc, libm and libdl exports that guest code cannot call yet, each with why, from the
+/// NDK's arm64 libraries (`libc_table.py`) less the calls written by hand.
+pub fn unsigned_bionic() -> Vec<(&'static str, &'static str)> {
+    libc_table::UNSIGNED
+        .iter()
+        .filter(|(name, _)| libc::find(name).is_none() && libc::variadic_twin(name).is_none())
+        .copied()
+        .collect()
 }
 
 /// The imports bound so far that the host has but guest code cannot call yet, for reports.
@@ -794,6 +805,31 @@ mod tests {
         match AVAILABLE.load(Ordering::SeqCst) {
             true => Ok(Box::new(NoCpus)),
             false => Err("cannot open libuxdroid_dynarmic.so".to_string()),
+        }
+    }
+
+    #[test]
+    fn unsigned_bionic_lists_what_no_table_or_hand_written_call_covers() {
+        let unsigned = unsigned_bionic();
+        let reason = |name: &str| {
+            unsigned
+                .iter()
+                .find(|(known, _)| *known == name)
+                .map(|(_, why)| *why)
+        };
+        assert_eq!(
+            reason("epoll_wait"),
+            Some("struct epoll_event differs on arm64")
+        );
+        // Written by hand or carried by a twin, so no longer unsigned.
+        for covered in [
+            "qsort",
+            "pthread_create",
+            "vsnprintf",
+            "__android_log_vprint",
+            "socket",
+        ] {
+            assert_eq!(reason(covered), None, "{covered}");
         }
     }
 

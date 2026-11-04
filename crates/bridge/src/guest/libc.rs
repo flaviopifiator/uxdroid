@@ -1,11 +1,12 @@
 //! bionic's libc as guest code sees it: a signature for each function the host serves, and the
 //! calls that need more than a signature, such as the ones that take a guest callback.
 //!
-//! Only functions whose arguments have the same meaning for arm64 bionic and the host are listed:
-//! scalars, and pointers to memory whose layout matches (strings, `timespec`, `pthread_*_t` of the
-//! same size, opaque `FILE`). Functions taking structs that differ on arm64 (`stat`, `sigaction`,
-//! `sigset_t`, `jmp_buf`, `ucontext_t`), `va_list` or open flags with other values are missing on
-//! purpose; a library importing one still loads and stops naming it if it calls it.
+//! Most signatures are generated (`libc_table.py`, into `libc_table.rs`) from the NDK's arm64
+//! libraries and headers: every export whose arguments are scalars or point at memory laid out the
+//! same for arm64 and x86_64 bionic. The host side is what x86_64 bionic code gets, a shim or an
+//! audited glibc function, so that audit covers guest calls too. The rest are written here or left
+//! out on purpose; `guest::unsigned_bionic` lists those, and a library importing one still loads
+//! and stops naming it if it calls it.
 
 use std::ffi::c_void;
 
@@ -18,140 +19,27 @@ pub(super) enum Import {
     Data,
 }
 
+/// Signatures written by hand, ahead of the generated table (`libc_table.py`): functions with no
+/// prototype the generator can read, and ones the bridge carries differently.
 const FUNCTIONS: &[(&str, &str)] = &[
+    // POSIX's, the exported symbol; _GNU_SOURCE renames the declaration to __gnu_strerror_r.
+    ("strerror_r", "i32(i32,ptr,u64)"),
     // Memory
-    ("malloc", "ptr(u64)"),
-    ("calloc", "ptr(u64,u64)"),
-    ("realloc", "ptr(ptr,u64)"),
-    ("free", "void(ptr)"),
-    ("posix_memalign", "i32(ptr,u64,u64)"),
-    ("memalign", "ptr(u64,u64)"),
-    ("aligned_alloc", "ptr(u64,u64)"),
     ("malloc_usable_size", "u64(ptr)"),
-    ("memcpy", "ptr(ptr,ptr,u64)"),
-    ("memmove", "ptr(ptr,ptr,u64)"),
-    ("memset", "ptr(ptr,i32,u64)"),
-    ("memcmp", "i32(ptr,ptr,u64)"),
-    ("memchr", "ptr(ptr,i32,u64)"),
-    ("memrchr", "ptr(ptr,i32,u64)"),
     // Strings
-    ("strlen", "u64(ptr)"),
     ("strnlen", "u64(ptr,u64)"),
-    ("strcmp", "i32(ptr,ptr)"),
-    ("strncmp", "i32(ptr,ptr,u64)"),
-    ("strcasecmp", "i32(ptr,ptr)"),
-    ("strncasecmp", "i32(ptr,ptr,u64)"),
-    ("strcpy", "ptr(ptr,ptr)"),
-    ("strncpy", "ptr(ptr,ptr,u64)"),
-    ("strcat", "ptr(ptr,ptr)"),
-    ("strncat", "ptr(ptr,ptr,u64)"),
-    ("strlcpy", "u64(ptr,ptr,u64)"),
-    ("strlcat", "u64(ptr,ptr,u64)"),
-    ("strchr", "ptr(ptr,i32)"),
-    ("strrchr", "ptr(ptr,i32)"),
-    ("strstr", "ptr(ptr,ptr)"),
-    ("strdup", "ptr(ptr)"),
-    ("strndup", "ptr(ptr,u64)"),
-    ("strerror", "ptr(i32)"),
-    ("strtol", "i64(ptr,ptr,i32)"),
-    ("strtoul", "u64(ptr,ptr,i32)"),
-    ("strtoll", "i64(ptr,ptr,i32)"),
-    ("strtoull", "u64(ptr,ptr,i32)"),
-    ("strtod", "f64(ptr,ptr)"),
-    ("strtof", "f32(ptr,ptr)"),
-    ("atoi", "i32(ptr)"),
-    ("atol", "i64(ptr)"),
     // Process, time and files by descriptor
-    ("__errno", "ptr()"),
-    ("abort", "void()"),
-    ("exit", "void(i32)"),
-    ("_exit", "void(i32)"),
     ("__stack_chk_fail", "void()"),
     ("android_set_abort_message", "void(ptr)"),
-    ("__system_property_get", "i32(ptr,ptr)"),
     ("getpid", "i32()"),
     ("gettid", "i32()"),
     ("getuid", "u32()"),
-    ("sleep", "u32(u32)"),
-    ("usleep", "i32(u32)"),
-    ("nanosleep", "i32(ptr,ptr)"),
-    ("clock_gettime", "i32(i32,ptr)"),
-    ("gettimeofday", "i32(ptr,ptr)"),
     ("time", "i64(ptr)"),
-    ("sched_yield", "i32()"),
-    ("close", "i32(i32)"),
     ("read", "i64(i32,ptr,u64)"),
     ("write", "i64(i32,ptr,u64)"),
     ("lseek", "i64(i32,i64,i32)"),
-    // stdio
-    ("fflush", "i32(ptr)"),
-    ("fputc", "i32(i32,ptr)"),
-    ("fputs", "i32(ptr,ptr)"),
-    ("fwrite", "u64(ptr,u64,u64,ptr)"),
-    ("fread", "u64(ptr,u64,u64,ptr)"),
-    ("puts", "i32(ptr)"),
-    ("printf", "i32(ptr,...)"),
-    ("fprintf", "i32(ptr,ptr,...)"),
-    ("sprintf", "i32(ptr,ptr,...)"),
-    ("snprintf", "i32(ptr,u64,ptr,...)"),
-    ("dprintf", "i32(i32,ptr,...)"),
-    ("asprintf", "i32(ptr,ptr,...)"),
-    ("openlog", "void(ptr,i32,i32)"),
-    ("closelog", "void()"),
-    ("syslog", "void(i32,ptr,...)"),
     // pthread objects that have the same size in both libcs
-    ("pthread_join", "i32(u64,ptr)"),
-    ("pthread_detach", "i32(u64)"),
     ("pthread_self", "u64()"),
-    ("pthread_equal", "i32(u64,u64)"),
-    ("pthread_attr_init", "i32(ptr)"),
-    ("pthread_attr_destroy", "i32(ptr)"),
-    ("pthread_attr_setstacksize", "i32(ptr,u64)"),
-    ("pthread_attr_setdetachstate", "i32(ptr,i32)"),
-    ("pthread_mutex_init", "i32(ptr,ptr)"),
-    ("pthread_mutex_destroy", "i32(ptr)"),
-    ("pthread_mutex_lock", "i32(ptr)"),
-    ("pthread_mutex_trylock", "i32(ptr)"),
-    ("pthread_mutex_unlock", "i32(ptr)"),
-    ("pthread_mutexattr_init", "i32(ptr)"),
-    ("pthread_mutexattr_destroy", "i32(ptr)"),
-    ("pthread_mutexattr_settype", "i32(ptr,i32)"),
-    ("pthread_cond_init", "i32(ptr,ptr)"),
-    ("pthread_cond_destroy", "i32(ptr)"),
-    ("pthread_cond_wait", "i32(ptr,ptr)"),
-    ("pthread_cond_timedwait", "i32(ptr,ptr,ptr)"),
-    ("pthread_cond_signal", "i32(ptr)"),
-    ("pthread_cond_broadcast", "i32(ptr)"),
-    ("pthread_rwlock_init", "i32(ptr,ptr)"),
-    ("pthread_rwlock_destroy", "i32(ptr)"),
-    ("pthread_rwlock_rdlock", "i32(ptr)"),
-    ("pthread_rwlock_wrlock", "i32(ptr)"),
-    ("pthread_rwlock_unlock", "i32(ptr)"),
-    ("pthread_getspecific", "ptr(u32)"),
-    ("pthread_setspecific", "i32(u32,ptr)"),
-    ("pthread_key_delete", "i32(u32)"),
-    // libm
-    ("sqrt", "f64(f64)"),
-    ("sin", "f64(f64)"),
-    ("cos", "f64(f64)"),
-    ("tan", "f64(f64)"),
-    ("atan2", "f64(f64,f64)"),
-    ("exp", "f64(f64)"),
-    ("log", "f64(f64)"),
-    ("log10", "f64(f64)"),
-    ("pow", "f64(f64,f64)"),
-    ("floor", "f64(f64)"),
-    ("ceil", "f64(f64)"),
-    ("fabs", "f64(f64)"),
-    ("fmod", "f64(f64,f64)"),
-    ("sqrtf", "f32(f32)"),
-    ("sinf", "f32(f32)"),
-    ("cosf", "f32(f32)"),
-    ("expf", "f32(f32)"),
-    ("logf", "f32(f32)"),
-    ("powf", "f32(f32,f32)"),
-    ("floorf", "f32(f32)"),
-    ("ceilf", "f32(f32)"),
     // Runs every library's destructors on exit; nothing guest-specific.
     ("__cxa_finalize", "void(ptr)"),
 ];
@@ -212,10 +100,14 @@ pub(super) fn find(name: &str) -> Option<Import> {
     if let Some(&(_, special)) = SPECIALS.iter().find(|(known, _)| *known == name) {
         return Some(Import::Special(special));
     }
-    FUNCTIONS
-        .iter()
-        .find(|(known, _)| *known == name)
-        .map(|&(_, signature)| Import::Function(signature))
+    if let Some(&(_, signature)) = FUNCTIONS.iter().find(|(known, _)| *known == name) {
+        return Some(Import::Function(signature));
+    }
+    let generated = super::libc_table::SIGNED;
+    generated
+        .binary_search_by(|(known, _)| (*known).cmp(name))
+        .ok()
+        .map(|index| Import::Function(generated[index].1))
 }
 
 pub(super) fn is_format_function(name: &str) -> bool {
@@ -445,4 +337,73 @@ pub(super) fn raw_syscall(cpu: &dyn Cpu) {
         None => -i64::from(libc::ENOSYS),
     };
     cpu.set_x(0, result as u64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::Signature;
+
+    #[test]
+    fn functions_whose_arguments_differ_on_arm64_never_take_the_generic_path() {
+        for name in [
+            "stat",
+            "fstat",
+            "lstat",
+            "fstatat",
+            "fstat64",
+            "epoll_ctl",
+            "epoll_wait",
+            "sigaction",
+            "setjmp",
+            "longjmp",
+            "sigsetjmp",
+            "open",
+            "openat",
+            "fcntl",
+            "pipe2",
+            "fesetround",
+            "dlsym",
+            "dlopen",
+            "strtold",
+            "ioctl",
+            "syscall",
+            "tcgetattr",
+        ] {
+            assert!(
+                !matches!(find(name), Some(Import::Function(_))),
+                "{name} must not bind by signature alone"
+            );
+        }
+    }
+
+    #[test]
+    fn bionic_functions_with_matching_layouts_are_signed() {
+        for (name, expected) in [
+            ("socket", "i32(i32,i32,i32)"),
+            ("readdir", "ptr(ptr)"),
+            ("poll", "i32(ptr,u32,i32)"),
+            ("sigemptyset", "i32(ptr)"),
+            ("getaddrinfo", "i32(ptr,ptr,ptr,ptr)"),
+            ("strerror_r", "i32(i32,ptr,u64)"),
+            ("sscanf", "i32(ptr,ptr,...)"),
+            ("acosf", "f32(f32)"),
+        ] {
+            match find(name) {
+                Some(Import::Function(signature)) => assert_eq!(signature, expected, "{name}"),
+                _ => panic!("{name} has no guest signature"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_listed_signature_parses() {
+        let generated = super::super::libc_table::SIGNED.iter();
+        for (name, signature) in FUNCTIONS.iter().chain(generated) {
+            assert!(
+                matches!(Signature::parse(signature), Ok(Signature::Function { .. })),
+                "{name}: {signature}"
+            );
+        }
+    }
 }
