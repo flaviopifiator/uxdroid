@@ -94,6 +94,7 @@ run_app() {
     mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
     WORK="$work"
     source /work/runtime/art/test_lib.sh
+    source /work/runtime/gpu/compositor.sh
     fail() {
         echo "FAIL $package: $1 (furthest stage reached: $stage)"
         grep -E "^(Caused by|Exception|java\.|[a-z]+\.[a-zA-Z.]+(Exception|Error))|FATAL" "$work/out" 2>/dev/null \

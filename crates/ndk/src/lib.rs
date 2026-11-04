@@ -15,6 +15,7 @@ mod choreographer;
 mod egl;
 mod egl_table;
 mod gles_table;
+mod gpu;
 mod java;
 mod live;
 mod looper;

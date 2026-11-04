@@ -117,7 +117,12 @@ docker compose run --rm -T dev bash /work/runtime/framework/agent_smoke.sh
 UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_agent_smoke.sh
 # Which renderer a headless GLES 2 context gets: llvmpipe in dev, the host GPU in dev-gpu, which passes
 # the host's GPU nodes and mounts its driver's libraries read-only (paths in compose.yaml).
-docker compose --profile gpu run --rm -T -e EXPECT=NVIDIA dev-gpu bash /work/runtime/gpu/gpu_probe.sh
+# With DMABUF=1 it also fails unless a GPU frame comes out as a dmabuf, the path app EGL takes.
+docker compose --profile gpu run --rm -T -e EXPECT=NVIDIA -e DMABUF=1 dev-gpu bash /work/runtime/gpu/gpu_probe.sh
+# App EGL on the GPU end to end: the NDK sample's frame drawn through GBM, shown by weston's GL
+# renderer as a dmabuf with no copy, and checked in a screenshot. RENDERER=gl gives the other smokes
+# that compositor too.
+docker compose --profile gpu run --rm -T dev-gpu bash /work/runtime/gpu/gpu_smoke.sh
 # The compatibility corpus, F-Droid builds of Loop Habit Tracker, Markor, Aegis, AnkiDroid and
 # Mindustry (verified against F-Droid's key, untrusted: sandbox only), each to a first screen that is
 # not blank. A missing APK is skipped; CORPUS_APPS picks some; SHOTS=<dir> keeps the screenshots.
