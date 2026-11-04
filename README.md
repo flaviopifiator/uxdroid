@@ -41,7 +41,7 @@ Exit codes: `0` success, `1` unreadable or malformed APK, `2` wrong usage.
 
 ## Load a native library
 
-`uxdroid load` loads an x86_64 `.so` built for Android, with its dependencies, and runs its initializers. Only an x86_64 glibc host is supported. Loading runs the library's code, so use the sandbox for anything you did not build:
+`uxdroid load` loads an x86_64 `.so` built for Android, with its dependencies, and runs its initializers. An arm64-v8a `.so` runs through the translator, `libuxdroid_dynarmic.so`, which the `translation` service builds and `UXDROID_TRANSLATOR` names; without it, the load fails with the reason. Only an x86_64 glibc host is supported. Loading runs the library's code, so use the sandbox for anything you did not build:
 
 ```bash
 UXDROID_SAMPLES=/path/to/libs docker compose run --rm sandbox \
@@ -331,6 +331,13 @@ Exit codes: `0` success, also for `disable` of a profile with no service; `1` th
 
 Run the first four with `docker compose run --rm -T dev bash /work/runtime/art/<script>`, and `smoke.sh` in the `art-runtime` service. There is no CI yet.
 
+The arm64 translation tests skip in `dev`, which has no engine. Run them in the `translation` service, which is `dev` plus the engine built from pinned sources:
+
+```bash
+docker compose build dev && docker compose build translation
+docker compose run --rm translation cargo test -p uxdroid-translate -p uxdroid-cli
+```
+
 ## Performance
 
-The performance rule in [AGENTS.md](AGENTS.md) applies to every milestone. [benches/loader](benches/loader/README.md) compares load times with other loaders, and [benches/art](benches/art/README.md) compares runtime startup. [benches/framework](benches/framework/README.md) measures startup and memory on AOSP's framework, RustDesk included, against milestone 3's own platform, and the cost and latency of audio; no competitor could run those workloads here.
+The performance rule in [AGENTS.md](AGENTS.md) applies to every milestone. [benches/loader](benches/loader/README.md) compares load times with other loaders, and [benches/art](benches/art/README.md) compares runtime startup. [benches/translation](benches/translation/README.md) compares arm64 code run by the bridge's translator with native x86_64 and QEMU user. [benches/framework](benches/framework/README.md) measures startup and memory on AOSP's framework, RustDesk included, against milestone 3's own platform, and the cost and latency of audio; no competitor could run those workloads here.
