@@ -461,6 +461,22 @@ fn a_screenshot_composes_the_windows_bottom_first() {
 }
 
 #[test]
+fn a_translucent_window_shows_what_is_below_it_through_its_alpha() {
+    // A dialog's window: its premultiplied ARGB frame, clear at its shadow, half black at its edge.
+    let mut dialog = frame(1, 0, 2, 1, 0xFFAA_BBCC);
+    dialog.pixels = vec![0x0000_0000, 0x8000_0000];
+    let seat = FakeSeat {
+        display: Some((3, 1)),
+        frames: vec![frame(0, 0, 3, 1, 0xFF20_4080), dialog],
+        ..FakeSeat::default()
+    };
+    let (agent, _, _) = make(seat, vec![tree(1, "")]);
+    let (_, image) = shot(&agent, None, 2048).unwrap();
+    assert_eq!(image.pixel(1, 0), [0x20, 0x40, 0x80]);
+    assert_eq!(image.pixel(2, 0), [0x10, 0x20, 0x40]);
+}
+
+#[test]
 fn a_large_display_is_scaled_to_the_cap() {
     let seat = FakeSeat {
         display: Some((400, 700)),

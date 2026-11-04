@@ -28,6 +28,8 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// `SurfaceControl`'s `HIDDEN` flag, of `setFlags`.
 pub const HIDDEN: u32 = 0x1;
+/// `SurfaceControl.Transaction.setOpaque`'s flag: the layer's frames cover it entirely.
+pub const OPAQUE: u32 = 0x2;
 
 struct Geometry<X> {
     parent: Option<Arc<Layer<X>>>,
@@ -65,10 +67,22 @@ pub struct Layer<X> {
     /// Layers placed relative to this one.
     relatives: Mutex<Vec<Weak<Layer<X>>>>,
     content: Mutex<Content>,
+    /// Whether the layer's frames cover it entirely, as `SurfaceControl.OPAQUE` and an opaque pixel
+    /// format say. A translucent window is composed over nothing, so what is below shows through.
+    opaque: std::sync::atomic::AtomicBool,
     pub extra: X,
 }
 
 impl<X> Layer<X> {
+    pub fn set_opaque(&self, opaque: bool) {
+        self.opaque
+            .store(opaque, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_opaque(&self) -> bool {
+        self.opaque.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// A layer under `parent`, or a window's own layer when there is none.
     pub fn new(name: String, parent: Option<Arc<Layer<X>>>, hidden: bool, extra: X) -> Arc<Self> {
         let window = parent.is_none();
@@ -92,6 +106,7 @@ impl<X> Layer<X> {
             children: Mutex::new(Vec::new()),
             relatives: Mutex::new(Vec::new()),
             content: Mutex::new(Content::default()),
+            opaque: std::sync::atomic::AtomicBool::new(true),
             extra,
         });
         if parent.is_some() {
@@ -197,6 +212,9 @@ impl<X> Layer<X> {
                     Change::Flags { flags, mask } => {
                         if mask & HIDDEN != 0 {
                             geometry.hidden = flags & HIDDEN != 0;
+                        }
+                        if mask & OPAQUE != 0 {
+                            self.set_opaque(flags & OPAQUE != 0);
                         }
                     }
                     Change::Reparent(_) | Change::RelativeLayer(..) | Change::Layer(_) => {}
@@ -494,7 +512,12 @@ impl Composer {
         self.shown = shown;
         self.size = (width, height);
         let damage = damage.intersect(&Rect::sized(width, height));
-        compose::compose(frame, width, height, damage, &items);
+        let background = if window.is_opaque() {
+            compose::OPAQUE
+        } else {
+            compose::TRANSPARENT
+        };
+        compose::compose(frame, width, height, damage, &items, background);
         drop(items);
         for (mut content, _, _) in contents {
             content.damage = Rect::EMPTY;
@@ -674,6 +697,32 @@ mod tests {
         ]);
         // A quarter of white over black.
         assert_eq!(one(&root, 2, 1), [0xff40_4040, BLACK]);
+    }
+
+    #[test]
+    fn a_window_made_translucent_is_composed_over_nothing() {
+        let root = window(2, 1, CLEAR);
+        let _dialog = child(&root, 1, 1, 0x80ff_0000);
+        assert_eq!(one(&root, 2, 1), [0xff80_0000, BLACK], "opaque by default");
+
+        apply(vec![(
+            &root,
+            Change::Flags {
+                flags: 0,
+                mask: OPAQUE,
+            },
+        )]);
+        assert!(!root.is_opaque());
+        assert_eq!(one(&root, 2, 1), [0x8080_0000, 0]);
+
+        apply(vec![(
+            &root,
+            Change::Flags {
+                flags: OPAQUE,
+                mask: OPAQUE,
+            },
+        )]);
+        assert!(root.is_opaque());
     }
 
     #[test]
