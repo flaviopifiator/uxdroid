@@ -167,8 +167,12 @@ def needed(name, kinds, index):
         return "pixel_bytes(a2, a3, a4 as u32, a5 as u32)"
     if name in ("glGetIntegerv", "glGetFloatv", "glGetBooleanv", "glGetInteger64v"):
         return "get_needed(a0 as u32)"
-    if name in ("glGetIntegeri_v", "glGetInteger64i_v"):
+    if name in ("glGetIntegeri_v", "glGetInteger64i_v", "glGetBooleani_v"):
+        # Indexed by draw buffer, GL_COLOR_WRITEMASK is four values, as unindexed.
         return "get_needed(a0 as u32)"
+    if re.match(r"glDraw(Range)?Elements(Instanced)?(BaseVertex)?$", name):
+        # Client indices: the count of the index type, just before the buffer.
+        return "index_bytes(a{}, a{} as u32)".format(index - 2, index - 1)
     if name == "glGetVertexAttribfv" or name == "glGetVertexAttribiv" or name.startswith("glGetVertexAttribI"):
         return "if a1 as u32 == GL_CURRENT_VERTEX_ATTRIB { 4 } else { 1 }"
     if name.startswith("glGetUniform") and name.endswith("v"):
@@ -245,7 +249,7 @@ def emit(entries):
         "",
         "use jni_sys::{JNIEnv, jarray, jboolean, jclass, jfloat, jint, jlong, jobject};",
         "",
-        "use super::jni::{GL_COLOR, GL_CURRENT_VERTEX_ATTRIB, GL_TEXTURE_BORDER_COLOR, Method, array, buffer, get_needed, gl, pixel_bytes, string, unsupported};",
+        "use super::jni::{GL_COLOR, GL_CURRENT_VERTEX_ATTRIB, GL_TEXTURE_BORDER_COLOR, Method, array, buffer, get_needed, gl, index_bytes, pixel_bytes, string, unsupported};",
         "",
     ]
     tables = {}

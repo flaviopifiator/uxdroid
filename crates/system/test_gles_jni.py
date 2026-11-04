@@ -21,6 +21,13 @@ JAVAP = [
     ("android.opengl.GLES32", "glTexParameterIiv", "(II[II)V"),
     ("android.opengl.GLES32", "glDebugMessageControl", "(IIII[IIZ)V"),
     ("android.opengl.GLES32", "glReadnPixels", "(IIIIIIILjava/nio/Buffer;)V"),
+    ("android.opengl.GLES30", "glDrawRangeElements", "(IIIIILjava/nio/Buffer;)V"),
+    ("android.opengl.GLES30", "glDrawRangeElements", "(IIIIII)V"),
+    ("android.opengl.GLES32", "glDrawElementsBaseVertex", "(IIILjava/nio/Buffer;I)V"),
+    ("android.opengl.GLES32", "glDrawRangeElementsBaseVertex", "(IIIIILjava/nio/Buffer;I)V"),
+    ("android.opengl.GLES32", "glDrawElementsInstancedBaseVertex", "(IIILjava/nio/Buffer;II)V"),
+    ("android.opengl.GLES32", "glGetBooleani_v", "(II[ZI)V"),
+    ("android.opengl.GLES32", "glGetBooleani_v", "(IILjava/nio/IntBuffer;)V"),
 ]
 
 
@@ -70,6 +77,24 @@ class ClassifyTest(unittest.TestCase):
         kinds = self.entries()[("glTexParameterIiv", "(II[II)V")]
         self.assertEqual(needed("glTexParameterIiv", kinds, 2),
                          "if a1 as u32 == GL_TEXTURE_BORDER_COLOR { 4 } else { 1 }")
+
+    def test_an_indexed_query_holds_what_its_name_returns(self):
+        # GL_COLOR_WRITEMASK, indexed by draw buffer, is four booleans.
+        for descriptor, index in (("(II[ZI)V", 2), ("(IILjava/nio/IntBuffer;)V", 2)):
+            kinds = self.entries()[("glGetBooleani_v", descriptor)]
+            self.assertEqual(needed("glGetBooleani_v", kinds, index), "get_needed(a0 as u32)")
+
+    def test_client_indices_hold_their_count_of_their_type(self):
+        cases = [("glDrawElements", "(IIILjava/nio/Buffer;)V", 3, "index_bytes(a1, a2 as u32)"),
+                 ("glDrawRangeElements", "(IIIIILjava/nio/Buffer;)V", 5, "index_bytes(a3, a4 as u32)"),
+                 ("glDrawElementsBaseVertex", "(IIILjava/nio/Buffer;I)V", 3, "index_bytes(a1, a2 as u32)"),
+                 ("glDrawRangeElementsBaseVertex", "(IIIIILjava/nio/Buffer;I)V", 5, "index_bytes(a3, a4 as u32)"),
+                 ("glDrawElementsInstancedBaseVertex", "(IIILjava/nio/Buffer;II)V", 3,
+                  "index_bytes(a1, a2 as u32)")]
+        for name, descriptor, index, expected in cases:
+            self.assertEqual(needed(name, self.entries()[(name, descriptor)], index), expected, name)
+        code = emit([e for e in classify(JAVAP) if e[1] == "glDrawElementsBaseVertex"])
+        self.assertIn('buffer(env, a3, index_bytes(a1, a2 as u32), false, c"glDrawElementsBaseVertex")', code)
 
     def test_debug_message_ids_follow_their_count(self):
         kinds = self.entries()[("glDebugMessageControl", "(IIII[IIZ)V")]

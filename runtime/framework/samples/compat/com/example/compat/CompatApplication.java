@@ -149,6 +149,33 @@ public class CompatApplication extends Application {
         System.out.println("graphics31 pipeline " + android.opengl.GLES31.glIsProgramPipeline(pipelines[0])
                 + " log " + (pipelineLog != null) + " border " + java.util.Arrays.toString(border)
                 + " short border " + shortBorder);
+        // An indexed query of GL_COLOR_WRITEMASK writes four booleans, and client indices hold their
+        // count of their type: arrays and buffers shorter than that are refused before GL runs.
+        boolean[] mask = new boolean[4];
+        android.opengl.GLES32.glGetBooleani_v(android.opengl.GLES20.GL_COLOR_WRITEMASK, 0, mask, 0);
+        String shortMask;
+        try {
+            android.opengl.GLES32.glGetBooleani_v(android.opengl.GLES20.GL_COLOR_WRITEMASK, 0, new boolean[1], 0);
+            shortMask = "accepted";
+        } catch (IllegalArgumentException e) {
+            shortMask = "refused";
+        }
+        java.nio.ShortBuffer six = java.nio.ByteBuffer.allocateDirect(12)
+                .order(java.nio.ByteOrder.nativeOrder()).asShortBuffer();
+        java.nio.ShortBuffer one = java.nio.ByteBuffer.allocateDirect(2)
+                .order(java.nio.ByteOrder.nativeOrder()).asShortBuffer();
+        android.opengl.GLES32.glDrawElementsBaseVertex(android.opengl.GLES20.GL_TRIANGLES, 6,
+                android.opengl.GLES20.GL_UNSIGNED_SHORT, six, 0);
+        String shortIndices;
+        try {
+            android.opengl.GLES32.glDrawElementsBaseVertex(android.opengl.GLES20.GL_TRIANGLES, 6,
+                    android.opengl.GLES20.GL_UNSIGNED_SHORT, one, 0);
+            shortIndices = "accepted";
+        } catch (IllegalArgumentException e) {
+            shortIndices = "refused";
+        }
+        System.out.println("graphics32 mask " + java.util.Arrays.toString(mask) + " short mask " + shortMask
+                + " short indices " + shortIndices);
         egl.eglMakeCurrent(display, javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE,
                 javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE, javax.microedition.khronos.egl.EGL10.EGL_NO_CONTEXT);
         egl.eglDestroySurface(display, surface);
