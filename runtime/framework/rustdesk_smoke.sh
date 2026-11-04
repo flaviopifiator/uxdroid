@@ -14,6 +14,9 @@ WORK=$(mktemp -d)
 # Removed however the script ends, a failure before the full trap below included.
 trap 'rm -rf "$WORK"' EXIT
 APK="${RUSTDESK_APK:-/samples/rustdesk-1.5.1-universal-signed.apk}"
+# The ABI the install must pick: x86_64, or arm64-v8a for an APK with only arm64 libraries, which
+# then run translated (rustdesk_arm64_smoke.sh).
+ABI="${RUSTDESK_ABI:-x86_64}"
 PACKAGE=com.carriez.flutter_hbb
 STAGE="nothing"
 fail() {
@@ -37,8 +40,8 @@ mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
 # It also compiles the app's DEX, records its manifest and writes its default bodies.
 UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$APK" --data "$ANDROID_DATA" >"$WORK/install" 2>&1 \
     || { cat "$WORK/install"; fail "install"; }
-grep -q -E "^installed $PACKAGE: [1-9][0-9]* native libraries for x86_64 in " "$WORK/install" \
-    || { cat "$WORK/install"; fail "the install found no x86_64 libraries"; }
+grep -q -E "^installed $PACKAGE: [1-9][0-9]* native libraries for $ABI in " "$WORK/install" \
+    || { cat "$WORK/install"; fail "the install found no $ABI libraries"; }
 grep -q -E "^prepared $PACKAGE in $ANDROID_DATA/app/$PACKAGE: code compiled " "$WORK/install" \
     || { cat "$WORK/install"; fail "the install did not prepare the app"; }
 reached "installed ($(grep -o '[0-9]* native libraries' "$WORK/install"), $(grep -o '[0-9]* default bodies' "$WORK/install"))"
