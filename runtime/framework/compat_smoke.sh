@@ -87,6 +87,7 @@ expect "^activity created com\.example\.compat\.SecondActivity by action$" "an a
 expect "^no activity takes No Activity found to handle Intent$" "an intent no activity takes did not fail as on Android"
 # A PendingIntent is the same for the same request, and sending one for an activity starts it.
 expect "^pending broadcast true same true creator com\.example\.compat absent true$" "PendingIntents are not made as on Android"
+expect "^pending flags apart true first kept true canceled refused$" "a PendingIntent's flags are not part of its identity"
 expect "^activity created com\.example\.compat\.SecondActivity by pending intent$" "a PendingIntent for an activity did not start it"
 expect "^off the main thread, no activity takes it$" "a start off the main thread was told it succeeded"
 # Broadcasts inside the app: registered and manifest receivers on the main thread, an ordered one
