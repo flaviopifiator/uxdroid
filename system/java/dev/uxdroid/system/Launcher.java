@@ -454,10 +454,10 @@ public final class Launcher {
 
     /** The handler of IActivityClientController. */
     public static final class ActivityClientController {
-        /** Activity.finish: the task drops it and resumes the one below. */
+        /** Activity.finish: the task drops it, hands its result to who asked, and resumes the one below. */
         public boolean finishActivity(IBinder token, int resultCode, Intent resultData, int finishTask)
                 throws RemoteException {
-            return ActivityStack.current != null && ActivityStack.current.finish(token);
+            return ActivityStack.current != null && ActivityStack.current.finish(token, resultCode, resultData);
         }
 
         /**
@@ -483,7 +483,7 @@ public final class Launcher {
                 android.app.ProfilerInfo profilerInfo, Bundle options) throws RemoteException {
             ActivityStack stack = ActivityStack.current;
             if (stack == null) return android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
-            return stack.startFromAnyThread(intent);
+            return stack.startFromAnyThread(intent, ActivityStack.Result.of(resultTo, resultWho, requestCode));
         }
     }
 
