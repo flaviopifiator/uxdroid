@@ -371,6 +371,17 @@ fn host_function_pointers_and_callbacks_cross_as_guest_stubs_and_thunks() {
 }
 
 #[test]
+fn guest_ifuncs_resolve_with_the_guest_hwcap() {
+    if !engine_available() {
+        return;
+    }
+    let exported: extern "C" fn() -> i32 = function("spike_ifunc", "i32()");
+    assert_eq!(exported(), 8);
+    let internal: extern "C" fn() -> i32 = function("spike_call_ifunc", "i32()");
+    assert_eq!(internal(), 16);
+}
+
+#[test]
 fn raw_system_calls_run_by_their_arm64_number() {
     if !engine_available() {
         return;

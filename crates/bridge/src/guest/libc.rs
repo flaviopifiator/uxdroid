@@ -325,10 +325,8 @@ fn dl_iterate_phdr(cpu: &dyn Cpu) {
 fn getauxval(cpu: &dyn Cpu) {
     const AT_HWCAP: u64 = 16;
     const AT_HWCAP2: u64 = 26;
-    const HWCAP_FP: u64 = 1 << 0;
-    const HWCAP_ASIMD: u64 = 1 << 1;
     let value = match cpu.x(0) {
-        AT_HWCAP => HWCAP_FP | HWCAP_ASIMD,
+        AT_HWCAP => super::GUEST_HWCAP,
         AT_HWCAP2 => 0,
         // SAFETY: getauxval takes any type and returns 0 for unknown ones.
         other => unsafe { libc::getauxval(other) },

@@ -160,18 +160,13 @@ impl Library {
         let address = self.image.bias().wrapping_add(symbol.value as usize) as u64;
         match symbol.kind {
             STT_TLS => Err(ElfError::Unsupported("ELF TLS")),
-            STT_GNU_IFUNC if self.machine != Machine::X86_64 => {
-                Err(ElfError::Unsupported("ifunc in guest code"))
-            }
             STT_GNU_IFUNC => {
                 if !self.image.is_executable(symbol.value) {
                     return Err(ElfError::Malformed(
                         "ifunc resolver outside executable segments",
                     ));
                 }
-                // SAFETY: the check above proves the resolver is in this library's code, and
-                // the ELF format defines its signature.
-                Ok(unsafe { call_resolver(address) })
+                resolve_ifunc(self.machine, address)
             }
             _ => Ok(address),
         }
@@ -726,6 +721,18 @@ unsafe fn call_resolver(address: u64) -> u64 {
     }
 }
 
+/// Runs an ifunc resolver: host code directly, guest code through the engine with the guest's
+/// HWCAP.
+fn resolve_ifunc(machine: Machine, resolver: u64) -> Result<u64, ElfError> {
+    if machine != Machine::X86_64 {
+        return guest::call_ifunc(resolver)
+            .map_err(|_| ElfError::Unsupported("an ifunc resolver stopped in guest code"));
+    }
+    // SAFETY: callers check that the resolver is in an executable segment of the library, and
+    // the ELF format defines its signature.
+    Ok(unsafe { call_resolver(resolver) })
+}
+
 fn relocate(
     library: &'static Library,
     scope: &Scope,
@@ -776,8 +783,7 @@ fn relocate(
                 "ifunc resolver outside executable segments",
             ));
         }
-        // SAFETY: the check above proves the resolver is in this library's code.
-        let target = unsafe { call_resolver(bias.wrapping_add(resolver)) };
+        let target = resolve_ifunc(library.machine, bias.wrapping_add(resolver))?;
         image.write_u64(vaddr, target)?;
     }
     Ok(())
@@ -795,9 +801,6 @@ fn apply_relocation(
     let bias = image.bias() as u64;
     match Relocation::of(library.machine, rela.kind) {
         Relocation::Relative => image.write_u64(rela.offset, bias.wrapping_add_signed(rela.addend)),
-        Relocation::IRelative if library.machine != Machine::X86_64 => {
-            Err(ElfError::Unsupported("ifunc in guest code"))
-        }
         Relocation::IRelative => {
             ifuncs.push((rela.offset, rela.addend as u64));
             Ok(())

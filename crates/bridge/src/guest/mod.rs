@@ -813,6 +813,23 @@ pub(super) fn guest_context() -> (u64, usize) {
     (thread as u64, unsafe { (*thread).depth })
 }
 
+/// What arm64 code learns about its CPU: ARMv8.0 with floating point (bit 0) and Advanced SIMD
+/// (bit 1), the features every engine implements, never the host's x86 feature bits.
+pub(super) const GUEST_HWCAP: u64 = (1 << 0) | (1 << 1);
+
+/// Runs a guest ifunc resolver as bionic calls one on arm64: `HWCAP | _IFUNC_ARG_HWCAP` and an
+/// `__ifunc_arg_t` of its size, HWCAP and HWCAP2.
+pub(crate) fn call_ifunc(resolver: u64) -> Result<u64, String> {
+    const IFUNC_ARG_HWCAP: u64 = 1 << 62;
+    static ARGUMENT: [u64; 3] = [24, GUEST_HWCAP, 0];
+    call(
+        resolver,
+        &[Type::U64, Type::Ptr],
+        &[GUEST_HWCAP | IFUNC_ARG_HWCAP, ARGUMENT.as_ptr() as u64],
+    )
+    .map(|(x0, _)| x0)
+}
+
 /// Runs a guest initializer, `void(int, char**, char**)`.
 pub(crate) fn call_initializer(address: u64, environment: u64) -> Result<(), String> {
     call(

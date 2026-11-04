@@ -353,6 +353,24 @@ __attribute__((visibility("default"))) int spike_looper(void) {
     return add == nullptr ? -1 : add(nullptr, 5, 0, 1, on_fd, reinterpret_cast<void*>(0x10));
 }
 
+// --- ifuncs, resolved by the guest's own resolver with the guest's HWCAP ---
+
+static int answer_base(void) { return 8; }
+static int answer_atomics(void) { return 81; }
+
+// HWCAP_ATOMICS is bit 8: the bridge reports ARMv8.0 with FP and ASIMD only.
+__attribute__((visibility("hidden"))) void* resolve_answer(uint64_t hwcap) {
+    return (hwcap & (1ULL << 8)) ? reinterpret_cast<void*>(answer_atomics)
+                                 : reinterpret_cast<void*>(answer_base);
+}
+
+static int hidden_answer(void) __attribute__((ifunc("resolve_answer")));
+
+// Exported, found through its symbol; the hidden one is called through an IRELATIVE slot.
+__attribute__((visibility("default"))) int spike_ifunc(void) __attribute__((ifunc("resolve_answer")));
+
+__attribute__((visibility("default"))) int spike_call_ifunc(void) { return hidden_answer() * 2; }
+
 // A system call made directly, as Go, Rust's std and hand-written assembly do: `svc #0` with the
 // arm64 number in x8.
 static long raw_syscall(long number) {
