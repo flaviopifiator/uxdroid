@@ -25,6 +25,16 @@ public class CompatActivity extends Activity {
         } catch (android.content.ActivityNotFoundException e) {
             System.out.println("no activity takes " + e.getMessage().replaceAll(" \\{.*", ""));
         }
+        // From another thread, the answer still comes from the task, not a blind success.
+        Thread start = new Thread(() -> {
+            try {
+                startActivity(new android.content.Intent("com.example.compat.NOBODY"));
+                System.out.println("started off the main thread an intent no activity takes");
+            } catch (android.content.ActivityNotFoundException e) {
+                System.out.println("off the main thread, no activity takes it");
+            }
+        });
+        start.start();
     }
 
     /** Loop Habit Tracker makes PendingIntents for its reminders and widgets. */

@@ -157,9 +157,10 @@ final class ActivityStack {
      * intent for one of the app's activities starts as {@link #start} does, with FLAG_ACTIVITY_CLEAR_TASK
      * first finishing the task; one for another app's activity, or that none of the app's takes, has no
      * activity here, since no other app is installed, and fails with ActivityNotFoundException.
-     * Results of startActivityForResult are not delivered yet.
+     * Results of startActivityForResult are not delivered yet. With {@code check}, only the manifest is
+     * read, so any thread may ask, and an intent the app takes answers START_SUCCESS without starting.
      */
-    int startFromApp(Intent intent) throws RemoteException {
+    int startFromApp(Intent intent, boolean check) throws RemoteException {
         ComponentName component = intent.getComponent();
         String packageName = app.application.packageName;
         if (component != null && !component.getPackageName().equals(packageName)) {
@@ -175,6 +176,7 @@ final class ActivityStack {
             return component != null ? android.app.ActivityManager.START_CLASS_NOT_FOUND
                     : android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
         }
+        if (check) return android.app.ActivityManager.START_SUCCESS;
         int flags = intent.getFlags();
         if ((flags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0 && (flags & Intent.FLAG_ACTIVITY_CLEAR_TASK) != 0) {
             while (!entries.isEmpty()) destroy(entries.get(entries.size() - 1));
