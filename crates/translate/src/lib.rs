@@ -5,16 +5,20 @@
 //! opened with `dlopen` the first time a guest library loads, so a process with host libraries only
 //! never maps it. `UXDROID_TRANSLATOR` names the file; without it, the library is looked for next
 //! to the one this crate is linked into.
+//!
+//! Every guest CPU of the process runs code from one shared code cache, so a block is translated
+//! once, not again on each thread; the locking rules are at the top of `shim/dynarmic_shim.cpp`.
 #![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use uxdroid_bridge::guest::{Cpu, Engine, Supervisor, set_engine_loader};
 
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 const LIBRARY: &str = "libuxdroid_dynarmic.so";
 /// Dynarmic's `HaltReason` bits that `uxd_cpu_run` returns.
 const HALT_CACHE_INVALIDATION: u32 = 0x0000_0002;
@@ -24,6 +28,55 @@ const HALT_USER_DEFINED_1: u32 = 0x0100_0000;
 /// Makes the bridge load this engine for the first guest library.
 pub fn install() {
     set_engine_loader(load);
+}
+
+/// What the engine has translated, process-wide.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct Stats {
+    /// Blocks translated, in every code cache.
+    pub blocks: u64,
+    /// Bytes of translated code in the current code cache.
+    pub code_bytes: u64,
+    /// Code caches made: one, plus one each time a cache was full or retired.
+    pub caches: u64,
+    /// Times the code at the address given to [`watch_translations`] was read to translate it.
+    pub watched_translations: u64,
+}
+
+/// The loaded engine's functions; none before the first guest library loads.
+static LOADED: OnceLock<&'static Api> = OnceLock::new();
+
+/// The engine's counters, once it is loaded.
+pub fn stats() -> Option<Stats> {
+    let api = LOADED.get()?;
+    let mut stats = Stats::default();
+    // SAFETY: the shim fills the struct it is given, which has its layout.
+    unsafe { (api.stats)(&mut stats) };
+    Some(stats)
+}
+
+/// Counts, from now on, each time the guest code at `address` is translated, for
+/// [`Stats::watched_translations`]. One address is watched at a time.
+pub fn watch_translations(address: u64) -> bool {
+    let Some(api) = LOADED.get() else {
+        return false;
+    };
+    // SAFETY: a plain value; the shim only compares addresses with it.
+    unsafe { (api.watch)(address) };
+    true
+}
+
+/// Makes the current code cache take no more code, as when it is full, and starts a new one: each
+/// thread moves to it when it next enters guest code, or at the first block the old cache lacks,
+/// and the old one is freed when its last thread has left it.
+pub fn retire_code_cache() -> bool {
+    let Some(api) = LOADED.get() else {
+        return false;
+    };
+    // SAFETY: no arguments; the shim takes its own lock.
+    unsafe { (api.retire_cache)() };
+    true
 }
 
 #[repr(C)]
@@ -51,6 +104,9 @@ struct Api {
     set_pc: unsafe extern "C" fn(*mut RawCpu, u64),
     get_v: unsafe extern "C" fn(*const RawCpu, u32, *mut u64),
     set_v: unsafe extern "C" fn(*mut RawCpu, u32, *const u64),
+    stats: unsafe extern "C" fn(*mut Stats),
+    watch: unsafe extern "C" fn(u64),
+    retire_cache: unsafe extern "C" fn(),
 }
 
 fn library_path() -> PathBuf {
@@ -101,9 +157,11 @@ fn load() -> Result<Box<dyn Engine>, String> {
     // below refuses a library made for another interface.
     let api = unsafe { api(&symbol) };
     match api {
-        Ok(api) => Ok(Box::new(Dynarmic {
-            api: Box::leak(Box::new(api)),
-        })),
+        Ok(api) => {
+            let api: &'static Api = Box::leak(Box::new(api));
+            let _ = LOADED.set(api);
+            Ok(Box::new(Dynarmic { api }))
+        }
         Err(reason) => {
             // SAFETY: the handle is open, and nothing of the library is in use.
             unsafe { libc::dlclose(handle) };
@@ -136,6 +194,9 @@ unsafe fn api(symbol: &dyn Fn(&CStr) -> Result<*mut c_void, String>) -> Result<A
             set_pc: cast(symbol(c"uxd_set_pc")?),
             get_v: cast(symbol(c"uxd_get_v")?),
             set_v: cast(symbol(c"uxd_set_v")?),
+            stats: cast(symbol(c"uxd_stats_get")?),
+            watch: cast(symbol(c"uxd_watch")?),
+            retire_cache: cast(symbol(c"uxd_retire_cache")?),
         })
     }
 }
@@ -282,7 +343,8 @@ impl Cpu for DynarmicCpu {
             if reason & HALT_USER_DEFINED_1 != 0 {
                 return Ok(());
             }
-            // Another thread invalidated translated code; the guest goes on where it was.
+            // A run broken off to invalidate code goes on where it was. The shim never asks for
+            // one now (its caches are never invalidated), but the reason stays harmless.
             if reason == HALT_CACHE_INVALIDATION {
                 continue;
             }
@@ -351,6 +413,9 @@ mod tests {
     unsafe extern "C" fn set_x(_: *mut RawCpu, _: u32, _: u64) {}
     unsafe extern "C" fn get_v(_: *const RawCpu, _: u32, _: *mut u64) {}
     unsafe extern "C" fn set_v(_: *mut RawCpu, _: u32, _: *const u64) {}
+    unsafe extern "C" fn stats(_: *mut Stats) {}
+    unsafe extern "C" fn watch(_: u64) {}
+    unsafe extern "C" fn retire_cache() {}
     fn supervisor(_: &dyn Cpu, _: u32) -> bool {
         true
     }
@@ -376,6 +441,9 @@ mod tests {
                 set_pc: set,
                 get_v,
                 set_v,
+                stats,
+                watch,
+                retire_cache,
             })),
         }
     }

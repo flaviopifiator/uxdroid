@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <atomic>
 #include <stdexcept>
 
 extern "C" {
@@ -556,6 +557,61 @@ __attribute__((visibility("default"))) jint Java_dev_uxdroid_Spike_assets(JNIEnv
     return from_java == nullptr
                ? -1
                : static_cast<jint>(reinterpret_cast<intptr_t>(from_java(env, manager)));
+}
+
+// Code no other case runs, so a test can count how often it is translated.
+__attribute__((visibility("default"))) int spike_shared_code(int rounds) {
+    int sum = 0;
+    for (int i = 0; i < rounds; ++i) {
+        sum += (i * 7) ^ (sum >> 3);
+    }
+    return sum;
+}
+
+// Retires the engine's code cache from a host call, through a function of the test's GLES table,
+// then runs code this run has not reached yet, which the retired cache lacks.
+__attribute__((visibility("default"))) int spike_retire_mid_run(int rounds) {
+    void* egl = dlopen("libEGL.so", RTLD_NOW);
+    auto get = reinterpret_cast<void* (*)(const char*)>(dlsym(egl, "eglGetProcAddress"));
+    auto retire = get == nullptr ? nullptr : reinterpret_cast<void (*)()>(get("glUxdroidRetireCodeCache"));
+    if (retire == nullptr) {
+        return -1;
+    }
+    retire();
+    int sum = 1;
+    for (int i = 0; i < rounds; ++i) {
+        sum = sum * 31 + (i ^ rounds);
+    }
+    return sum;
+}
+
+static std::atomic<int> shared_counter{0};
+
+static void* count_worker(void* argument) {
+    const int iterations = *static_cast<int*>(argument);
+    for (int i = 0; i < iterations; ++i) {
+        // ARMv8.0 has no LSE atomics, so this is an exclusive load and store loop.
+        shared_counter.fetch_add(1, std::memory_order_relaxed);
+    }
+    return nullptr;
+}
+
+// Guest threads adding to one counter at once. Returns the total.
+__attribute__((visibility("default"))) int spike_atomic_count(int threads, int iterations) {
+    pthread_t running[16];
+    if (threads > 16) {
+        return -1;
+    }
+    shared_counter.store(0);
+    for (int i = 0; i < threads; ++i) {
+        if (pthread_create(&running[i], nullptr, count_worker, &iterations) != 0) {
+            return -2;
+        }
+    }
+    for (int i = 0; i < threads; ++i) {
+        pthread_join(running[i], nullptr);
+    }
+    return shared_counter.load();
 }
 
 }  // extern "C"

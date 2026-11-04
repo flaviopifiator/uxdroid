@@ -112,13 +112,24 @@ static FAKE_EGL: Table = Table {
     )],
 };
 
+extern "C" fn fake_retire_code_cache() {
+    assert!(uxdroid_translate::retire_code_cache());
+}
+
 static FAKE_GLES: Table = Table {
     library: "libGLESv2.so",
-    exports: &[Export::function(
-        c"glUxdroidMultiply",
-        "i32(i32,i32)",
-        fake_multiply as *const (),
-    )],
+    exports: &[
+        Export::function(
+            c"glUxdroidMultiply",
+            "i32(i32,i32)",
+            fake_multiply as *const (),
+        ),
+        Export::function(
+            c"glUxdroidRetireCodeCache",
+            "void()",
+            fake_retire_code_cache as *const (),
+        ),
+    ],
 };
 
 /// 7 when called with the host's env, as the host's `AAssetManager_fromJava` must be.
@@ -237,6 +248,79 @@ fn a_guest_thread_runs_with_its_own_thread_local() {
     let thread: extern "C" fn(i32) -> i32 = function("spike_thread", "i32(i32)");
     // The worker returns 21 * 2 + its fresh counter (0) + 5; the main thread's stays at 100.
     assert_eq!(thread(21), 47 + 100_000);
+}
+
+/// What `spike_shared_code` computes, on the host.
+fn shared_code(rounds: i32) -> i32 {
+    let mut sum = 0i32;
+    for i in 0..rounds {
+        sum = sum.wrapping_add(i.wrapping_mul(7) ^ (sum >> 3));
+    }
+    sum
+}
+
+/// The only case that watches or retires: the counts below would see other cases' doing.
+#[test]
+fn code_translated_once_is_run_by_every_thread_until_its_cache_retires() {
+    if !engine_available() {
+        return;
+    }
+    let entry = library().symbol("spike_shared_code").unwrap() as u64;
+    assert!(uxdroid_translate::watch_translations(entry));
+    let run: extern "C" fn(i32) -> i32 = function("spike_shared_code", "i32(i32)");
+    let expected = shared_code(1000);
+    let translations = || uxdroid_translate::stats().unwrap().watched_translations;
+
+    assert_eq!(
+        std::thread::spawn(move || run(1000)).join().unwrap(),
+        expected
+    );
+    assert_eq!(translations(), 1);
+
+    // Eight threads at once, new to guest code, each with its own CPUs: none translates it again.
+    let threads: Vec<_> = (0..8)
+        .map(|_| std::thread::spawn(move || (0..200).all(|_| run(1000) == expected)))
+        .collect();
+    for thread in threads {
+        assert!(thread.join().unwrap());
+    }
+    assert_eq!(translations(), 1);
+
+    // A retired cache takes no more code and a new one starts: the next thread entering guest
+    // code runs from it, where the code is translated once more.
+    let before = uxdroid_translate::stats().unwrap();
+    assert!(uxdroid_translate::retire_code_cache());
+    assert_eq!(
+        std::thread::spawn(move || run(1000)).join().unwrap(),
+        expected
+    );
+    let after = uxdroid_translate::stats().unwrap();
+    assert!(after.caches > before.caches, "{before:?} then {after:?}");
+    assert_eq!(after.watched_translations, 2);
+    assert_eq!(run(1000), expected);
+
+    // Retired while guest code runs, inside one of its host calls: the run stops at the first
+    // block the old cache lacks, moves to the new cache and goes on at the same instruction.
+    let mid_run: extern "C" fn(i32) -> i32 = function("spike_retire_mid_run", "i32(i32)");
+    let caches = uxdroid_translate::stats().unwrap().caches;
+    let mut sum = 1i32;
+    for i in 0..500 {
+        sum = sum.wrapping_mul(31).wrapping_add(i ^ 500);
+    }
+    assert_eq!(
+        std::thread::spawn(move || mid_run(500)).join().unwrap(),
+        sum
+    );
+    assert!(uxdroid_translate::stats().unwrap().caches > caches);
+}
+
+#[test]
+fn guest_threads_add_to_one_counter_with_exclusive_stores() {
+    if !engine_available() {
+        return;
+    }
+    let count: extern "C" fn(i32, i32) -> i32 = function("spike_atomic_count", "i32(i32,i32)");
+    assert_eq!(count(8, 20_000), 160_000);
 }
 
 #[test]
