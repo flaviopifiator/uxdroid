@@ -85,12 +85,9 @@ grep -q "STDERR: .*STDERR: " "$WORK/out" && fail "the log loops through the app'
 expect "^activity created com\.example\.compat\.SecondActivity by class$" "an activity the app started by class was not made"
 expect "^activity created com\.example\.compat\.SecondActivity by action$" "an activity the app started by action was not made"
 expect "^no activity takes No Activity found to handle Intent$" "an intent no activity takes did not fail as on Android"
-<<<<<<< HEAD
 # A PendingIntent is the same for the same request, and sending one for an activity starts it.
 expect "^pending broadcast true same true creator com\.example\.compat absent true$" "PendingIntents are not made as on Android"
 expect "^activity created com\.example\.compat\.SecondActivity by pending intent$" "a PendingIntent for an activity did not start it"
-=======
 expect "^off the main thread, no activity takes it$" "a start off the main thread was told it succeeded"
->>>>>>> 85e61eb (fix(system): answer a start from another thread from the manifest, not with a blind success)
 expect "^launched com\.example\.compat/\.CompatActivity " "the activity was not launched"
 echo "ok: the app has its own identity, storage and the system services the corpus asks for"
