@@ -170,6 +170,26 @@ const FORMAT_FUNCTIONS: &[&str] = &[
     "syslog",
 ];
 
+/// `v` functions of the printf family and the variadic function that serves each: the guest's
+/// `va_list` is read by the format and the twin gets the arguments as if called directly.
+const VARIADIC_TWINS: &[(&str, &str)] = &[
+    ("vprintf", "printf"),
+    ("vfprintf", "fprintf"),
+    ("vsprintf", "sprintf"),
+    ("vsnprintf", "snprintf"),
+    ("vdprintf", "dprintf"),
+    ("vasprintf", "asprintf"),
+    ("vsyslog", "syslog"),
+    ("__android_log_vprint", "__android_log_print"),
+];
+
+pub(super) fn variadic_twin(name: &str) -> Option<&'static str> {
+    VARIADIC_TWINS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|&(_, twin)| twin)
+}
+
 type Special = fn(&dyn Cpu);
 
 const SPECIALS: &[(&str, Special)] = &[

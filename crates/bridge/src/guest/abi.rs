@@ -97,6 +97,50 @@ pub fn normalize(kind: Type, raw: u64) -> u64 {
     }
 }
 
+/// A guest `va_list`, AAPCS64's `__va_list`: the next stack argument, the tops of the general and
+/// vector register save areas, and negative offsets from each top while saved registers remain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuestVaList {
+    pub stack: u64,
+    pub gr_top: u64,
+    pub vr_top: u64,
+    pub gr_offs: i32,
+    pub vr_offs: i32,
+}
+
+impl GuestVaList {
+    /// From the struct's four little-endian words.
+    pub fn from_words(words: [u64; 4]) -> GuestVaList {
+        GuestVaList {
+            stack: words[0],
+            gr_top: words[1],
+            vr_top: words[2],
+            gr_offs: words[3] as u32 as i32,
+            vr_offs: (words[3] >> 32) as u32 as i32,
+        }
+    }
+
+    /// Where the next argument of `class` is, as `va_arg` finds it, and moves past it. Every type
+    /// the bridge reads is 8 bytes: integers and pointers, and doubles (a variadic float is
+    /// promoted), the low half of a 16-byte vector slot.
+    pub fn next(&mut self, class: Class) -> u64 {
+        let (offset, top, step) = match class {
+            Class::Integer => (&mut self.gr_offs, self.gr_top, 8),
+            Class::Vector => (&mut self.vr_offs, self.vr_top, 16),
+        };
+        if *offset < 0 {
+            let at = *offset;
+            *offset = at.saturating_add(step);
+            if *offset <= 0 {
+                return top.wrapping_add_signed(i64::from(at));
+            }
+        }
+        let address = self.stack;
+        self.stack = self.stack.wrapping_add(8);
+        address
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +188,28 @@ mod tests {
         assert_eq!(Class::of(Type::VaList), None);
         assert_eq!(Class::of(Type::F32), Some(V));
         assert_eq!(Class::of(Type::U16), Some(I));
+    }
+
+    #[test]
+    fn a_va_list_takes_saved_registers_then_the_stack_per_class() {
+        // Two general and one vector register left, as after `f(a, b, c, d, e, f, ...)` with
+        // one double already read.
+        let mut list = GuestVaList::from_words([
+            0x9000,
+            0x8000,
+            0x7000,
+            (-32i64 as u64) << 32 | (-16i32 as u32 as u64),
+        ]);
+        assert_eq!(list.gr_offs, -16);
+        assert_eq!(list.vr_offs, -32);
+        assert_eq!(list.next(I), 0x8000 - 16);
+        assert_eq!(list.next(V), 0x7000 - 32);
+        assert_eq!(list.next(I), 0x8000 - 8);
+        assert_eq!(list.next(V), 0x7000 - 16);
+        // Both save areas are used up: the stack, in argument order, 8 bytes each.
+        assert_eq!(list.next(I), 0x9000);
+        assert_eq!(list.next(V), 0x9008);
+        assert_eq!(list.next(I), 0x9010);
+        assert_eq!(list.gr_offs, 0);
     }
 }

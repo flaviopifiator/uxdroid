@@ -195,6 +195,33 @@ fn variadic_host_calls_follow_the_format() {
 }
 
 #[test]
+fn a_guest_va_list_is_read_from_its_save_areas_and_stack() {
+    if !engine_available() {
+        return;
+    }
+    let format: extern "C" fn(*mut c_char, usize) -> i32 =
+        function("spike_vformat", "i32(ptr,u64)");
+    let mut buffer = [0 as c_char; 160];
+    let written = format(buffer.as_mut_ptr(), buffer.len());
+    // SAFETY: vsnprintf terminated the buffer.
+    let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_str().unwrap();
+    assert_eq!(
+        text,
+        "1 2 3 4 5 6 7 8 9000000000|0.5 1.5 2.5 3.5 4.5 5.5 6.5 7.5 8.5 9.5|end"
+    );
+    assert_eq!(written as usize, text.len());
+
+    let allocate: extern "C" fn() -> *mut c_char = function("spike_vasprintf", "ptr()");
+    let text = allocate();
+    assert!(!text.is_null());
+    // SAFETY: vasprintf made a C string with the process' malloc.
+    unsafe {
+        assert_eq!(CStr::from_ptr(text).to_str(), Ok("va-7-0.125"));
+        libc::free(text.cast());
+    }
+}
+
+#[test]
 fn raw_system_calls_run_by_their_arm64_number() {
     if !engine_available() {
         return;
@@ -213,6 +240,8 @@ fn guest_log_child() {
     }
     let log: extern "C" fn() -> i32 = function("spike_log", "i32()");
     assert!(log() > 0);
+    let vlog: extern "C" fn() -> i32 = function("spike_vlog", "i32()");
+    assert!(vlog() > 0);
 }
 
 #[test]
@@ -236,6 +265,7 @@ fn android_log_print_reaches_the_log() {
         stderr.contains("spike: int 42, string guest, double 2.50, long 1234567890123"),
         "{stderr}"
     );
+    assert!(stderr.contains("spike: vprint carried 64 0.5"), "{stderr}");
 }
 
 // --- A host JNI for the guest library, as ART would provide ---
@@ -304,11 +334,108 @@ extern "C" fn new_string_utf(_env: *mut Env, chars: *const c_char) -> usize {
     CString::into_raw(text) as usize
 }
 
+/// Method IDs of the test's Java class, by name.
+const METHODS: [&str; 4] = ["sum", "twice", "triple", "<init>"];
+
+extern "C" fn get_method_id(
+    _env: *mut Env,
+    class: usize,
+    name: *const c_char,
+    _sig: *const c_char,
+) -> usize {
+    assert_eq!(class, CLASS);
+    // SAFETY: JNI passes a C string.
+    let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
+    METHODS
+        .iter()
+        .position(|known| *known == name)
+        .map_or(0, |index| index + 1)
+}
+
+/// What the test's Java methods return, read from a `jvalue` array by each one's descriptor.
+fn evaluate(method: usize, arguments: *const u64) -> f64 {
+    // SAFETY: the bridge passes one jvalue per parameter of the method.
+    let argument = |index: usize| unsafe { *arguments.add(index) };
+    match METHODS[method - 1] {
+        "sum" => {
+            f64::from(argument(0) as i32)
+                + argument(1) as i64 as f64
+                + f64::from_bits(argument(2))
+                + f64::from(f32::from_bits(argument(3) as u32))
+                + f64::from(argument(4) as u8)
+                + f64::from(argument(5) as i8)
+                + f64::from(argument(6) as u16)
+                + f64::from(argument(7) as i16)
+        }
+        "twice" => f64::from(argument(0) as i32 * 2),
+        "triple" => (argument(0) as i64 * 3) as f64,
+        "<init>" => f64::from(argument(0) as i32),
+        other => panic!("{other}"),
+    }
+}
+
+extern "C" fn call_double_a(
+    _env: *mut Env,
+    _this: usize,
+    method: usize,
+    arguments: *const u64,
+) -> f64 {
+    evaluate(method, arguments)
+}
+
+extern "C" fn call_int_a(
+    _env: *mut Env,
+    _this: usize,
+    method: usize,
+    arguments: *const u64,
+) -> i32 {
+    evaluate(method, arguments) as i32
+}
+
+extern "C" fn call_long_a(
+    _env: *mut Env,
+    _this: usize,
+    method: usize,
+    arguments: *const u64,
+) -> i64 {
+    evaluate(method, arguments) as i64
+}
+
+extern "C" fn call_nonvirtual_int_a(
+    _env: *mut Env,
+    _this: usize,
+    class: usize,
+    method: usize,
+    arguments: *const u64,
+) -> i32 {
+    assert_eq!(class, CLASS);
+    evaluate(method, arguments) as i32
+}
+
+/// A made object is the constructor's argument, which the guest adds to its total.
+extern "C" fn new_object_a(
+    _env: *mut Env,
+    class: usize,
+    method: usize,
+    arguments: *const u64,
+) -> usize {
+    assert_eq!(class, CLASS);
+    evaluate(method, arguments) as usize
+}
+
 fn host_env() -> *mut Env {
     static ENV: OnceLock<usize> = OnceLock::new();
     *ENV.get_or_init(|| {
         let mut table = vec![0usize; 233];
         table[6] = find_class as *const () as usize;
+        table[30] = new_object_a as *const () as usize;
+        table[33] = get_method_id as *const () as usize;
+        table[51] = call_int_a as *const () as usize;
+        table[60] = call_double_a as *const () as usize;
+        table[81] = call_nonvirtual_int_a as *const () as usize;
+        table[113] = get_method_id as *const () as usize;
+        table[131] = call_int_a as *const () as usize;
+        table[134] = call_long_a as *const () as usize;
         table[167] = new_string_utf as *const () as usize;
         table[169] = get_string_utf_chars as *const () as usize;
         table[170] = release_string_utf_chars as *const () as usize;
@@ -409,4 +536,21 @@ fn natives_found_by_name_use_the_shorty_art_passes() {
     let scale: extern "C" fn(*mut Env, usize, i64, i32) -> i64 =
         unsafe { std::mem::transmute(trampoline) };
     assert_eq!(scale(host_env(), CLASS, 6_000_000_000, 7), 42_000_000_000);
+}
+
+#[test]
+fn guest_calls_into_java_carry_every_argument_form() {
+    if !engine_available() {
+        return;
+    }
+    let trampoline =
+        jni_trampoline(library(), "Java_dev_uxdroid_Spike_jniCalls", Some(b"D")).unwrap();
+    // SAFETY: the C signature of shorty D on an instance method.
+    let calls: extern "C" fn(*mut Env, usize) -> f64 = unsafe { std::mem::transmute(trampoline) };
+    // sum 59.75, twice(21) by va_list, triple(14) static, twice(4) by jvalue, twice(5) nonvirtual,
+    // and the object made from 9.
+    assert_eq!(
+        calls(host_env(), 0x0b1ec7),
+        59.75 + 42.0 + 42.0 + 8.0 + 10.0 + 9.0
+    );
 }

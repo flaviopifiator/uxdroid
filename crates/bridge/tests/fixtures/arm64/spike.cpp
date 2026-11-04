@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <jni.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,6 +91,52 @@ __attribute__((visibility("default"))) int spike_format(char* out, size_t size) 
                     1234567890123L);
 }
 
+// --- va_list: the guest's own, read by the bridge ---
+
+static int format_v(char* out, size_t size, const char* format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    int written = vsnprintf(out, size, format, arguments);
+    va_end(arguments);
+    return written;
+}
+
+// Nine integers and ten doubles after three fixed arguments: the va_list holds some of each in its
+// register save areas and the rest, interleaved, on the stack.
+__attribute__((visibility("default"))) int spike_vformat(char* out, size_t size) {
+    return format_v(out, size, "%d %d %d %d %d %d %d %d %ld|%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f|%s",
+                    1, 2, 3, 4, 5, 6, 7, 8, 9000000000L, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5,
+                    9.5, "end");
+}
+
+static char* allocate_v(const char* format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    char* text = nullptr;
+    if (vasprintf(&text, format, arguments) < 0) {
+        text = nullptr;
+    }
+    va_end(arguments);
+    return text;
+}
+
+// A string the host frees with its own free(), which is the guest's.
+__attribute__((visibility("default"))) char* spike_vasprintf(void) {
+    return allocate_v("%s-%d-%.3f", "va", 7, 0.125);
+}
+
+static int log_v(const char* format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    int written = __android_log_vprint(ANDROID_LOG_WARN, "spike", format, arguments);
+    va_end(arguments);
+    return written;
+}
+
+__attribute__((visibility("default"))) int spike_vlog(void) {
+    return log_v("vprint %s %d %.1f", "carried", 64, 0.5);
+}
+
 // A system call made directly, as Go, Rust's std and hand-written assembly do: `svc #0` with the
 // arm64 number in x8.
 static long raw_syscall(long number) {
@@ -141,6 +188,36 @@ __attribute__((visibility("default"))) jint JNI_OnLoad(JavaVM* vm, void*) {
         return JNI_ERR;
     }
     return JNI_VERSION_1_6;
+}
+
+static jint call_int_v(JNIEnv* env, jobject self, jmethodID method, ...) {
+    va_list arguments;
+    va_start(arguments, method);
+    jint result = env->CallIntMethodV(self, method, arguments);
+    va_end(arguments);
+    return result;
+}
+
+// Every way to call Java from native code: variadic, va_list and jvalue array, on instance, static
+// and nonvirtual methods and a constructor. Narrow and float arguments are promoted in the
+// variadic forms, and the bridge narrows them again by the method's descriptor.
+__attribute__((visibility("default"))) jdouble Java_dev_uxdroid_Spike_jniCalls(JNIEnv* env, jobject self) {
+    jclass type = env->FindClass("dev/uxdroid/Spike");
+    jmethodID sum = env->GetMethodID(type, "sum", "(IJDFZBCS)D");
+    jmethodID twice = env->GetMethodID(type, "twice", "(I)I");
+    jmethodID triple = env->GetStaticMethodID(type, "triple", "(J)J");
+    jmethodID make = env->GetMethodID(type, "<init>", "(I)V");
+    jdouble total = env->CallDoubleMethod(self, sum, 1, jlong(2), 0.5, 0.25f, JNI_TRUE, jbyte(-3),
+                                          jchar(65), jshort(-7));
+    total += call_int_v(env, self, twice, 21);
+    total += double(env->CallStaticLongMethod(type, triple, jlong(14)));
+    jvalue four[1];
+    four[0].i = 4;
+    total += env->CallStaticIntMethodA(type, twice, four);
+    total += env->CallNonvirtualIntMethod(self, type, twice, 5);
+    jobject made = env->NewObject(type, make, 9);
+    total += double(reinterpret_cast<intptr_t>(made));
+    return total;
 }
 
 // Found by name, as ART finds natives nobody registered.

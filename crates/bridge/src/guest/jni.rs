@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
+use super::abi::{Class, guest_layout};
 use super::jni_table::FUNCTIONS;
 use super::{Cpu, Kind, Service, Target, add_service, callback, host_service};
 use crate::loader::Library;
+use crate::table::{Signature, Type};
 
 /// A guest `JNIEnv`: guest code reads `functions`; `host` is the env it stands for.
 #[repr(C)]
@@ -56,10 +58,15 @@ fn env_table() -> u64 {
                     (_, None) => return 0,
                     ("RegisterNatives", _) => add_service(Service::Special(register_natives)),
                     ("GetJavaVM", _) => add_service(Service::Special(get_java_vm)),
-                    (_, Some(signature)) if signature.ends_with(",...)") => {
-                        add_service(Service::Missing(format!(
-                            "JNIEnv::{name}, variadic over a method's arguments"
-                        )))
+                    ("GetMethodID", _) => add_service(Service::Special(get_method_id)),
+                    ("GetStaticMethodID", _) => add_service(Service::Special(get_static_method_id)),
+                    (_, Some(signature))
+                        if signature.ends_with(",...)") || signature.ends_with(",va_list)") =>
+                    {
+                        match MethodCall::of(name) {
+                            Some(call) => add_service(Service::JniCall(call)),
+                            None => add_service(Service::Missing(format!("JNIEnv::{name}"))),
+                        }
                     }
                     (_, Some(signature)) => {
                         host_service(&format!("JNIEnv::{name}"), Target::JniEnv(index), signature)
@@ -277,6 +284,161 @@ fn attach_with(cpu: &dyn Cpu, slot: usize) {
     cpu.set_x(0, status as i64 as u64);
 }
 
+/// A `Call*Method` (variadic) or `Call*MethodV` (`va_list`), served by its `A` form, which takes
+/// the method's arguments as a `jvalue` array the bridge builds.
+pub(super) struct MethodCall {
+    name: &'static str,
+    a_slot: usize,
+    /// The env, object or class, nonvirtual's class, and the method ID.
+    fixed: usize,
+    returns: Type,
+    va_list: bool,
+}
+
+impl MethodCall {
+    fn of(name: &'static str) -> Option<MethodCall> {
+        let (base, va_list) = match name.strip_suffix('V') {
+            Some(base) => (base, true),
+            None => (name, false),
+        };
+        let a_name = format!("{base}A");
+        let a_slot = FUNCTIONS.iter().position(|(known, _)| *known == a_name)?;
+        let Ok(Signature::Function {
+            returns,
+            parameters,
+            variadic: false,
+        }) = Signature::parse(FUNCTIONS[a_slot].1?)
+        else {
+            return None;
+        };
+        Some(MethodCall {
+            name,
+            a_slot,
+            fixed: parameters.len().checked_sub(1)?,
+            returns,
+            va_list,
+        })
+    }
+}
+
+/// The parameters of each method ID the guest got from `GetMethodID` or `GetStaticMethodID`, as
+/// shorty letters: the descriptor is what tells where a variadic call's arguments are.
+static METHOD_PARAMETERS: Mutex<Option<HashMap<u64, Box<[u8]>>>> = Mutex::new(None);
+
+fn get_method_id(cpu: &dyn Cpu) {
+    method_id(cpu, slot("GetMethodID"));
+}
+
+fn get_static_method_id(cpu: &dyn Cpu) {
+    method_id(cpu, slot("GetStaticMethodID"));
+}
+
+fn method_id(cpu: &dyn Cpu, slot: usize) {
+    type GetMethodId = unsafe extern "C" fn(u64, u64, u64, u64) -> u64;
+    let host = host_env(cpu.x(0));
+    let function = env_function(host, slot);
+    if function == 0 {
+        super::fail(
+            cpu,
+            format_args!("JNIEnv slot {slot} is null in the host table"),
+        );
+    }
+    // SAFETY: the host's Get(Static)MethodID with the host env and the guest's class, name and
+    // descriptor, which are host values as guest pointers are host pointers.
+    let method = unsafe {
+        std::mem::transmute::<usize, GetMethodId>(function as usize)(
+            host,
+            cpu.x(1),
+            cpu.x(2),
+            cpu.x(3),
+        )
+    };
+    if method != 0 {
+        // SAFETY: the JNI contract makes the descriptor a C string; the read is bounded.
+        let descriptor = unsafe { super::native::c_string(cpu.x(3), MAX_SIGNATURE_BYTES) };
+        if let Some(shorty) = descriptor_shorty(descriptor) {
+            METHOD_PARAMETERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get_or_insert_with(HashMap::new)
+                .insert(method, shorty[1..].into());
+        }
+    }
+    cpu.set_x(0, method);
+}
+
+/// A `jvalue` from a variadic argument as C promotes it: narrow integers arrive as `int` and a
+/// `float` as `double`.
+fn jvalue(letter: u8, raw: u64) -> u64 {
+    match letter {
+        b'Z' => u64::from(raw as u8),
+        b'B' => raw as i8 as i64 as u64,
+        b'C' => u64::from(raw as u16),
+        b'S' => raw as i16 as i64 as u64,
+        b'I' => raw as i32 as i64 as u64,
+        b'F' => u64::from((f64::from_bits(raw) as f32).to_bits()),
+        _ => raw,
+    }
+}
+
+pub(super) fn call_method(cpu: &dyn Cpu, call: &MethodCall) {
+    let method = cpu.x(call.fixed - 1);
+    let parameters = METHOD_PARAMETERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .and_then(|known| known.get(&method).cloned());
+    let Some(parameters) = parameters else {
+        super::fail(
+            cpu,
+            format_args!(
+                "JNIEnv::{} with a method ID not made by GetMethodID or GetStaticMethodID, whose descriptor the bridge cannot know",
+                call.name
+            ),
+        );
+    };
+    let classes: Vec<Class> = parameters
+        .iter()
+        .map(|&letter| match letter {
+            b'F' | b'D' => Class::Vector,
+            _ => Class::Integer,
+        })
+        .collect();
+    let raw = if call.va_list {
+        super::va_arguments(cpu, call.name, cpu.x(call.fixed), &classes)
+    } else {
+        let mut all = vec![Class::Integer; call.fixed];
+        all.extend(&classes);
+        guest_layout(&all).slots[call.fixed..]
+            .iter()
+            .map(|&slot| super::read_slot(cpu, slot))
+            .collect()
+    };
+    let arguments: Vec<u64> = parameters
+        .iter()
+        .zip(raw)
+        .map(|(&letter, raw)| jvalue(letter, raw))
+        .collect();
+
+    let mut frame = super::native::HostFrame::default();
+    frame.gpr[0] = host_env(cpu.x(0));
+    for register in 1..call.fixed {
+        frame.gpr[register] = cpu.x(register);
+    }
+    frame.gpr[call.fixed] = arguments.as_ptr() as u64;
+    frame.function = env_function(frame.gpr[0], call.a_slot);
+    if frame.function == 0 {
+        super::fail(
+            cpu,
+            format_args!("JNIEnv::{} is null in the host table", call.name),
+        );
+    }
+    // SAFETY: the host's `A` form takes the env, the guest's object or class references, the
+    // method ID and a jvalue per parameter of the method's descriptor, all of which the frame holds.
+    unsafe { super::native::host_call(&mut frame, &[]) };
+    super::set_result(cpu, call.returns, frame.rax, frame.xmm0);
+}
+
 /// A method's shorty from its descriptor, `(IJ[Ljava/lang/String;)V` to `VIJL`.
 pub(crate) fn descriptor_shorty(descriptor: &[u8]) -> Option<Vec<u8>> {
     let body = descriptor.strip_prefix(b"(")?;
@@ -409,6 +571,35 @@ mod tests {
         assert_eq!(shorty_signature(b"V").unwrap(), "void(ptr,ptr)");
         assert_eq!(shorty_signature(b"IV"), None);
         assert_eq!(shorty_signature(b""), None);
+    }
+
+    #[test]
+    fn variadic_and_va_list_calls_are_served_by_their_a_form() {
+        let call = MethodCall::of("CallDoubleMethod").unwrap();
+        assert_eq!(
+            (call.a_slot, call.fixed, call.returns, call.va_list),
+            (60, 3, Type::F64, false)
+        );
+        let call = MethodCall::of("CallNonvirtualIntMethodV").unwrap();
+        assert_eq!(
+            (call.a_slot, call.fixed, call.returns, call.va_list),
+            (81, 4, Type::I32, true)
+        );
+        let call = MethodCall::of("NewObjectV").unwrap();
+        assert_eq!((call.a_slot, call.fixed, call.returns), (30, 3, Type::Ptr));
+        assert!(MethodCall::of("GetVersion").is_none());
+    }
+
+    #[test]
+    fn promoted_variadic_arguments_become_jvalues() {
+        assert_eq!(jvalue(b'Z', 0x1_01), 1);
+        assert_eq!(jvalue(b'B', 0xFD), (-3i64) as u64);
+        assert_eq!(jvalue(b'S', 0xFFFF_FFF9), (-7i64) as u64);
+        assert_eq!(
+            jvalue(b'F', 0.25f64.to_bits()),
+            u64::from(0.25f32.to_bits())
+        );
+        assert_eq!(jvalue(b'D', 0.5f64.to_bits()), 0.5f64.to_bits());
     }
 
     #[test]

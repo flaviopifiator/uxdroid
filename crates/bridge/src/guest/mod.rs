@@ -31,7 +31,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::elf::ElfError;
 use crate::table::{Signature, Table, Type};
-use abi::{Class, Slot, guest_layout, host_layout, normalize};
+use abi::{Class, GuestVaList, Slot, guest_layout, host_layout, normalize};
 
 pub use jni::{method_trampoline as jni_method_trampoline, trampoline as jni_trampoline};
 
@@ -135,6 +135,9 @@ enum Variadic {
     No,
     /// The last fixed argument is a printf format, which names them.
     Format,
+    /// A `v` function of the printf family served by its variadic twin: the guest passes its
+    /// fixed arguments and a `va_list`, from which the arguments its format names are read.
+    FormatVaList,
     /// Integers only, as for `open`'s mode or `ioctl`'s argument: every guest integer register
     /// left is passed on, and the callee reads what it needs.
     Integers,
@@ -164,6 +167,8 @@ enum Service {
     Host(HostFunction),
     /// Reads its own arguments and writes its result, for calls that need more than a signature.
     Special(fn(&dyn Cpu)),
+    /// A JNI `Call*Method`, `Call*MethodV` or `NewObject(V)`, served by its `A` form.
+    JniCall(jni::MethodCall),
     /// A function the host has but guest code cannot call yet; stops the program naming it.
     Missing(String),
 }
@@ -215,6 +220,10 @@ fn supervisor(cpu: &dyn Cpu, number: u32) -> bool {
             special(cpu);
             false
         }
+        Service::JniCall(call) => {
+            jni::call_method(cpu, call);
+            false
+        }
         Service::Missing(name) => crate::shims::die(format_args!(
             "uxdroid: {} has no guest signature yet, so arm64 code cannot call it\n",
             name.escape_debug()
@@ -257,6 +266,9 @@ fn resolve_import(
     tables: &[&'static Table],
     is_data: bool,
 ) -> Result<Option<u64>, ElfError> {
+    if let Some(twin) = libc::variadic_twin(name) {
+        return va_list_service(name, twin, tables);
+    }
     for table in tables {
         if let Some(export) = table.find(name.as_bytes()) {
             let Some(address) = export.bind() else {
@@ -287,6 +299,44 @@ fn resolve_import(
             None => Ok(None),
         },
     }
+}
+
+/// A `v` function served by its variadic twin, found the way an import of the twin would be.
+fn va_list_service(
+    name: &str,
+    twin: &str,
+    tables: &[&'static Table],
+) -> Result<Option<u64>, ElfError> {
+    let found = tables
+        .iter()
+        .find_map(|table| table.find(twin.as_bytes()))
+        .map(|export| (export.bind(), export.signature));
+    let (address, signature) = match found {
+        Some((address, signature)) => (address, signature),
+        None => match libc::find(twin) {
+            Some(libc::Import::Function(signature)) => (host_address(twin, false), signature),
+            _ => return Ok(None),
+        },
+    };
+    let Some(address) = address else {
+        return Ok(None);
+    };
+    let Ok(Signature::Function {
+        returns,
+        parameters,
+        variadic: true,
+    }) = Signature::parse(signature)
+    else {
+        return Err(ElfError::Unsupported("a va_list twin that is not variadic"));
+    };
+    add_service(Service::Host(HostFunction {
+        name: name.to_string(),
+        target: Target::Fixed(address),
+        returns,
+        parameters,
+        variadic: Variadic::FormatVaList,
+    }))
+    .map(Some)
 }
 
 fn host_address(name: &str, is_data: bool) -> Option<usize> {
@@ -349,50 +399,106 @@ fn read_slot(cpu: &dyn Cpu, slot: Slot) -> u64 {
     }
 }
 
+/// The classes of the arguments the printf format at `format` names, or the program stops.
+fn format_classes(cpu: &dyn Cpu, name: &str, format: u64) -> Vec<Class> {
+    // SAFETY: the printf contract makes the format a C string; the read is bounded.
+    let text = unsafe { native::c_string(format, format::MAX_FORMAT_BYTES + 1) };
+    match format::classes(text) {
+        Ok(extra) => extra,
+        Err(error) => fail(cpu, format_args!("{name}: cannot carry format: {error:?}")),
+    }
+}
+
+/// The value type the bridge reads for a variadic argument of `class`.
+fn variadic_kind(class: Class) -> Type {
+    match class {
+        Class::Integer => Type::U64,
+        Class::Vector => Type::F64,
+    }
+}
+
+/// Reads a guest `va_list` the guest passed by address.
+///
+/// # Safety
+/// `address` must be a guest `va_list`, 32 readable bytes.
+unsafe fn read_va_list(address: u64) -> GuestVaList {
+    let mut words = [0u64; 4];
+    for (index, word) in words.iter_mut().enumerate() {
+        // SAFETY: the caller's contract.
+        *word = unsafe { native::read_u64(address + 8 * index as u64) };
+    }
+    GuestVaList::from_words(words)
+}
+
+/// The values of `classes`, read from a guest `va_list` at `address` in order.
+fn va_arguments(cpu: &dyn Cpu, name: &str, address: u64, classes: &[Class]) -> Vec<u64> {
+    if address == 0 {
+        fail(cpu, format_args!("{name}: a null va_list"));
+    }
+    // SAFETY: the caller passes the guest's va_list argument; each address it yields is one the
+    // guest's own va_arg would read.
+    unsafe {
+        let mut list = read_va_list(address);
+        classes
+            .iter()
+            .map(|&class| native::read_u64(list.next(class)))
+            .collect()
+    }
+}
+
 fn call_host(cpu: &dyn Cpu, function: &HostFunction) {
     let mut kinds = function.parameters.clone();
     let mut classes: Vec<Class> = kinds.iter().filter_map(|&kind| Class::of(kind)).collect();
+    let fixed = classes.len();
+    let mut values: Vec<u64> = guest_layout(&classes)
+        .slots
+        .iter()
+        .map(|&slot| read_slot(cpu, slot))
+        .collect();
     match function.variadic {
         Variadic::No => {}
         Variadic::Format => {
-            let fixed = guest_layout(&classes);
-            let Some(&last) = fixed.slots.last() else {
+            let Some(&format) = values.last() else {
                 fail(cpu, format_args!("{} has no format", function.name));
             };
-            let format = read_slot(cpu, last);
-            // SAFETY: the printf contract makes the format a C string; the read is bounded.
-            let text = unsafe { native::c_string(format, format::MAX_FORMAT_BYTES + 1) };
-            match format::classes(text) {
-                Ok(extra) => {
-                    for class in extra {
-                        classes.push(class);
-                        kinds.push(match class {
-                            Class::Integer => Type::U64,
-                            Class::Vector => Type::F64,
-                        });
-                    }
-                }
-                Err(error) => fail(
-                    cpu,
-                    format_args!("{}: cannot carry format: {error:?}", function.name),
-                ),
+            let extra = format_classes(cpu, &function.name, format);
+            classes.extend(&extra);
+            let layout = guest_layout(&classes);
+            for (index, &class) in extra.iter().enumerate() {
+                values.push(read_slot(cpu, layout.slots[fixed + index]));
+                kinds.push(variadic_kind(class));
             }
+        }
+        Variadic::FormatVaList => {
+            let Some(&format) = values.last() else {
+                fail(cpu, format_args!("{} has no format", function.name));
+            };
+            let mut with_list = classes.clone();
+            with_list.push(Class::Integer);
+            let list = read_slot(cpu, guest_layout(&with_list).slots[fixed]);
+            let extra = format_classes(cpu, &function.name, format);
+            values.extend(va_arguments(cpu, &function.name, list, &extra));
+            kinds.extend(extra.iter().map(|&class| variadic_kind(class)));
+            classes.extend(extra);
         }
         Variadic::Integers => {
             let used = classes.iter().filter(|&&c| c == Class::Integer).count();
             for _ in used..abi::GUEST_INTEGER_REGISTERS {
                 classes.push(Class::Integer);
+            }
+            let layout = guest_layout(&classes);
+            for &slot in &layout.slots[fixed..] {
+                values.push(read_slot(cpu, slot));
                 kinds.push(Type::U64);
             }
         }
     }
 
-    let guest = guest_layout(&classes);
     let host = host_layout(&classes);
     let mut frame = native::HostFrame::default();
     let mut stack = vec![0u64; host.stack_slots];
-    for (index, (&from, &to)) in guest.slots.iter().zip(&host.slots).enumerate() {
-        let mut value = normalize(kinds[index], read_slot(cpu, from));
+    for (index, (&raw, &to)) in values.iter().zip(&host.slots).enumerate() {
+        let mut value = normalize(kinds[index], raw);
         if index == 0 {
             value = match function.target {
                 Target::Fixed(_) => value,
