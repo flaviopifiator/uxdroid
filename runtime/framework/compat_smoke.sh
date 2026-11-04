@@ -68,6 +68,8 @@ expect "^alarm fired on main thread true$" "a due alarm did not fire its listene
 expect "^alarm next clock true exact true$" "the next alarm clock is not the one set"
 expect "^appops note 0 check 0$" "app ops are not allowed"
 expect "^shortcuts dynamic 1 scan max 15 pin false$" "dynamic shortcuts are not kept"
+expect "^shortcuts over the limit refused kept 1$" "a refused list of shortcuts was kept in part"
+expect "^alarm clock went off, next in the future true$" "an alarm clock that went off is still the next one"
 expect "^game mode 1$" "the game mode is not standard"
 
 # 7. The device is uxdroid, not the Robolectric build the framework comes from, which apps take for a

@@ -65,6 +65,10 @@ public class CompatApplication extends Application {
                 }, null, 0, "", null);
 
         android.app.AlarmManager alarms = getSystemService(android.app.AlarmManager.class);
+        // An alarm clock that went off is no longer the next one.
+        alarms.setAlarmClock(new android.app.AlarmManager.AlarmClockInfo(System.currentTimeMillis() - 1, null),
+                android.app.PendingIntent.getBroadcast(this, 12, new android.content.Intent("com.example.compat.REMIND")
+                        .setPackage(getPackageName()).putExtra("by", "alarm clock"), android.app.PendingIntent.FLAG_IMMUTABLE));
         android.content.Intent due = new android.content.Intent("com.example.compat.REMIND")
                 .setPackage(getPackageName()).putExtra("by", "alarm");
         alarms.setExact(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime() - 1,
@@ -209,6 +213,20 @@ public class CompatApplication extends Application {
                 + " " + shortcuts.getDynamicShortcuts().get(0).getId()
                 + " max " + shortcuts.getMaxShortcutCountPerActivity()
                 + " pin " + shortcuts.isRequestPinShortcutSupported());
+
+        // A list over the limit is refused whole: what was there stays.
+        java.util.List<android.content.pm.ShortcutInfo> many = new java.util.ArrayList<>();
+        for (int i = 0; i < shortcuts.getMaxShortcutCountPerActivity(); i++) {
+            many.add(new android.content.pm.ShortcutInfo.Builder(this, "s" + i).setShortLabel("S" + i)
+                    .setIntent(new android.content.Intent("com.example.compat.SECOND")).build());
+        }
+        String refused = "accepted";
+        try {
+            shortcuts.addDynamicShortcuts(many);
+        } catch (IllegalArgumentException e) {
+            refused = "refused";
+        }
+        System.out.println("shortcuts over the limit " + refused + " kept " + shortcuts.getDynamicShortcuts().size());
 
         // Mindustry's graphics setup asks for its game mode.
         android.app.GameManager games = getSystemService(android.app.GameManager.class);

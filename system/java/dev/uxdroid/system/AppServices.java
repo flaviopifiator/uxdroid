@@ -172,6 +172,12 @@ final class AppServices {
             Alarm alarm = new Alarm(operation, listener, clock);
             alarms.add(alarm);
             Runnable fire = () -> {
+                // Gone before it is handled, so what it starts never sees it as the next alarm.
+                if (interval <= 0) {
+                    synchronized (this) {
+                        alarms.remove(alarm);
+                    }
+                }
                 try {
                     if (listener != null) {
                         listener.doAlarm(COMPLETE);
@@ -181,11 +187,6 @@ final class AppServices {
                     }
                 } catch (android.os.RemoteException | RuntimeException e) {
                     System.err.println("uxdroid: an alarm of " + callingPackage + " failed: " + e);
-                }
-                if (interval <= 0) {
-                    synchronized (this) {
-                        alarms.remove(alarm);
-                    }
                 }
             };
             alarm.future = interval > 0
@@ -298,17 +299,19 @@ final class AppServices {
             this.app = app;
         }
 
+        /** Adds or replaces the list whole, or refuses it whole when it would pass the limit. */
         private boolean add(ParceledListSlice list, boolean replace) {
-            List<?> shortcuts = list.getList();
-            if (replace) dynamic.clear();
-            for (Object shortcut : shortcuts) {
+            Map<String, ShortcutInfo> next = replace ? new LinkedHashMap<>() : new LinkedHashMap<>(dynamic);
+            for (Object shortcut : list.getList()) {
                 ShortcutInfo info = (ShortcutInfo) shortcut;
-                info.addFlags(ShortcutInfo.FLAG_DYNAMIC);
-                dynamic.put(info.getId(), info);
+                next.put(info.getId(), info);
+                if (next.size() > MAX_PER_ACTIVITY) {
+                    throw new IllegalArgumentException("Max number of dynamic shortcuts exceeded");
+                }
             }
-            if (dynamic.size() > MAX_PER_ACTIVITY) {
-                throw new IllegalArgumentException("Max number of dynamic shortcuts exceeded");
-            }
+            for (ShortcutInfo info : next.values()) info.addFlags(ShortcutInfo.FLAG_DYNAMIC);
+            dynamic.clear();
+            dynamic.putAll(next);
             return true;
         }
 
@@ -320,8 +323,11 @@ final class AppServices {
             return add(list, false);
         }
 
+        /** As ShortcutService does, a push over the limit drops the oldest dynamic shortcut. */
         public synchronized void pushDynamicShortcut(String packageName, ShortcutInfo shortcut, int userId) {
             shortcut.addFlags(ShortcutInfo.FLAG_DYNAMIC);
+            dynamic.remove(shortcut.getId());
+            if (dynamic.size() >= MAX_PER_ACTIVITY) dynamic.remove(dynamic.keySet().iterator().next());
             dynamic.put(shortcut.getId(), shortcut);
         }
 
