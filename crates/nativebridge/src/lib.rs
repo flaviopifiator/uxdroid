@@ -36,20 +36,20 @@ fn set_error(message: &str) {
 /// `NativeBridgeCallbacks` from `nativebridge/native_bridge.h`, up to the version declared above.
 #[repr(C)]
 pub struct NativeBridgeCallbacks {
-    version: u32,
-    initialize: unsafe extern "C" fn(*const c_void, *const c_char, *const c_char) -> bool,
-    load_library: unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void,
-    get_trampoline:
+    pub version: u32,
+    pub initialize: unsafe extern "C" fn(*const c_void, *const c_char, *const c_char) -> bool,
+    pub load_library: unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void,
+    pub get_trampoline:
         unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32) -> *mut c_void,
-    is_supported: unsafe extern "C" fn(*const c_char) -> bool,
-    get_app_env: unsafe extern "C" fn(*const c_char) -> *const c_void,
-    is_compatible_with: unsafe extern "C" fn(u32) -> bool,
-    get_signal_handler: unsafe extern "C" fn(c_int) -> *const c_void,
-    unload_library: unsafe extern "C" fn(*mut c_void) -> c_int,
-    get_error: unsafe extern "C" fn() -> *const c_char,
-    is_path_supported: unsafe extern "C" fn(*const c_char) -> bool,
-    unused_init_anonymous_namespace: unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
-    create_namespace: unsafe extern "C" fn(
+    pub is_supported: unsafe extern "C" fn(*const c_char) -> bool,
+    pub get_app_env: unsafe extern "C" fn(*const c_char) -> *const c_void,
+    pub is_compatible_with: unsafe extern "C" fn(u32) -> bool,
+    pub get_signal_handler: unsafe extern "C" fn(c_int) -> *const c_void,
+    pub unload_library: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub get_error: unsafe extern "C" fn() -> *const c_char,
+    pub is_path_supported: unsafe extern "C" fn(*const c_char) -> bool,
+    pub unused_init_anonymous_namespace: unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
+    pub create_namespace: unsafe extern "C" fn(
         *const c_char,
         *const c_char,
         *const c_char,
@@ -57,16 +57,16 @@ pub struct NativeBridgeCallbacks {
         *const c_char,
         *mut c_void,
     ) -> *mut c_void,
-    link_namespaces: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> bool,
-    load_library_ext: unsafe extern "C" fn(*const c_char, c_int, *mut c_void) -> *mut c_void,
-    get_vendor_namespace: unsafe extern "C" fn() -> *mut c_void,
-    get_exported_namespace: unsafe extern "C" fn(*const c_char) -> *mut c_void,
-    pre_zygote_fork: unsafe extern "C" fn(),
-    get_trampoline_with_jni_call_type:
+    pub link_namespaces: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> bool,
+    pub load_library_ext: unsafe extern "C" fn(*const c_char, c_int, *mut c_void) -> *mut c_void,
+    pub get_vendor_namespace: unsafe extern "C" fn() -> *mut c_void,
+    pub get_exported_namespace: unsafe extern "C" fn(*const c_char) -> *mut c_void,
+    pub pre_zygote_fork: unsafe extern "C" fn(),
+    pub get_trampoline_with_jni_call_type:
         unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32, c_int) -> *mut c_void,
-    get_trampoline_for_function_pointer:
+    pub get_trampoline_for_function_pointer:
         unsafe extern "C" fn(*const c_void, *const c_char, u32, c_int) -> *mut c_void,
-    is_native_bridge_function_pointer: unsafe extern "C" fn(*const c_void) -> bool,
+    pub is_native_bridge_function_pointer: unsafe extern "C" fn(*const c_void) -> bool,
 }
 
 /// The symbol ART looks up by this exact name.
@@ -142,15 +142,32 @@ unsafe extern "C" fn get_trampoline(
         return null_mut();
     };
     if library.machine() != Machine::X86_64 {
-        // SAFETY: ART passes the method's shorty with its length, or null for `JNI_OnLoad`.
-        let shorty = (!shorty.is_null()).then(|| unsafe {
-            std::slice::from_raw_parts(shorty.cast::<u8>(), shorty_length as usize)
-        });
+        // SAFETY: ART passes the method's shorty, or null for `JNI_OnLoad`.
+        let shorty = unsafe { method_shorty(shorty, shorty_length) };
         return guest::jni_trampoline(library, name, shorty).unwrap_or(null_mut());
     }
     library
         .symbol(name)
         .map_or(null_mut(), <*const c_void>::cast_mut)
+}
+
+/// The shorty ART hands over. Its `java_vm_ext.cc` passes a C string with length 0, so a zero
+/// length means "up to the terminator"; any other length is taken as given.
+///
+/// # Safety
+///
+/// `shorty` is null, a C string when `length` is 0, or else valid for `length` bytes, and it
+/// outlives the returned slice.
+unsafe fn method_shorty<'a>(shorty: *const c_char, length: u32) -> Option<&'a [u8]> {
+    if shorty.is_null() {
+        return None;
+    }
+    if length == 0 {
+        // SAFETY: a C string, by the contract above.
+        return Some(unsafe { CStr::from_ptr(shorty) }.to_bytes());
+    }
+    // SAFETY: valid for `length` bytes, by the contract above.
+    Some(unsafe { std::slice::from_raw_parts(shorty.cast::<u8>(), length as usize) })
 }
 
 unsafe extern "C" fn is_supported(_path: *const c_char) -> bool {
@@ -249,10 +266,8 @@ unsafe extern "C" fn get_trampoline_for_function_pointer(
     shorty_length: u32,
     _call_type: c_int,
 ) -> *mut c_void {
-    // SAFETY: ART passes the method's shorty with its length, or null.
-    let shorty = (!shorty.is_null()).then(|| unsafe {
-        std::slice::from_raw_parts(shorty.cast::<u8>(), shorty_length as usize)
-    });
+    // SAFETY: ART passes the method's shorty, or null.
+    let shorty = unsafe { method_shorty(shorty, shorty_length) };
     function_pointer(method, is_guest_address(method as usize), shorty)
 }
 
