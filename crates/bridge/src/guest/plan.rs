@@ -89,13 +89,13 @@ fn bytes_at(file: &[u8], offset: u64, length: u64) -> Result<&[u8], ElfError> {
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(
-        bytes.get(offset..offset + 4)?.try_into().ok()?,
+        bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
     ))
 }
 
 fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(
-        bytes.get(offset..offset + 8)?.try_into().ok()?,
+        bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?,
     ))
 }
 
@@ -105,7 +105,7 @@ fn file_offset(headers: &[ProgramHeader], vaddr: u64) -> Result<u64, ElfError> {
         .iter()
         .filter(|header| header.kind == PT_LOAD)
         .find(|header| vaddr >= header.vaddr && vaddr - header.vaddr < header.filesz)
-        .map(|header| header.offset + (vaddr - header.vaddr))
+        .and_then(|header| header.offset.checked_add(vaddr - header.vaddr))
         .ok_or(ElfError::Malformed("address outside the file's segments"))
 }
 
@@ -340,6 +340,20 @@ pub fn plan(libraries: &[GuestLibrary], tables: &[&'static Table]) -> Vec<Librar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_segment_offset_past_the_address_space_is_an_error() {
+        let segment = ProgramHeader {
+            kind: PT_LOAD,
+            flags: 0,
+            offset: u64::MAX,
+            vaddr: 0x1000,
+            filesz: 0x100,
+            memsz: 0x100,
+            align: 0x1000,
+        };
+        assert!(file_offset(&[segment], 0x1010).is_err());
+    }
 
     #[test]
     fn hostile_files_are_errors_never_panics() {
