@@ -423,6 +423,17 @@ unsafe extern "system" fn become_application(
     identity::become_application(&package) as jint
 }
 
+/// The input device id of the seat's keyboard (0), mouse (1) or touchscreen (2), which its events
+/// carry, so `IInputManager` lists the same ids; -1 for anything else.
+unsafe extern "system" fn seat_device(_env: *mut JNIEnv, _class: jclass, kind: jint) -> jint {
+    match kind {
+        0 => input::KEYBOARD_DEVICE,
+        1 => input::MOUSE_DEVICE,
+        2 => input::TOUCH_DEVICE,
+        _ => -1,
+    }
+}
+
 /// # Safety
 /// Called by ART when the library loads.
 #[unsafe(no_mangle)]
@@ -435,7 +446,7 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
         if ((**vm).v1_2.GetEnv)(vm, &mut env, JNI_VERSION_1_6) != JNI_OK {
             return JNI_ERR;
         }
-        let methods: [Method; 7] = [
+        let methods: [Method; 8] = [
             (
                 c"defaultsProblem",
                 c"(Ljava/lang/String;)Ljava/lang/String;",
@@ -471,6 +482,7 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void
                 c"(Ljava/lang/String;)I",
                 become_application as *mut c_void,
             ),
+            (c"seatDevice", c"(I)I", seat_device as *mut c_void),
         ];
         match register(env as *mut JNIEnv, c"dev/uxdroid/system/Natives", &methods) {
             Ok(()) => JNI_VERSION_1_6,
