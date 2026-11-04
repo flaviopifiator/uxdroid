@@ -241,13 +241,14 @@ pub static LIBJNIGRAPHICS: Table = Table {
 pub use opensles::interfaces as opensles_interfaces;
 
 /// Every table this crate serves.
-pub fn tables() -> [&'static Table; 8] {
+pub fn tables() -> [&'static Table; 9] {
     [
         &LIBANDROID,
         &LIBJNIGRAPHICS,
         &egl_table::EGL,
         &gles_table::GLESV2,
         &gles_table::GLESV3,
+        &gles_table::GLES_EXTENSIONS,
         &opensles::TABLE,
         &aaudio::TABLE,
         &media::TABLE,
@@ -262,6 +263,29 @@ mod tests {
     fn every_table_is_valid() {
         for table in tables() {
             uxdroid_bridge::table::validate(table).unwrap();
+        }
+    }
+
+    #[test]
+    fn extension_functions_skia_asks_for_are_signed() {
+        // What RustDesk 1.5.1's arm64 Skia looks up through eglGetProcAddress, from Mesa's list.
+        for name in [
+            "glBindFragDataLocationEXT",
+            "glBindFragDataLocationIndexedEXT",
+            "glClearTexImageEXT",
+            "glClearTexSubImageEXT",
+            "glDrawArraysInstancedBaseInstanceEXT",
+            "glDrawElementsInstancedBaseVertexBaseInstanceEXT",
+            "glMultiDrawArraysIndirectEXT",
+            "glMultiDrawElementsIndirectEXT",
+            "glTextureBarrierNV",
+        ] {
+            assert!(
+                tables()
+                    .iter()
+                    .any(|table| table.find(name.as_bytes()).is_some()),
+                "{name} is not signed"
+            );
         }
     }
 
@@ -352,7 +376,10 @@ mod tests {
                 );
             }
         }
-        let opensles = tables()[5];
+        let opensles = tables()
+            .into_iter()
+            .find(|table| table.library == "libOpenSLES.so")
+            .unwrap();
         assert!(opensles.find(b"SL_IID_ENGINE").unwrap().is_data());
     }
 

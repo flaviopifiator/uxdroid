@@ -46,6 +46,13 @@ EGL_TRANSLATED = {
 }
 
 
+# Extensions in Khronos's registry that the NDK's gl2ext.h lacks, which drivers still offer and apps
+# ask for: (return type, parameters) as a header would spell them.
+GL_EXTRA = {
+    "glTextureBarrierNV": ("void", "void"),
+}
+
+
 def vocabulary(text, types, pointers):
     text = text.replace("const", " ").strip()
     if "*" in text or "[" in text:
@@ -104,6 +111,19 @@ def main():
                 raise SystemExit(f"{library}: no prototype for {symbol}")
             exports.append(f'        Export::resolved(c"{symbol}", "{gl_signature(symbol)}", gles_symbol),')
         gles.append(table(static, library, exports, ""))
+    # Extensions no library exports, signed for eglGetProcAddress from translated code. The name is
+    # no file's, so a library never binds to this table through DT_NEEDED. Prototypes whose types
+    # the vocabulary lacks are left out, so their lookup stays null.
+    gl.update(GL_EXTRA)
+    exported = set(names(gles2_names)) | set(names(gles3_names))
+    exports = []
+    for symbol in sorted(set(gl) - exported):
+        try:
+            signature = gl_signature(symbol)
+        except SystemExit:
+            continue
+        exports.append(f'        Export::resolved(c"{symbol}", "{signature}", gles_symbol),')
+    gles.append(table("GLES_EXTENSIONS", "GLES extensions", exports, ""))
     open(f"{out}/gles_table.rs", "w").write("\n".join(gles))
 
     exports = []
