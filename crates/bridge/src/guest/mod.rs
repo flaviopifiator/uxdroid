@@ -25,6 +25,7 @@ mod jni_table;
 mod libc;
 mod libc_table;
 mod native;
+pub mod plan;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -457,6 +458,37 @@ fn record_missing(name: &str) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !missing.iter().any(|known| known == name) {
         missing.push(name.to_string());
+    }
+}
+
+/// How `name` binds for a guest library whose scope has `tables`, decided as `import` would but
+/// without making a service, for install-time planning.
+pub(crate) fn binding(name: &str, tables: &[&'static Table], is_data: bool) -> plan::Binding {
+    use plan::Binding;
+    if let Some(table) = tables
+        .iter()
+        .find(|table| table.find(name.as_bytes()).is_some())
+    {
+        return Binding::Table(table.library);
+    }
+    if libc::variadic_twin(name).is_some() {
+        return Binding::Libc;
+    }
+    let unsigned_reason = || {
+        libc_table::UNSIGNED
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map_or("no guest signature", |&(_, why)| why)
+    };
+    match libc::find(name) {
+        Some(libc::Import::Function(_)) if crate::shims::is_audited(name) => Binding::Libc,
+        Some(libc::Import::Function(_)) => Binding::Stub("the host function is not audited"),
+        Some(libc::Import::Special(_)) => Binding::Libc,
+        Some(libc::Import::Data) if host_address(name, true).is_some() => Binding::Libc,
+        Some(libc::Import::Data) => Binding::Unresolved,
+        None if is_data => Binding::Unresolved,
+        None if host_address(name, false).is_some() => Binding::Stub(unsigned_reason()),
+        None => Binding::Unresolved,
     }
 }
 

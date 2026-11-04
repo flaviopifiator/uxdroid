@@ -47,6 +47,12 @@ pub fn resolve(name: &CStr, is_data: bool) -> Option<usize> {
     }
 }
 
+/// Whether `name` binds to a shim or an audited glibc function, rather than a stub that stops
+/// the program naming it.
+pub(crate) fn is_audited(name: &str) -> bool {
+    table().contains_key(name) || audited().contains(name)
+}
+
 fn audited() -> &'static HashSet<&'static str> {
     static AUDITED: OnceLock<HashSet<&'static str>> = OnceLock::new();
     AUDITED.get_or_init(|| {

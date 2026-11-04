@@ -27,6 +27,11 @@ use crate::table::{self, Table};
 /// libraries that uxdroid provides from glibc and the shims instead of loading a file. The other
 /// Android system libraries, such as `liblog.so` or `libandroid.so`, are signature tables.
 const SYSTEM_LIBRARIES: &[&str] = &["libc.so", "libdl.so", "libm.so", "libstdc++.so"];
+/// Whether `name` is one of the libraries uxdroid provides from glibc and the shims.
+pub(crate) fn is_system_library(name: &str) -> bool {
+    SYSTEM_LIBRARIES.contains(&name)
+}
+
 /// Stops a crafted dependency graph from exhausting memory or the stack.
 const MAX_LIBRARIES_PER_LOAD: usize = 1024;
 const MAX_REPORTED_SYMBOLS: usize = 4096;
