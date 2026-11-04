@@ -19,6 +19,7 @@ mod gpu;
 mod java;
 mod live;
 mod looper;
+mod media;
 mod opensles;
 mod pixels;
 pub mod present;
@@ -240,7 +241,7 @@ pub static LIBJNIGRAPHICS: Table = Table {
 pub use opensles::interfaces as opensles_interfaces;
 
 /// Every table this crate serves.
-pub fn tables() -> [&'static Table; 7] {
+pub fn tables() -> [&'static Table; 8] {
     [
         &LIBANDROID,
         &LIBJNIGRAPHICS,
@@ -249,6 +250,7 @@ pub fn tables() -> [&'static Table; 7] {
         &gles_table::GLESV3,
         &opensles::TABLE,
         &aaudio::TABLE,
+        &media::TABLE,
     ]
 }
 
@@ -352,5 +354,54 @@ mod tests {
         }
         let opensles = tables()[5];
         assert!(opensles.find(b"SL_IID_ENGINE").unwrap().is_data());
+    }
+
+    #[test]
+    fn the_tables_cover_what_arm64_rustdesk_imports_from_libmediandk() {
+        // Measured with readelf on RustDesk 1.5.1's arm64-v8a librustdesk.so, which the x86_64
+        // build does not link; a translated install refuses a library whose DT_NEEDED no table serves.
+        let imports = [
+            "AMediaCodec_configure",
+            "AMediaCodec_createCodecByName",
+            "AMediaCodec_createDecoderByType",
+            "AMediaCodec_createEncoderByType",
+            "AMediaCodec_delete",
+            "AMediaCodec_dequeueInputBuffer",
+            "AMediaCodec_dequeueOutputBuffer",
+            "AMediaCodec_flush",
+            "AMediaCodec_getInputBuffer",
+            "AMediaCodec_getOutputBuffer",
+            "AMediaCodec_getOutputFormat",
+            "AMediaCodec_queueInputBuffer",
+            "AMediaCodec_releaseOutputBuffer",
+            "AMediaCodec_releaseOutputBufferAtTime",
+            "AMediaCodec_start",
+            "AMediaCodec_stop",
+            "AMediaFormat_delete",
+            "AMediaFormat_getBuffer",
+            "AMediaFormat_getFloat",
+            "AMediaFormat_getInt32",
+            "AMediaFormat_getInt64",
+            "AMediaFormat_getString",
+            "AMediaFormat_new",
+            "AMediaFormat_setBuffer",
+            "AMediaFormat_setFloat",
+            "AMediaFormat_setInt32",
+            "AMediaFormat_setInt64",
+            "AMediaFormat_setString",
+            "AMediaFormat_toString",
+        ];
+        assert_eq!(imports.len(), 29);
+        let table = tables()
+            .into_iter()
+            .find(|t| t.library == "libmediandk.so")
+            .expect("no table serves libmediandk.so");
+        for name in imports {
+            let export = table.find(name.as_bytes());
+            assert!(
+                export.is_some_and(|e| !e.is_data()),
+                "libmediandk.so lacks {name}"
+            );
+        }
     }
 }
