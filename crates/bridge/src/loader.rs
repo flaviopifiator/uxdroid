@@ -11,12 +11,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::elf::{
-    Dynamic, EHDR_SIZE, ElfError, PHDR_SIZE, PT_DYNAMIC, PT_LOAD, PT_TLS, ProgramHeader,
-    R_X86_64_64, R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_GLOB_DAT, R_X86_64_IRELATIVE,
-    R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, RELA_SIZE, Rela, STB_WEAK, STT_FUNC, STT_GNU_IFUNC,
-    STT_TLS, SYM_SIZE, Symbol, for_each_packed, for_each_relr, gnu_hash, parse_dynamic,
-    parse_header, parse_program_headers, sysv_hash,
+    Dynamic, EHDR_SIZE, ElfError, Machine, PHDR_SIZE, PT_DYNAMIC, PT_LOAD, PT_TLS, ProgramHeader,
+    R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_IRELATIVE, R_AARCH64_JUMP_SLOT,
+    R_AARCH64_RELATIVE, R_AARCH64_TLS_DTPMOD64, R_AARCH64_TLS_DTPREL64, R_AARCH64_TLS_TPREL64,
+    R_AARCH64_TLSDESC, R_X86_64_64, R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_GLOB_DAT,
+    R_X86_64_IRELATIVE, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, RELA_SIZE, Rela, STB_WEAK, STT_FUNC,
+    STT_GNU_IFUNC, STT_TLS, SYM_SIZE, Symbol, for_each_packed, for_each_relr, gnu_hash,
+    parse_dynamic, parse_header, parse_program_headers, sysv_hash,
 };
+use crate::guest;
 use crate::image::Image;
 use crate::shims;
 use crate::table::{self, Table};
@@ -39,6 +42,10 @@ pub enum Error {
     TooManyLibraries,
     /// Every library with symbols found nowhere, each with all of its names.
     UnresolvedSymbols(Vec<(String, Vec<String>)>),
+    /// A library for a guest ABI, and why no translator can run it.
+    NoTranslator(String, String),
+    /// A library whose initializer stopped in guest code.
+    GuestFault(String, String),
 }
 
 impl fmt::Display for Error {
@@ -74,6 +81,18 @@ impl fmt::Display for Error {
                     .collect();
                 write!(f, "{}", reports.join("; "))
             }
+            Error::NoTranslator(library, reason) => write!(
+                f,
+                "{} is arm64-v8a code, which needs the translator: {reason}",
+                library.escape_debug()
+            ),
+            Error::GuestFault(library, reason) => {
+                write!(
+                    f,
+                    "{}: guest code stopped: {reason}",
+                    library.escape_debug()
+                )
+            }
         }
     }
 }
@@ -84,6 +103,7 @@ impl std::error::Error for Error {}
 #[derive(Debug)]
 pub struct Library {
     name: String,
+    machine: Machine,
     path: CString,
     image: Image,
     headers: Vec<ProgramHeader>,
@@ -98,6 +118,11 @@ pub struct Library {
 impl Library {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The CPU the library's code is for.
+    pub fn machine(&self) -> Machine {
+        self.machine
     }
 
     /// The names of the libraries this one directly depends on, loaded or provided.
@@ -130,6 +155,9 @@ impl Library {
         let address = self.image.bias().wrapping_add(symbol.value as usize) as u64;
         match symbol.kind {
             STT_TLS => Err(ElfError::Unsupported("ELF TLS")),
+            STT_GNU_IFUNC if self.machine != Machine::X86_64 => {
+                Err(ElfError::Unsupported("ifunc in guest code"))
+            }
             STT_GNU_IFUNC => {
                 if !self.image.is_executable(symbol.value) {
                     return Err(ElfError::Malformed(
@@ -150,6 +178,14 @@ impl Library {
     /// The symbol must be a function with that signature.
     pub unsafe fn call_i32(&self, name: &str) -> Option<i32> {
         let address = self.symbol(name)?;
+        if self.machine == Machine::Aarch64 {
+            return match guest::call_i32(address as u64) {
+                Ok(value) => Some(value),
+                Err(reason) => crate::shims::die(format_args!(
+                    "uxdroid: {name} stopped in guest code: {reason}\n"
+                )),
+            };
+        }
         // SAFETY: the caller promises the signature.
         let function: unsafe extern "C" fn() -> c_int = unsafe { std::mem::transmute(address) };
         // SAFETY: as above.
@@ -447,6 +483,11 @@ fn map_and_link(
                     dependency
                 }
             };
+            if dependency.machine != library.machine {
+                return Err(
+                    dependency.invalid(ElfError::Unsupported("a dependency for another ABI"))
+                );
+            }
             dependencies.push(dependency);
         }
         let _ = library.dependencies.set(dependencies);
@@ -454,6 +495,10 @@ fn map_and_link(
     }
 
     let root = pending[0];
+    if root.machine != Machine::X86_64 {
+        guest::engine().map_err(|reason| Error::NoTranslator(root.name.clone(), reason))?;
+        GUEST_LOADED.store(true, std::sync::atomic::Ordering::Release);
+    }
     let scope = Scope::of(root);
     let ordered = dependencies_first(root, pending);
     let mut unresolved = Vec::new();
@@ -513,6 +558,7 @@ fn map_library(path: &Path) -> Result<&'static Library, Error> {
     }
     file.read_exact_at(&mut header, 0).map_err(unreadable)?;
     let table = parse_header(&header).map_err(invalid)?;
+    let machine = table.machine;
 
     let table_len = (table.count * PHDR_SIZE) as u64;
     if table.offset.saturating_add(table_len) > file_len {
@@ -554,6 +600,7 @@ fn map_library(path: &Path) -> Result<&'static Library, Error> {
     let path = CString::new(path.as_os_str().as_bytes()).unwrap_or_default();
     Ok(Box::leak(Box::new(Library {
         name,
+        machine,
         path,
         image,
         headers,
@@ -633,12 +680,21 @@ fn dependencies_first(
     order
 }
 
-/// A symbol's address, searching `scope` in order, then the shims and glibc.
-fn resolve(scope: &Scope, name: &[u8], is_data: bool) -> Result<Option<u64>, ElfError> {
+/// A symbol's address, searching `scope` in order, then the shims and glibc. Guest code reaches
+/// the host only through the guest frame's stubs.
+fn resolve(
+    scope: &Scope,
+    name: &[u8],
+    is_data: bool,
+    machine: Machine,
+) -> Result<Option<u64>, ElfError> {
     for library in &scope.libraries {
         if let Some(symbol) = library.find(name) {
             return library.symbol_address(&symbol).map(Some);
         }
+    }
+    if machine != Machine::X86_64 {
+        return guest::import(name, &scope.tables, is_data);
     }
     for table in &scope.tables {
         if let Some(export) = table.find(name) {
@@ -732,13 +788,16 @@ fn apply_relocation(
 ) -> Result<(), ElfError> {
     let image = &library.image;
     let bias = image.bias() as u64;
-    match rela.kind {
-        R_X86_64_RELATIVE => image.write_u64(rela.offset, bias.wrapping_add_signed(rela.addend)),
-        R_X86_64_IRELATIVE => {
+    match Relocation::of(library.machine, rela.kind) {
+        Relocation::Relative => image.write_u64(rela.offset, bias.wrapping_add_signed(rela.addend)),
+        Relocation::IRelative if library.machine != Machine::X86_64 => {
+            Err(ElfError::Unsupported("ifunc in guest code"))
+        }
+        Relocation::IRelative => {
             ifuncs.push((rela.offset, rela.addend as u64));
             Ok(())
         }
-        R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
+        kind @ (Relocation::Absolute | Relocation::Slot) => {
             let address = match cache.get(&rela.symbol) {
                 Some(&address) => address,
                 None => {
@@ -747,15 +806,63 @@ fn apply_relocation(
                     address
                 }
             };
-            let value = if rela.kind == R_X86_64_64 {
+            // AArch64's GLOB_DAT and JUMP_SLOT take the addend too; it is zero in practice.
+            let value = if kind == Relocation::Absolute || library.machine == Machine::Aarch64 {
                 address.wrapping_add_signed(rela.addend)
             } else {
                 address
             };
             image.write_u64(rela.offset, value)
         }
-        R_X86_64_DTPMOD64 | R_X86_64_DTPOFF64 => Err(ElfError::Unsupported("ELF TLS")),
-        _ => Err(ElfError::Unsupported("relocation type")),
+        Relocation::Tls => Err(ElfError::Unsupported("ELF TLS")),
+        Relocation::Other => Err(ElfError::Unsupported("relocation type")),
+    }
+}
+
+/// What a relocation does, whatever the machine's number for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Relocation {
+    Relative,
+    IRelative,
+    /// The symbol's address plus the addend.
+    Absolute,
+    /// The symbol's address, for the GOT or a PLT slot.
+    Slot,
+    Tls,
+    Other,
+}
+
+impl Relocation {
+    fn of(machine: Machine, kind: u32) -> Relocation {
+        match (machine, kind) {
+            (Machine::X86_64, R_X86_64_RELATIVE) | (Machine::Aarch64, R_AARCH64_RELATIVE) => {
+                Relocation::Relative
+            }
+            (Machine::X86_64, R_X86_64_IRELATIVE) | (Machine::Aarch64, R_AARCH64_IRELATIVE) => {
+                Relocation::IRelative
+            }
+            (Machine::X86_64, R_X86_64_64) | (Machine::Aarch64, R_AARCH64_ABS64) => {
+                Relocation::Absolute
+            }
+            (Machine::X86_64, R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT)
+            | (Machine::Aarch64, R_AARCH64_GLOB_DAT | R_AARCH64_JUMP_SLOT) => Relocation::Slot,
+            (Machine::X86_64, R_X86_64_DTPMOD64 | R_X86_64_DTPOFF64)
+            | (
+                Machine::Aarch64,
+                R_AARCH64_TLS_DTPMOD64
+                | R_AARCH64_TLS_DTPREL64
+                | R_AARCH64_TLS_TPREL64
+                | R_AARCH64_TLSDESC,
+            ) => Relocation::Tls,
+            _ => Relocation::Other,
+        }
+    }
+
+    fn is_jump_slot(machine: Machine, kind: u32) -> bool {
+        matches!(
+            (machine, kind),
+            (Machine::X86_64, R_X86_64_JUMP_SLOT) | (Machine::Aarch64, R_AARCH64_JUMP_SLOT)
+        )
     }
 }
 
@@ -772,8 +879,8 @@ fn symbol_address(
     let symbol = library.symbol_at(index)?;
     let name = library.symbol_name(&symbol)?;
     // Only something known to be a function can trap when called; reading a trap as data can't.
-    let is_data = symbol.kind != STT_FUNC && rela.kind != R_X86_64_JUMP_SLOT;
-    if let Some(address) = resolve(scope, name, is_data)? {
+    let is_data = symbol.kind != STT_FUNC && !Relocation::is_jump_slot(library.machine, rela.kind);
+    if let Some(address) = resolve(scope, name, is_data, library.machine)? {
         return Ok(address);
     }
     // The limit bounds the memory of an error report for a crafted file.
@@ -792,6 +899,15 @@ fn run_initializers(libraries: &[&'static Library]) -> Result<(), Error> {
         let functions = library
             .init_functions()
             .map_err(|error| library.invalid(error))?;
+        if library.machine == Machine::Aarch64 {
+            for address in functions {
+                // SAFETY: reads glibc's own pointer.
+                let environment = unsafe { environ } as u64;
+                guest::call_initializer(address, environment)
+                    .map_err(|reason| Error::GuestFault(library.name.clone(), reason))?;
+            }
+            continue;
+        }
         for address in functions {
             // SAFETY: `init_functions` proved the address is in this library's code, and the
             // ELF format defines this signature. `environ` is glibc's own pointer.
@@ -903,7 +1019,7 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
             tables: Vec::new(),
         }
     };
-    match resolve(&scope, symbol.to_bytes(), false) {
+    match resolve(&scope, symbol.to_bytes(), false, Machine::X86_64) {
         Ok(Some(address)) => address as *mut c_void,
         _ => {
             set_dl_error(format!("undefined symbol: {}", symbol.to_string_lossy()));
@@ -974,4 +1090,32 @@ pub unsafe extern "C" fn dl_iterate_phdr(
     }
     // SAFETY: forwards the caller's callback under the same contract.
     unsafe { libc::dl_iterate_phdr(callback, data) }
+}
+
+/// `library+offset` for an address in a loaded library, or the bare address.
+pub(crate) fn describe_address(address: u64) -> String {
+    let owner = snapshot()
+        .into_iter()
+        .find(|library| library.image.contains_address(address as usize));
+    match owner {
+        Some(library) => format!(
+            "{}+{:#x}",
+            library.name.escape_debug(),
+            (address as usize).wrapping_sub(library.image.bias())
+        ),
+        None => format!("{address:#x}"),
+    }
+}
+
+/// Set once any guest library is mapped, so host-only processes answer `is_guest_address` at once.
+static GUEST_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `address` is in a loaded library built for a guest ABI.
+pub fn is_guest_address(address: usize) -> bool {
+    if !GUEST_LOADED.load(std::sync::atomic::Ordering::Acquire) {
+        return false;
+    }
+    snapshot().into_iter().any(|library| {
+        library.machine != Machine::X86_64 && library.image.contains_address(address)
+    })
 }

@@ -4,6 +4,7 @@
 #![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 
 pub mod elf;
+pub mod guest;
 mod image;
 #[macro_use]
 mod shims;
@@ -13,4 +14,4 @@ pub mod output;
 mod paths;
 pub mod table;
 
-pub use loader::{Error, Library, load};
+pub use loader::{Error, Library, is_guest_address, load};
