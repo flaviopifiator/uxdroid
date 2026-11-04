@@ -28,6 +28,7 @@ use crate::table::{self, Table};
 /// Android system libraries, such as `liblog.so` or `libandroid.so`, are signature tables.
 const SYSTEM_LIBRARIES: &[&str] = &["libc.so", "libdl.so", "libm.so", "libstdc++.so"];
 /// Whether `name` is one of the libraries uxdroid provides from glibc and the shims.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))] // only the x86_64 host has guests
 pub(crate) fn is_system_library(name: &str) -> bool {
     SYSTEM_LIBRARIES.contains(&name)
 }
@@ -48,9 +49,11 @@ pub enum Error {
     /// Every library with symbols found nowhere, each with all of its names.
     UnresolvedSymbols(Vec<(String, Vec<String>)>),
     /// A library for a guest ABI, and why no translator can run it.
-    NoTranslator(String, String),
+    NoTranslator(String, Machine, String),
     /// A library whose initializer stopped in guest code.
     GuestFault(String, String),
+    /// A host library that cannot run because bionic's thread pointer slots are not reserved.
+    NoBionicSlots(String, String),
 }
 
 impl fmt::Display for Error {
@@ -86,11 +89,15 @@ impl fmt::Display for Error {
                     .collect();
                 write!(f, "{}", reports.join("; "))
             }
-            Error::NoTranslator(library, reason) => write!(
+            Error::NoTranslator(library, machine, reason) => write!(
                 f,
-                "{} is arm64-v8a code, which needs the translator: {reason}",
-                library.escape_debug()
+                "{} is {} code, which needs the translator: {reason}",
+                library.escape_debug(),
+                machine.abi()
             ),
+            Error::NoBionicSlots(library, reason) => {
+                write!(f, "{}: {reason}", library.escape_debug())
+            }
             Error::GuestFault(library, reason) => {
                 write!(
                     f,
@@ -131,16 +138,19 @@ impl Library {
     }
 
     /// The file the library was loaded from.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))] // only the x86_64 host has guests
     pub(crate) fn path(&self) -> &Path {
         Path::new(std::ffi::OsStr::from_bytes(self.path.as_bytes()))
     }
 
     /// What the library's addresses are moved by from its virtual addresses.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))] // only the x86_64 host has guests
     pub(crate) fn bias(&self) -> u64 {
         self.image.bias() as u64
     }
 
     /// The virtual address ranges, start and end, of the library's executable code in its file.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))] // only the x86_64 host has guests
     pub(crate) fn code_ranges(&self) -> Vec<(u64, u64)> {
         self.headers
             .iter()
@@ -197,7 +207,7 @@ impl Library {
     /// The symbol must be a function with that signature.
     pub unsafe fn call_i32(&self, name: &str) -> Option<i32> {
         let address = self.symbol(name)?;
-        if self.machine == Machine::Aarch64 {
+        if self.machine != Machine::HOST {
             return match guest::call_i32(address as u64) {
                 Ok(value) => Some(value),
                 Err(reason) => crate::shims::die(format_args!(
@@ -391,10 +401,11 @@ fn snapshot() -> Vec<&'static Library> {
 }
 
 /// Every loaded library built for a guest ABI.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))] // only the x86_64 host has guests
 pub(crate) fn guest_libraries() -> Vec<&'static Library> {
     snapshot()
         .into_iter()
-        .filter(|library| library.machine != Machine::X86_64)
+        .filter(|library| library.machine != Machine::HOST)
         .collect()
 }
 
@@ -424,7 +435,7 @@ pub fn load(path: &Path, search_dirs: &[PathBuf]) -> Result<&'static Library, Er
 
     // Mapped and relocated, so the code is final: translation of it may start ahead.
     for library in &new_libraries {
-        if library.machine != Machine::X86_64 {
+        if library.machine != Machine::HOST {
             guest::profile::library_loaded(library);
         }
     }
@@ -528,8 +539,14 @@ fn map_and_link(
     }
 
     let root = pending[0];
-    if root.machine != Machine::X86_64 {
-        guest::engine().map_err(|reason| Error::NoTranslator(root.name.clone(), reason))?;
+    #[cfg(target_arch = "aarch64")]
+    if root.machine == Machine::HOST {
+        crate::bionic_tls::check()
+            .map_err(|reason| Error::NoBionicSlots(root.name.clone(), reason))?;
+    }
+    if root.machine != Machine::HOST {
+        guest::engine()
+            .map_err(|reason| Error::NoTranslator(root.name.clone(), root.machine, reason))?;
         GUEST_LOADED.store(true, std::sync::atomic::Ordering::Release);
     }
     let scope = Scope::of(root);
@@ -726,7 +743,7 @@ fn resolve(
             return library.symbol_address(&symbol).map(Some);
         }
     }
-    if machine != Machine::X86_64 {
+    if machine != Machine::HOST {
         return guest::import(name, &scope.tables, is_data);
     }
     for table in &scope.tables {
@@ -757,7 +774,7 @@ unsafe fn call_resolver(address: u64) -> u64 {
 /// Runs an ifunc resolver: host code directly, guest code through the engine with the guest's
 /// HWCAP.
 fn resolve_ifunc(machine: Machine, resolver: u64) -> Result<u64, ElfError> {
-    if machine != Machine::X86_64 {
+    if machine != Machine::HOST {
         return guest::call_ifunc(resolver)
             .map_err(|_| ElfError::Unsupported("an ifunc resolver stopped in guest code"));
     }
@@ -940,7 +957,7 @@ fn run_initializers(libraries: &[&'static Library]) -> Result<(), Error> {
         let functions = library
             .init_functions()
             .map_err(|error| library.invalid(error))?;
-        if library.machine == Machine::Aarch64 {
+        if library.machine != Machine::HOST {
             for address in functions {
                 // SAFETY: reads glibc's own pointer.
                 let environment = unsafe { environ } as u64;
@@ -1079,7 +1096,7 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
             tables: Vec::new(),
         }
     };
-    match resolve(&scope, symbol.to_bytes(), false, Machine::X86_64) {
+    match resolve(&scope, symbol.to_bytes(), false, Machine::HOST) {
         Ok(Some(address)) => address as *mut c_void,
         _ => {
             set_dl_error(format!("undefined symbol: {}", symbol.to_string_lossy()));
@@ -1088,6 +1105,7 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `dlsym` for guest code: an address guest code can call, its own code or a service stub,
 /// searched among guest libraries and the signature tables only, never host libraries.
 pub(crate) fn guest_symbol(handle: *mut c_void, name: &[u8]) -> Option<u64> {
@@ -1095,7 +1113,7 @@ pub(crate) fn guest_symbol(handle: *mut c_void, name: &[u8]) -> Option<u64> {
     let rtld_next = usize::MAX as *mut c_void;
     let libraries: Vec<&'static Library> = snapshot()
         .into_iter()
-        .filter(|library| library.machine != Machine::X86_64)
+        .filter(|library| library.machine != Machine::HOST)
         .collect();
     let scope = if handle == RTLD_DEFAULT || handle == rtld_next {
         Scope {
@@ -1198,6 +1216,7 @@ pub unsafe extern "C" fn dl_iterate_phdr(
 ///
 /// Used on the way to stopping the program, possibly from a thread that holds the registry, so it
 /// never waits for the lock: a busy registry gives the bare address.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))] // only the x86_64 host has guests
 pub(crate) fn describe_address(address: u64) -> String {
     let libraries = match REGISTRY.try_lock() {
         Ok(mut guard) => guard
@@ -1232,9 +1251,9 @@ pub fn is_guest_address(address: usize) -> bool {
     if !GUEST_LOADED.load(std::sync::atomic::Ordering::Acquire) {
         return false;
     }
-    snapshot().into_iter().any(|library| {
-        library.machine != Machine::X86_64 && library.image.contains_address(address)
-    })
+    snapshot()
+        .into_iter()
+        .any(|library| library.machine != Machine::HOST && library.image.contains_address(address))
 }
 
 #[cfg(test)]

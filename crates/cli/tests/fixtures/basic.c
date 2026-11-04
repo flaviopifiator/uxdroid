@@ -202,6 +202,41 @@ int test_threads(void) {
     return shared_value == 11 && cleanup_ran == 1 ? 0 : 3;
 }
 
+// glibc may write more of a thread object than bionic's type holds; nothing past it may change.
+int test_thread_objects_keep_their_bionic_size(void) {
+    struct {
+        pthread_attr_t attributes;
+        long canary;
+    } attr = {.canary = CANARY};
+    if (pthread_attr_init(&attr.attributes) != 0) return 1;
+    pthread_attr_destroy(&attr.attributes);
+    if (attr.canary != CANARY) return 2;
+    if (pthread_getattr_np(pthread_self(), &attr.attributes) != 0) return 3;
+    size_t size = 0;
+    if (pthread_attr_getstacksize(&attr.attributes, &size) != 0 || size == 0) return 4;
+    pthread_attr_destroy(&attr.attributes);
+    if (attr.canary != CANARY) return 5;
+
+    struct {
+        pthread_mutex_t mutex;
+        long canary;
+    } guarded = {.canary = CANARY};
+    pthread_mutexattr_t recursive;
+    pthread_mutexattr_init(&recursive);
+    pthread_mutexattr_settype(&recursive, PTHREAD_MUTEX_RECURSIVE);
+    for (int round = 0; round < 2; round++) {
+        if (pthread_mutex_init(&guarded.mutex, round == 0 ? NULL : &recursive) != 0) return 6;
+        if (pthread_mutex_lock(&guarded.mutex) != 0) return 7;
+        int again = pthread_mutex_trylock(&guarded.mutex);
+        if (round == 0 ? again != EBUSY : again != 0) return 8;
+        if (round == 1) pthread_mutex_unlock(&guarded.mutex);
+        if (pthread_mutex_unlock(&guarded.mutex) != 0) return 9;
+        if (pthread_mutex_destroy(&guarded.mutex) != 0) return 10;
+    }
+    pthread_mutexattr_destroy(&recursive);
+    return guarded.canary == CANARY ? 0 : 11;
+}
+
 int test_semaphore(void) {
     struct {
         sem_t semaphore;

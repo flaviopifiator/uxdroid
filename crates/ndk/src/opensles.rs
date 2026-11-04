@@ -927,8 +927,13 @@ unsafe extern "C" fn queue_register(
 
 #[repr(C)]
 struct ConfigurationMethods {
-    set: unsafe extern "C" fn(*const c_void, *const i8, *const c_void, u32) -> Result,
-    get: unsafe extern "C" fn(*const c_void, *const i8, *mut u32, *mut c_void) -> Result,
+    set: unsafe extern "C" fn(*const c_void, *const std::ffi::c_char, *const c_void, u32) -> Result,
+    get: unsafe extern "C" fn(
+        *const c_void,
+        *const std::ffi::c_char,
+        *mut u32,
+        *mut c_void,
+    ) -> Result,
     acquire_java_proxy: unsafe extern "C" fn(*const c_void, u32, *mut c_void) -> Result,
     release_java_proxy: unsafe extern "C" fn(*const c_void, u32) -> Result,
 }
@@ -942,7 +947,7 @@ static CONFIGURATION_METHODS: ConfigurationMethods = ConfigurationMethods {
 
 unsafe extern "C" fn configuration_set(
     _interface: *const c_void,
-    key: *const i8,
+    key: *const std::ffi::c_char,
     value: *const c_void,
     _size: u32,
 ) -> Result {
@@ -955,7 +960,7 @@ unsafe extern "C" fn configuration_set(
 
 unsafe extern "C" fn configuration_get(
     _interface: *const c_void,
-    _key: *const i8,
+    _key: *const std::ffi::c_char,
     _size: *mut u32,
     _value: *mut c_void,
 ) -> Result {

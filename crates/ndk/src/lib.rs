@@ -6,7 +6,11 @@
 //! functions from the same tables, so nothing in this crate knows the app's architecture.
 //!
 //! `liblog` lives in the bridge itself, next to the printf machinery it shares with bionic's libc.
-#![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+#![cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux",
+    target_env = "gnu"
+))]
 
 mod aaudio;
 mod assets;

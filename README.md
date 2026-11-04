@@ -41,7 +41,7 @@ Exit codes: `0` success, `1` unreadable or malformed APK, `2` wrong usage.
 
 ## Load a native library
 
-`uxdroid load` loads an x86_64 `.so` built for Android, with its dependencies, and runs its initializers. An arm64-v8a `.so` runs through the translator, `libuxdroid_dynarmic.so`, which the `translation` service builds and `UXDROID_TRANSLATOR` names; without it, the load fails with the reason. Only an x86_64 glibc host is supported. Loading runs the library's code, so use the sandbox for anything you did not build:
+`uxdroid load` loads a `.so` built for Android for the host's CPU, with its dependencies, and runs its initializers. On an x86_64 host an arm64-v8a `.so` runs through the translator, `libuxdroid_dynarmic.so`, which the `translation` service builds and `UXDROID_TRANSLATOR` names; without it, the load fails with the reason. On an aarch64 host an arm64-v8a `.so` is host code and loads with no translator, and an x86_64 one is refused: `error: libfoo.so is x86_64 code, which needs the translator: an arm64 host has no translator for x86_64 code yet`. x86_64 and aarch64 glibc hosts are supported. Loading runs the library's code, so use the sandbox for anything you did not build:
 
 ```bash
 UXDROID_SAMPLES=/path/to/libs docker compose run --rm sandbox \
@@ -60,6 +60,17 @@ call answer: 42
 | `--call <symbol>` | Call the exported function `int symbol(void)` and print its result. At most once. |
 
 Exit codes: `0` success, `1` the library or a dependency cannot be loaded, or the symbol does not exist, `2` wrong usage. A load that fails names every missing library or symbol it knows of. A function from glibc that has not been audited for bionic compatibility, such as `regcomp`, stops the program with its name if called. See [the architecture](docs/architecture.md).
+
+The aarch64 build comes from the `dev-arm64` service, which cross-compiles into `/cache/target-arm64-host` and runs what it builds under QEMU user, so it works on an x86_64 machine; `sandbox-arm64` is its sandbox:
+
+```bash
+docker compose build dev dev-arm64
+docker compose run --rm dev-arm64 cargo test -p uxdroid-cli --test load
+UXDROID_SAMPLES=/path/to/libs docker compose run --rm sandbox-arm64 qemu-aarch64 \
+  /cache/target-arm64-host/aarch64-unknown-linux-gnu/debug/uxdroid load /samples/libfoo.so --call answer
+```
+
+Tests that start `uxdroid` go through `UXDROID_TEST_RUNNER` (`qemu-aarch64` there); only the load tests do so far, so the other command tests fail in `dev-arm64` with an exec format error.
 
 ## Run an APK
 

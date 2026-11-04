@@ -1,8 +1,10 @@
 //! Bionic symbols that glibc lacks or defines with a different ABI.
 //!
-//! Struct sizes and constants below were measured by compiling one probe against both libcs:
-//! `sigset_t` is 8 bytes in bionic and 128 in glibc, `jmp_buf` 88 and 200, `fpos_t` 8 and 16.
-//! `long double` has the same size with another format: binary128 and x87 80-bit.
+//! Struct sizes and constants below were measured by compiling one probe against both libcs
+//! (`abi/compare.sh`): on x86_64 `sigset_t` is 8 bytes in bionic and 128 in glibc, `jmp_buf` 88
+//! and 200, `fpos_t` 8 and 16; on aarch64 `jmp_buf` is 256 and 312, and `pthread_attr_t` and
+//! `pthread_mutex_t` are larger in glibc too. `long double` has the same size with another format
+//! on x86_64, binary128 and x87 80-bit; on aarch64 both are binary128.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -49,6 +51,7 @@ pub fn resolve(name: &CStr, is_data: bool) -> Option<usize> {
 
 /// Whether `name` binds to a shim or an audited glibc function, rather than a stub that stops
 /// the program naming it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn is_audited(name: &str) -> bool {
     table().contains_key(name) || audited().contains(name)
 }
@@ -68,6 +71,7 @@ const UNAUDITED_SLOTS: usize = 4096;
 
 // One small stub per unaudited symbol, each pushing its slot number. Having them in the binary
 // means nothing is written at run time, and pages stay free of write-and-execute mappings.
+#[cfg(target_arch = "x86_64")]
 std::arch::global_asm!(
     ".globl uxdroid_unaudited_stubs",
     ".p2align 4",
@@ -85,6 +89,24 @@ std::arch::global_asm!(
     "call {report}",
     report = sym report_unaudited,
     options(att_syntax),
+);
+
+// The same on AArch64: each 16-byte stub moves its slot number into the first argument register.
+#[cfg(target_arch = "aarch64")]
+std::arch::global_asm!(
+    ".globl uxdroid_unaudited_stubs",
+    ".p2align 4",
+    "uxdroid_unaudited_stubs:",
+    ".set uxdroid_slot, 0",
+    ".rept 4096",
+    ".p2align 4",
+    "mov x0, #uxdroid_slot",
+    "b uxdroid_unaudited_common",
+    ".set uxdroid_slot, uxdroid_slot + 1",
+    ".endr",
+    "uxdroid_unaudited_common:",
+    "b {report}",
+    report = sym report_unaudited,
 );
 
 unsafe extern "C" {
@@ -209,6 +231,10 @@ fn table() -> &'static HashMap<&'static str, Target> {
         }
         for &(name, address) in FUNCTIONS {
             table.insert(name, Target::Function(address.0));
+        }
+        #[cfg(target_arch = "aarch64")]
+        for &(name, address) in wide_objects::FUNCTIONS {
+            table.insert(name, Target::Function(address));
         }
         table
     })
@@ -408,6 +434,7 @@ unsafe extern "C" {
 // `va_list` by hand: 24 bytes of header at rsp, then the register save area, then the caller's
 // stack arguments past our frame. `$named_bytes` is 8 per named argument, which have already
 // consumed that much of the general register area; the next register then carries the va_list.
+#[cfg(target_arch = "x86_64")]
 macro_rules! variadic_entry {
     ($name:literal, $target:path, $named_bytes:literal, $va_list_register:literal) => {
         std::arch::global_asm!(
@@ -447,20 +474,79 @@ macro_rules! variadic_entry {
     };
 }
 
-variadic_entry!("uxdroid_fprintf", vfprintf, "16", "rdx");
-variadic_entry!("uxdroid_fscanf", vfscanf, "16", "rdx");
-variadic_entry!("uxdroid_fwprintf", vfwprintf, "16", "rdx");
-variadic_entry!("uxdroid_fwscanf", vfwscanf, "16", "rdx");
-variadic_entry!("uxdroid_printf", vprintf, "8", "rsi");
-variadic_entry!("uxdroid_sprintf", vsprintf, "16", "rdx");
-variadic_entry!("uxdroid_snprintf", checked_vsnprintf, "24", "rcx");
-variadic_entry!("uxdroid_asprintf", vasprintf, "16", "rdx");
-variadic_entry!("uxdroid_dprintf", vdprintf, "16", "rdx");
-variadic_entry!("uxdroid_sscanf", vsscanf, "16", "rdx");
-variadic_entry!("uxdroid_swprintf", vswprintf, "24", "rcx");
-variadic_entry!("uxdroid_syslog", vsyslog, "16", "rdx");
-variadic_entry!("uxdroid_sprintf_chk", vsprintf_chk, "32", "r8");
-variadic_entry!("uxdroid_snprintf_chk", vsnprintf_chk, "40", "r9");
+// The AAPCS64 form: the entry saves x0-x7 and q0-q7 in its frame and builds the 32-byte
+// `va_list` there, `__stack` at the caller's stack arguments, `__gr_top` and `__vr_top` past each
+// save area, and `__gr_offs` skipping the `$named_bytes` the named arguments took (no named
+// argument is floating point). A `va_list` is passed by reference, so the next register gets its
+// address. Frame: x29 and x30 at 0, general registers at 16, vector registers at 80, the
+// `va_list` at 208, 240 bytes in all.
+#[cfg(target_arch = "aarch64")]
+macro_rules! variadic_entry {
+    ($name:literal, $target:path, $named_bytes:literal, $va_list_register:literal) => {
+        std::arch::global_asm!(
+            concat!(".globl ", $name),
+            concat!(".type ", $name, ", %function"),
+            concat!($name, ":"),
+            "sub sp, sp, #240",
+            "stp x29, x30, [sp]",
+            "mov x29, sp",
+            "stp x0, x1, [sp, #16]",
+            "stp x2, x3, [sp, #32]",
+            "stp x4, x5, [sp, #48]",
+            "stp x6, x7, [sp, #64]",
+            "stp q0, q1, [sp, #80]",
+            "stp q2, q3, [sp, #112]",
+            "stp q4, q5, [sp, #144]",
+            "stp q6, q7, [sp, #176]",
+            "add x9, sp, #240",
+            "str x9, [sp, #208]",
+            "add x9, sp, #80",
+            "str x9, [sp, #216]",
+            "add x9, sp, #208",
+            "str x9, [sp, #224]",
+            concat!("mov w9, #(", $named_bytes, " - 64)"),
+            "str w9, [sp, #232]",
+            "mov w9, #-128",
+            "str w9, [sp, #236]",
+            concat!("add ", $va_list_register, ", sp, #208"),
+            "bl {target}",
+            "ldp x29, x30, [sp]",
+            "add sp, sp, #240",
+            "ret",
+            concat!(".size ", $name, ", . - ", $name),
+            target = sym $target,
+        );
+    };
+}
+
+/// The register after `$named` integer arguments, which carries the `va_list`.
+macro_rules! variadic_entries {
+    ($(($name:literal, $target:path, $named_bytes:literal, $x86_64:literal, $aarch64:literal),)*) => {
+        $(
+            #[cfg(target_arch = "x86_64")]
+            variadic_entry!($name, $target, $named_bytes, $x86_64);
+            #[cfg(target_arch = "aarch64")]
+            variadic_entry!($name, $target, $named_bytes, $aarch64);
+        )*
+    };
+}
+
+variadic_entries! {
+    ("uxdroid_fprintf", vfprintf, "16", "rdx", "x2"),
+    ("uxdroid_fscanf", vfscanf, "16", "rdx", "x2"),
+    ("uxdroid_fwprintf", vfwprintf, "16", "rdx", "x2"),
+    ("uxdroid_fwscanf", vfwscanf, "16", "rdx", "x2"),
+    ("uxdroid_printf", vprintf, "8", "rsi", "x1"),
+    ("uxdroid_sprintf", vsprintf, "16", "rdx", "x2"),
+    ("uxdroid_snprintf", checked_vsnprintf, "24", "rcx", "x3"),
+    ("uxdroid_asprintf", vasprintf, "16", "rdx", "x2"),
+    ("uxdroid_dprintf", vdprintf, "16", "rdx", "x2"),
+    ("uxdroid_sscanf", vsscanf, "16", "rdx", "x2"),
+    ("uxdroid_swprintf", vswprintf, "24", "rcx", "x3"),
+    ("uxdroid_syslog", vsyslog, "16", "rdx", "x2"),
+    ("uxdroid_sprintf_chk", vsprintf_chk, "32", "r8", "x4"),
+    ("uxdroid_snprintf_chk", vsnprintf_chk, "40", "r9", "x5"),
+}
 
 // --- Formatted output ---
 
@@ -670,6 +756,7 @@ unsafe extern "C" fn vfwscanf(file: *mut c_void, format: *const i32, args: *mut 
 // bionic's jmp_buf is 88 bytes and glibc's 200, and glibc's `setjmp` writes a whole signal mask.
 // These own the buffer: callee-saved registers at 0..56, the mask flag at 64, the mask at 72, and
 // the floating point control words at 80.
+#[cfg(target_arch = "x86_64")]
 std::arch::global_asm!(
     ".globl uxdroid_setjmp",
     ".globl uxdroid_underscore_setjmp",
@@ -733,7 +820,80 @@ std::arch::global_asm!(
     restore_mask = sym restore_jump_mask,
 );
 
+#[cfg(target_arch = "x86_64")]
 const JUMP_MASK_OFFSET: usize = 72;
+
+// On AArch64 bionic's jmp_buf is 256 bytes and glibc's 312. These own the buffer: x19-x30 at
+// 0..96, sp at 96, d8-d15 at 104..168, the mask flag at 168, the mask at 176 and FPCR at 184.
+#[cfg(target_arch = "aarch64")]
+std::arch::global_asm!(
+    ".globl uxdroid_setjmp",
+    ".globl uxdroid_underscore_setjmp",
+    ".globl uxdroid_sigsetjmp",
+    ".globl uxdroid_longjmp",
+    "uxdroid_setjmp:",
+    "mov w1, #1",
+    "b uxdroid_sigsetjmp",
+    "uxdroid_underscore_setjmp:",
+    "mov w1, #0",
+    "uxdroid_sigsetjmp:",
+    "stp x19, x20, [x0]",
+    "stp x21, x22, [x0, #16]",
+    "stp x23, x24, [x0, #32]",
+    "stp x25, x26, [x0, #48]",
+    "stp x27, x28, [x0, #64]",
+    "stp x29, x30, [x0, #80]",
+    "mov x2, sp",
+    "str x2, [x0, #96]",
+    "stp d8, d9, [x0, #104]",
+    "stp d10, d11, [x0, #120]",
+    "stp d12, d13, [x0, #136]",
+    "stp d14, d15, [x0, #152]",
+    "mov w2, w1",
+    "str x2, [x0, #168]",
+    "mrs x2, fpcr",
+    "str x2, [x0, #184]",
+    "cbz w1, 2f",
+    "stp x29, x30, [sp, #-16]!",
+    "mov x29, sp",
+    "bl {save_mask}",
+    "ldp x29, x30, [sp], #16",
+    "2:",
+    "mov w0, #0",
+    "ret",
+    "uxdroid_longjmp:",
+    "ldr x2, [x0, #168]",
+    "cbz x2, 3f",
+    "stp x0, x1, [sp, #-16]!",
+    "stp x29, x30, [sp, #-16]!",
+    "mov x29, sp",
+    "bl {restore_mask}",
+    "ldp x29, x30, [sp], #16",
+    "ldp x0, x1, [sp], #16",
+    "3:",
+    "ldr x2, [x0, #184]",
+    "msr fpcr, x2",
+    "ldp x19, x20, [x0]",
+    "ldp x21, x22, [x0, #16]",
+    "ldp x23, x24, [x0, #32]",
+    "ldp x25, x26, [x0, #48]",
+    "ldp x27, x28, [x0, #64]",
+    "ldp x29, x30, [x0, #80]",
+    "ldp d8, d9, [x0, #104]",
+    "ldp d10, d11, [x0, #120]",
+    "ldp d12, d13, [x0, #136]",
+    "ldp d14, d15, [x0, #152]",
+    "ldr x2, [x0, #96]",
+    "mov sp, x2",
+    "cmp w1, #0",
+    "csinc w0, w1, wzr, ne",
+    "ret",
+    save_mask = sym save_jump_mask,
+    restore_mask = sym restore_jump_mask,
+);
+
+#[cfg(target_arch = "aarch64")]
+const JUMP_MASK_OFFSET: usize = 176;
 
 unsafe extern "C" fn save_jump_mask(buffer: *mut u8) {
     // SAFETY: zero is a valid set, and `buffer` is the caller's jmp_buf, which holds this offset.
@@ -1575,6 +1735,75 @@ unsafe extern "C" fn epoll_pwait(
 }
 
 // --- Threads ---
+
+/// On AArch64 glibc's `pthread_attr_t` is 64 bytes and its mutex 48, against bionic's 56 and 40,
+/// and three functions clear the whole of glibc's size (`abi/write_extent.c`); every other
+/// function on these types stays inside bionic's. These run glibc's on an object of glibc's size
+/// and copy back what bionic's holds, which is all glibc ever reads.
+#[cfg(target_arch = "aarch64")]
+mod wide_objects {
+    use std::ffi::{c_int, c_void};
+    use std::mem::MaybeUninit;
+
+    const BIONIC_ATTR_SIZE: usize = 56;
+    const BIONIC_MUTEX_SIZE: usize = 40;
+
+    /// Runs `call` on a zeroed `T` holding a copy of the caller's `size` bytes, then copies them
+    /// back.
+    ///
+    /// # Safety
+    /// `object` must point at `size` writable bytes, `size` at most `size_of::<T>()`.
+    unsafe fn through_host<T>(
+        object: *mut c_void,
+        size: usize,
+        call: impl FnOnce(*mut T) -> c_int,
+    ) -> c_int {
+        let mut host = MaybeUninit::<T>::zeroed();
+        // SAFETY: the caller promises `size` bytes at `object`, and `host` holds at least as many.
+        unsafe {
+            std::ptr::copy_nonoverlapping(object.cast::<u8>(), host.as_mut_ptr().cast(), size);
+            let status = call(host.as_mut_ptr());
+            std::ptr::copy_nonoverlapping(host.as_ptr().cast::<u8>(), object.cast(), size);
+            status
+        }
+    }
+
+    pub unsafe extern "C" fn pthread_attr_init(attr: *mut c_void) -> c_int {
+        // SAFETY: the C contract gives `attr` bionic's size.
+        unsafe { through_host(attr, BIONIC_ATTR_SIZE, |host| libc::pthread_attr_init(host)) }
+    }
+
+    pub unsafe extern "C" fn pthread_getattr_np(
+        thread: libc::pthread_t,
+        attr: *mut c_void,
+    ) -> c_int {
+        // SAFETY: as above.
+        unsafe {
+            through_host(attr, BIONIC_ATTR_SIZE, |host| {
+                libc::pthread_getattr_np(thread, host)
+            })
+        }
+    }
+
+    pub unsafe extern "C" fn pthread_mutex_init(
+        mutex: *mut c_void,
+        attr: *const libc::pthread_mutexattr_t,
+    ) -> c_int {
+        // SAFETY: the C contract gives `mutex` bionic's size; bionic's mutex attribute is as
+        // large as glibc's (compare.sh).
+        unsafe {
+            through_host(mutex, BIONIC_MUTEX_SIZE, |host| {
+                libc::pthread_mutex_init(host, attr)
+            })
+        }
+    }
+
+    pub const FUNCTIONS: &[(&str, *const ())] = &[
+        ("pthread_attr_init", pthread_attr_init as *const ()),
+        ("pthread_getattr_np", pthread_getattr_np as *const ()),
+        ("pthread_mutex_init", pthread_mutex_init as *const ()),
+    ];
+}
 
 /// `__pthread_cleanup_t` from bionic's `pthread.h`. glibc keeps no equivalent list.
 #[repr(C)]

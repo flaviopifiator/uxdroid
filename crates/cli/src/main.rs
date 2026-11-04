@@ -7,6 +7,7 @@ use uxdroid_apk::{Apk, host_abi, inspect};
 
 const INSPECT_USAGE: &str = "usage: uxdroid inspect <apk>";
 const LOAD_USAGE: &str = "usage: uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]";
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // `run` needs ART for the host
 const RUN_USAGE: &str = "usage: uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]";
 const INSTALL_USAGE: &str = "usage: uxdroid install <apk> --data <dir>";
 const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
@@ -78,6 +79,8 @@ fn app_command(_args: &[OsString]) -> ExitCode {
     fail("error: uxdroid app needs a Linux host", EXIT_FAILURE)
 }
 
+#[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"))]
+mod bionic_slots;
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 mod run;
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
@@ -127,7 +130,11 @@ fn fail(message: &str, code: u8) -> ExitCode {
     ExitCode::from(code)
 }
 
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux",
+    target_env = "gnu"
+))]
 mod native {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -181,8 +188,14 @@ mod native {
         let Some(args) = parse(args) else {
             return fail(LOAD_USAGE, EXIT_USAGE);
         };
-        // Only a guest library loads the engine; host ones never touch it.
+        // Only a guest library loads the engine; host ones never touch it. An arm64 host has none.
+        #[cfg(target_arch = "x86_64")]
         uxdroid_translate::install();
+        // arm64 code reads bionic's TLS slots; the loader refuses it until they are reserved.
+        #[cfg(target_arch = "aarch64")]
+        if let Err(error) = crate::bionic_slots::reserve() {
+            return fail(&format!("error: {error}"), EXIT_FAILURE);
+        }
         let library = match load(args.library, &args.search_dirs) {
             Ok(library) => library,
             Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),
@@ -207,7 +220,11 @@ mod native {
     }
 }
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")))]
+#[cfg(not(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux",
+    target_env = "gnu"
+)))]
 mod native {
     use std::ffi::OsString;
     use std::process::ExitCode;
@@ -216,7 +233,7 @@ mod native {
 
     pub fn run_load(_args: &[OsString]) -> ExitCode {
         fail(
-            "error: uxdroid load needs an x86_64 glibc host",
+            "error: uxdroid load needs an x86_64 or aarch64 glibc host",
             EXIT_FAILURE,
         )
     }

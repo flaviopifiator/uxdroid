@@ -231,9 +231,11 @@ unsafe extern "C" {
     fn uxdroid_android_log_assert();
 }
 
-variadic_entry!("uxdroid_android_log_print", vprint, "24", "rcx");
-variadic_entry!("uxdroid_android_log_buf_print", buf_vprint, "32", "r8");
-variadic_entry!("uxdroid_android_log_assert", vassert, "24", "rcx");
+variadic_entries! {
+    ("uxdroid_android_log_print", vprint, "24", "rcx", "x3"),
+    ("uxdroid_android_log_buf_print", buf_vprint, "32", "r8", "x4"),
+    ("uxdroid_android_log_assert", vassert, "24", "rcx", "x3"),
+}
 
 pub static TABLE: Table = Table {
     library: "liblog.so",

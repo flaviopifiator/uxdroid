@@ -8,7 +8,11 @@
 //!
 //! The Android system libraries apps link against, such as `libandroid.so` or `libEGL.so`, are the
 //! signature tables of `uxdroid_ndk`, served to the loader before the first app library loads.
-#![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+#![cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux",
+    target_env = "gnu"
+))]
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
@@ -18,7 +22,9 @@ use std::ptr::{null, null_mut};
 use std::sync::Once;
 
 use uxdroid_bridge::elf::Machine;
-use uxdroid_bridge::{Library, guest, is_guest_address, load, table};
+#[cfg(target_arch = "x86_64")]
+use uxdroid_bridge::guest;
+use uxdroid_bridge::{Library, is_guest_address, load, table};
 
 /// Up to identifying bridged function pointers. Below it, libnativebridge warns on every native
 /// method ART registers, thousands of times for the framework.
@@ -102,6 +108,8 @@ fn provide_system_libraries() {
         for library in uxdroid_ndk::tables() {
             table::provide(library);
         }
+        // Only an x86_64 host has a translator; an arm64 host runs arm64-v8a code itself.
+        #[cfg(target_arch = "x86_64")]
         uxdroid_translate::install();
     });
 }
@@ -141,10 +149,10 @@ unsafe extern "C" fn get_trampoline(
     let Ok(name) = name.to_str() else {
         return null_mut();
     };
-    if library.machine() != Machine::X86_64 {
+    if library.machine() != Machine::HOST {
         // SAFETY: ART passes the method's shorty, or null for `JNI_OnLoad`.
         let shorty = unsafe { method_shorty(shorty, shorty_length) };
-        return guest::jni_trampoline(library, name, shorty).unwrap_or(null_mut());
+        return guest_trampoline(library, name, shorty).unwrap_or(null_mut());
     }
     library
         .symbol(name)
@@ -282,10 +290,35 @@ fn function_pointer(method: *const c_void, is_guest: bool, shorty: Option<&[u8]>
         set_error("a guest function pointer came without a shorty");
         return null_mut();
     };
-    guest::jni_method_trampoline(method as u64, shorty).unwrap_or_else(|| {
+    guest_method_trampoline(method as u64, shorty).unwrap_or_else(|| {
         set_error("a guest function pointer has a shorty that cannot be carried");
         null_mut()
     })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn guest_trampoline(library: &Library, name: &str, shorty: Option<&[u8]>) -> Option<*mut c_void> {
+    guest::jni_trampoline(library, name, shorty)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn guest_method_trampoline(method: u64, shorty: &[u8]) -> Option<*mut c_void> {
+    guest::jni_method_trampoline(method, shorty)
+}
+
+/// An arm64 host loads no library for another ABI, so it never has guest code to wrap.
+#[cfg(target_arch = "aarch64")]
+fn guest_trampoline(
+    _library: &Library,
+    _name: &str,
+    _shorty: Option<&[u8]>,
+) -> Option<*mut c_void> {
+    None
+}
+
+#[cfg(target_arch = "aarch64")]
+fn guest_method_trampoline(_method: u64, _shorty: &[u8]) -> Option<*mut c_void> {
+    None
 }
 
 /// Only functions in guest libraries need translation; with none loaded this is one atomic load.

@@ -1,7 +1,13 @@
 //! `uxdroid load` against libraries really built with the Android NDK.
 //!
 //! The NDK ships in the dev image. Without it these tests fail instead of skipping silently.
-#![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+//! Fixtures are built for the CPU the tests run on, x86_64 or aarch64; on an x86_64 machine the
+//! aarch64 build runs under QEMU user, which `UXDROID_TEST_RUNNER` names (`dev-arm64` service).
+#![cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux",
+    target_env = "gnu"
+))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -27,6 +33,7 @@ const CHECKS: &[&str] = &[
     "test_api_level",
     "test_threads",
     "test_semaphore",
+    "test_thread_objects_keep_their_bionic_size",
     "test_dlopen",
     "test_getaddrinfo",
     "test_strerror_r",
@@ -46,6 +53,12 @@ const CHECKS: &[&str] = &[
     "test_emulated_tls",
 ];
 
+/// The NDK's name for this host's CPU, whose libraries load with no translation.
+#[cfg(target_arch = "x86_64")]
+const HOST_TRIPLE: &str = "x86_64-linux-android";
+#[cfg(target_arch = "aarch64")]
+const HOST_TRIPLE: &str = "aarch64-linux-android";
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -62,7 +75,7 @@ fn ndk_build(dir: &Path, output: &str, sdk: &str, sources: &[&str], flags: &[&st
     std::fs::create_dir_all(dir).unwrap();
     let is_cxx = sources.iter().any(|source| source.ends_with(".cpp"));
     let clang = format!(
-        "bin/x86_64-linux-android{sdk}-clang{}",
+        "bin/{HOST_TRIPLE}{sdk}-clang{}",
         if is_cxx { "++" } else { "" }
     );
     let status = Command::new(toolchain().join(clang))
@@ -94,6 +107,9 @@ fn variants() -> &'static [(&'static str, PathBuf)] {
             ),
             ("sysv-hash", &["-Wl,--hash-style=sysv"]),
             ("page-16k", &["-Wl,-z,max-page-size=16384"]),
+            // Every function checks its stack canary, which arm64 code reads from bionic's TLS
+            // slot 5, at a fixed offset from the thread pointer.
+            ("stack-protector", &["-fstack-protector-all"]),
         ];
         variants
             .iter()
@@ -113,11 +129,20 @@ fn plain_dir() -> &'static Path {
     &variants()[0].1
 }
 
+/// The built `uxdroid`, started through `UXDROID_TEST_RUNNER` when that is set.
+fn uxdroid_command() -> Command {
+    match std::env::var_os("UXDROID_TEST_RUNNER") {
+        Some(runner) => {
+            let mut command = Command::new(runner);
+            command.arg(env!("CARGO_BIN_EXE_uxdroid"));
+            command
+        }
+        None => Command::new(env!("CARGO_BIN_EXE_uxdroid")),
+    }
+}
+
 fn uxdroid(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_uxdroid"))
-        .args(args)
-        .output()
-        .unwrap()
+    uxdroid_command().args(args).output().unwrap()
 }
 
 fn load_and_call(library: &Path, symbol: &str) -> Output {
@@ -225,7 +250,7 @@ fn android_log_formats_register_float_and_stack_arguments() {
 fn the_ndk_cxx_runtime_works_shared_and_static() {
     let dir = build_root().join("cxx");
     std::fs::create_dir_all(&dir).unwrap();
-    let runtime = toolchain().join("sysroot/usr/lib/x86_64-linux-android/libc++_shared.so");
+    let runtime = toolchain().join(format!("sysroot/usr/lib/{HOST_TRIPLE}/libc++_shared.so"));
     std::fs::copy(runtime, dir.join("libc++_shared.so")).unwrap();
     ndk_build(&dir, "libshared.so", MIN_SDK, &["cxx.cpp"], &[]);
     ndk_build(
@@ -349,7 +374,7 @@ fn repeating_call_is_wrong_usage() {
 
 #[test]
 fn a_bare_file_name_searches_the_current_directory_for_dependencies() {
-    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+    let output = uxdroid_command()
         .args(["load", "libbasic.so", "--call", "answer"])
         .current_dir(plain_dir())
         .output()
@@ -394,10 +419,16 @@ fn an_ifunc_resolver_outside_code_is_rejected_before_running() {
     let dir = build_root().join("bad-ifunc");
     let source = dir.join("bad.s");
     std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(target_arch = "x86_64")]
+    let call = "call bad@PLT\nret";
+    #[cfg(target_arch = "aarch64")]
+    let call = "b bad";
     std::fs::write(
         &source,
-        ".data\n.globl bad\n.type bad, @gnu_indirect_function\nbad:\n.quad 0\n\
-         .text\n.globl entry\nentry:\ncall bad@PLT\nret\n",
+        format!(
+            ".data\n.globl bad\n.type bad, @gnu_indirect_function\nbad:\n.quad 0\n\
+             .text\n.globl entry\nentry:\n{call}\n"
+        ),
     )
     .unwrap();
     ndk_build(&dir, "libbad.so", MIN_SDK, &[source.to_str().unwrap()], &[]);
@@ -671,7 +702,7 @@ fn system_partition_paths_resolve_under_the_runtime_root() {
     std::fs::create_dir_all(root.join("etc")).unwrap();
     std::fs::write(root.join("etc/uxdroid-probe"), "7").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+    let output = uxdroid_command()
         .args(["load", dir.join("libsystempath.so").to_str().unwrap()])
         .args(["--call", "read_system_probe"])
         .env("ANDROID_ROOT", &root)
@@ -713,9 +744,10 @@ fn arm64_spike() -> &'static Path {
     })
 }
 
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn an_arm64_library_without_its_translator_is_refused_by_name() {
-    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+    let output = uxdroid_command()
         .args(["load", arm64_spike().to_str().unwrap()])
         .env("UXDROID_TRANSLATOR", "/nonexistent/libuxdroid_dynarmic.so")
         .output()
@@ -730,6 +762,7 @@ fn an_arm64_library_without_its_translator_is_refused_by_name() {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn an_arm64_library_runs_through_the_translator() {
     if std::env::var_os("UXDROID_TRANSLATOR").is_none() {
@@ -742,5 +775,57 @@ fn an_arm64_library_runs_through_the_translator() {
         stdout(&output).ends_with("call spike_qsort: 1235789\n"),
         "{}",
         stdout(&output)
+    );
+}
+
+/// On an arm64 host the spike's library is host code: it loads and runs with no translator,
+/// even when the one named cannot be opened.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn an_arm64_library_runs_natively_on_an_arm64_host() {
+    for (function, expected) in [
+        ("spike_qsort", 1_235_789),
+        ("spike_dl", 11_111),
+        ("spike_epoll", 1111),
+        ("spike_signal", 1000 + 10 * 10 + 1),
+        ("spike_stack_bounds", 11),
+    ] {
+        let output = uxdroid_command()
+            .args(["load", arm64_spike().to_str().unwrap(), "--call", function])
+            .env("UXDROID_TRANSLATOR", "/nonexistent/libuxdroid_dynarmic.so")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{function}: {}", stderr(&output));
+        assert!(
+            stdout(&output).ends_with(&format!("call {function}: {expected}\n")),
+            "{function}: {}",
+            stdout(&output)
+        );
+    }
+}
+
+/// An x86_64 library is the foreign ABI on an arm64 host, which has no translator yet.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn an_x86_64_library_on_an_arm64_host_is_refused_by_name() {
+    let dir = build_root().join("x86_64");
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("foreign.c");
+    std::fs::write(&source, "int entry(void) { return 1; }\n").unwrap();
+    let status = Command::new(toolchain().join("bin/x86_64-linux-android24-clang"))
+        .arg(&source)
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(dir.join("libforeign.so"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build the x86_64 library");
+
+    let output = uxdroid(&["load", dir.join("libforeign.so").to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "error: libforeign.so is x86_64 code, which needs the translator: \
+         an arm64 host has no translator for x86_64 code yet\n"
     );
 }

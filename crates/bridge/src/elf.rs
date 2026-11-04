@@ -86,8 +86,25 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Machine {
     X86_64,
-    /// `arm64-v8a`, which runs through the translator.
+    /// `arm64-v8a`, which runs through the translator on an x86_64 host.
     Aarch64,
+}
+
+impl Machine {
+    /// The CPU uxdroid itself is built for, whose libraries load with no translation.
+    #[cfg(target_arch = "x86_64")]
+    pub const HOST: Machine = Machine::X86_64;
+    /// The CPU uxdroid itself is built for, whose libraries load with no translation.
+    #[cfg(target_arch = "aarch64")]
+    pub const HOST: Machine = Machine::Aarch64;
+
+    /// Android's name for the ABI.
+    pub fn abi(self) -> &'static str {
+        match self {
+            Machine::X86_64 => "x86_64",
+            Machine::Aarch64 => "arm64-v8a",
+        }
+    }
 }
 
 /// Where the program headers live, read from the ELF header.

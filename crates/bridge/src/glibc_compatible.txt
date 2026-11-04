@@ -1,7 +1,9 @@
 # Symbols that may bind directly to glibc, because their signature, the layout of what they touch
 # and their constants match bionic's on x86_64. Layouts were compared with a probe compiled against
 # both libcs. Anything else found in glibc stops the program with its name when called.
-# Adding a symbol means auditing it first.
+# Adding a symbol means auditing it first, on both hosts. On aarch64 the list was checked with
+# ../abi/compare.sh and ../abi/write_extent.c; the three functions that write past bionic's objects
+# there have shims instead (shims.rs, wide_objects).
 __cmsg_nxthdr __ctype_get_mb_cur_max __cxa_atexit __cxa_finalize __cxa_thread_atexit_impl
 __memcpy_chk __memmove_chk __memset_chk __open_2 __openat_2 __read_chk __register_atfork
 __sched_cpucount __stack_chk_fail __strcat_chk __strcpy_chk __strncat_chk __strncpy_chk
