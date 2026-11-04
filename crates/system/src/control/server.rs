@@ -325,7 +325,7 @@ fn bound_path(fd: RawFd) -> Option<PathBuf> {
         .min(address.sun_path.len());
     let bytes: Vec<u8> = address.sun_path[..used]
         .iter()
-        .map(|&byte| byte as u8)
+        .map(|&byte| byte.to_ne_bytes()[0])
         .take_while(|&byte| byte != 0)
         .collect();
     use std::os::unix::ffi::OsStringExt;

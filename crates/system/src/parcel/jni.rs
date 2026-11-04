@@ -367,7 +367,7 @@ unsafe extern "system" fn write_string8(
             if chars.is_null() {
                 return;
             }
-            let bytes = std::slice::from_raw_parts(chars as *const u8, length);
+            let bytes = std::slice::from_raw_parts(chars.cast::<u8>(), length);
             let result = p.write_string8(Some(bytes));
             (jni.v1_1.ReleaseStringUTFChars)(env, text, chars);
             check(env, result);

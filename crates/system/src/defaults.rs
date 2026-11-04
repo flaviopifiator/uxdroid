@@ -180,7 +180,10 @@ extern "C" fn free_function(index: u32) -> usize {
     free_object as extern "C" fn(*mut [u64; 2]) as usize
 }
 
+#[cfg(target_arch = "x86_64")]
 const STUB_SIZE: usize = 32;
+#[cfg(target_arch = "aarch64")]
+const STUB_SIZE: usize = 48;
 
 /// `sub rsp,8; mov edi,index; movabs rax,first_call; call rax; add rsp,8; xor eax,eax; pxor xmm0,xmm0; ret`
 #[cfg(target_arch = "x86_64")]
@@ -208,9 +211,107 @@ fn forwarding_stub(index: u32, target: u64) -> [u8; STUB_SIZE] {
     code
 }
 
+/// AArch64 instructions the stubs are made of.
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod a64 {
+    /// `stp x29, x30, [sp, #-16]!`
+    pub const PUSH_FRAME: u32 = 0xa9bf_7bfd;
+    /// `ldp x29, x30, [sp], #16`
+    pub const POP_FRAME: u32 = 0xa8c1_7bfd;
+    /// `blr x16`
+    pub const CALL_X16: u32 = 0xd63f_0200;
+    /// `mov x0, xzr`
+    pub const ZERO_X0: u32 = 0xaa1f_03e0;
+    /// `fmov d0, xzr`
+    pub const ZERO_D0: u32 = 0x9e67_03e0;
+    /// `ret`
+    pub const RET: u32 = 0xd65f_03c0;
+    /// `brk #0`, filling space nothing branches to.
+    pub const BREAK: u32 = 0xd420_0000;
+
+    /// `movz w0, #low` and `movk w0, #high, lsl #16`: the 32-bit `value` in the first argument.
+    pub fn move_w0(value: u32) -> [u32; 2] {
+        [
+            0x5280_0000 | ((value & 0xffff) << 5),
+            0x72a0_0000 | ((value >> 16) << 5),
+        ]
+    }
+
+    /// `ldr x16, <literal>`, with the literal `offset` bytes after the instruction.
+    pub fn load_x16_literal(offset: u32) -> u32 {
+        0x5800_0000 | ((offset / 4) << 5) | 16
+    }
+
+    /// `adrp x16, <page>`, the 4 KiB page at `target` as seen from the instruction at `address`.
+    pub fn page_address_x16(address: u64, target: u64) -> u32 {
+        let pages = ((target >> 12) as i64).wrapping_sub((address >> 12) as i64) as u32;
+        0x9000_0000 | ((pages & 3) << 29) | (((pages >> 2) & 0x7_ffff) << 5) | 16
+    }
+
+    /// `ldr x16, [x16, #offset]`, with `offset` a multiple of 8 below 32 KiB.
+    pub fn load_x16_from_x16(offset: u32) -> u32 {
+        0xf940_0000 | ((offset / 8) << 10) | (16 << 5) | 16
+    }
+
+    /// `b <target>` from the instruction at `address`, within 128 MiB.
+    pub fn branch(address: u64, target: u64) -> u32 {
+        0x1400_0000 | ((target.wrapping_sub(address) as u32 / 4) & 0x3ff_ffff)
+    }
+
+    pub fn bytes<const N: usize>(words: &[u32]) -> [u8; N] {
+        let mut code = [0; N];
+        for (chunk, word) in code.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+        code
+    }
+}
+
+/// Calls `first_call(index)`, then returns zero in `x0` and `d0`. `target` is a literal at 40.
+#[cfg(target_arch = "aarch64")]
+fn stub(index: u32, target: u64) -> [u8; STUB_SIZE] {
+    use a64::*;
+    let [low, high] = move_w0(index);
+    let mut code: [u8; STUB_SIZE] = bytes(&[
+        PUSH_FRAME,
+        low,
+        high,
+        load_x16_literal(40 - 12),
+        CALL_X16,
+        POP_FRAME,
+        ZERO_X0,
+        ZERO_D0,
+        RET,
+        BREAK,
+    ]);
+    code[40..].copy_from_slice(&target.to_le_bytes());
+    code
+}
+
+/// Calls `target(index)` and returns what it returns.
+#[cfg(target_arch = "aarch64")]
+fn forwarding_stub(index: u32, target: u64) -> [u8; STUB_SIZE] {
+    use a64::*;
+    let [low, high] = move_w0(index);
+    let mut code: [u8; STUB_SIZE] = bytes(&[
+        PUSH_FRAME,
+        low,
+        high,
+        load_x16_literal(40 - 12),
+        CALL_X16,
+        POP_FRAME,
+        RET,
+        BREAK,
+        BREAK,
+        BREAK,
+    ]);
+    code[40..].copy_from_slice(&target.to_le_bytes());
+    code
+}
+
 /// Writes one stub per method into executable memory and returns their addresses, in order.
 /// The memory lives as long as the process. Call once.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn stubs(natives: &[Native]) -> Result<Vec<usize>, String> {
     REPORTED
         .set(Reported::new(natives))
@@ -243,6 +344,14 @@ pub fn stubs(natives: &[Native]) -> Result<Vec<usize>, String> {
                 Body::Free => forwarding_stub(index as u32, free),
             };
             std::ptr::copy_nonoverlapping(code.as_ptr(), base.add(index * STUB_SIZE), STUB_SIZE);
+        }
+        // AArch64's instruction cache does not see data writes until they are cleaned to it.
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe extern "C" {
+                fn __clear_cache(start: *mut libc::c_char, end: *mut libc::c_char);
+            }
+            __clear_cache(base.cast(), base.add(size).cast());
         }
         if libc::mprotect(memory, size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
             return Err(format!("mprotect: {}", std::io::Error::last_os_error()));
@@ -327,7 +436,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn stubs_return_zero_for_every_kind_and_report_first_calls() {
         let natives = parse(

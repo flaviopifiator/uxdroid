@@ -21,7 +21,11 @@ pub const HOOKS_SYMBOL: &str = "uxdroid_default_hooks";
 const HOOKS: u64 = 3;
 const TABLE: u64 = HOOKS + 1;
 const STUB_SIZE: u64 = 32;
+#[cfg(not(target_arch = "aarch64"))]
 const PAGE: u64 = 0x1000;
+/// The largest page an arm64 Linux kernel may use, so the segments map on every one.
+#[cfg(target_arch = "aarch64")]
+const PAGE: u64 = 0x10000;
 const EHDR_SIZE: u64 = 64;
 const PHDR_SIZE: u64 = 56;
 const PHDRS: u64 = 4;
@@ -29,8 +33,34 @@ const SYM_SIZE: u64 = 24;
 const RELA_SIZE: u64 = 24;
 const DYN_SIZE: u64 = 16;
 /// Returns zero in `rax` and `xmm0`: what a hook does before `attach`.
+#[cfg(not(target_arch = "aarch64"))]
 const FALLBACK: [u8; 7] = [0x31, 0xc0, 0x66, 0x0f, 0xef, 0xc0, 0xc3];
+/// Returns zero in `x0` and `d0`: what a hook does before `attach`, and how a zero body ends.
+#[cfg(target_arch = "aarch64")]
+const FALLBACK: [u8; 12] = {
+    use crate::defaults::a64::{RET, ZERO_D0, ZERO_X0};
+    let mut code = [0; 12];
+    let words = [ZERO_X0, ZERO_D0, RET];
+    let mut index = 0;
+    while index < 3 {
+        let word = words[index].to_le_bytes();
+        code[4 * index] = word[0];
+        code[4 * index + 1] = word[1];
+        code[4 * index + 2] = word[2];
+        code[4 * index + 3] = word[3];
+        index += 1;
+    }
+    code
+};
 const FALLBACK_SIZE: u64 = 16;
+#[cfg(not(target_arch = "aarch64"))]
+const MACHINE: u16 = 62; // EM_X86_64
+#[cfg(target_arch = "aarch64")]
+const MACHINE: u16 = 183; // EM_AARCH64
+#[cfg(not(target_arch = "aarch64"))]
+const RELATIVE: u64 = 8; // R_X86_64_RELATIVE
+#[cfg(target_arch = "aarch64")]
+const RELATIVE: u64 = 1027; // R_AARCH64_RELATIVE
 
 /// JNI's escaping of a class, method or argument string: `/` separates, other characters that are
 /// not ASCII letters or digits become `_1`, `_2`, `_3` or `_0xxxx` in UTF-16.
@@ -129,7 +159,14 @@ impl Writer {
 
 /// `sub rsp,8; mov edi,index; call [rip+hook]; add rsp,8`, then zero in `rax` and `xmm0` or
 /// what the hook returned, then `ret`.
-fn stub(index: u32, address: u64, hook: u64, body: Body) -> [u8; STUB_SIZE as usize] {
+#[cfg(not(target_arch = "aarch64"))]
+fn stub(
+    index: u32,
+    address: u64,
+    hook: u64,
+    body: Body,
+    _fallback: u64,
+) -> [u8; STUB_SIZE as usize] {
     let mut code = [0xcc; STUB_SIZE as usize];
     code[..5].copy_from_slice(&[0x48, 0x83, 0xec, 0x08, 0xbf]);
     code[5..9].copy_from_slice(&index.to_le_bytes());
@@ -142,6 +179,34 @@ fn stub(index: u32, address: u64, hook: u64, body: Body) -> [u8; STUB_SIZE as us
         Body::Object | Body::Free => code[19] = 0xc3,
     }
     code
+}
+
+/// Saves the frame, puts `index` in `w0`, calls the hook through `adrp` and `ldr`, then returns
+/// what it returned or branches to the fallback, which returns zero in `x0` and `d0`.
+#[cfg(target_arch = "aarch64")]
+fn stub(
+    index: u32,
+    address: u64,
+    hook: u64,
+    body: Body,
+    fallback: u64,
+) -> [u8; STUB_SIZE as usize] {
+    use crate::defaults::a64::*;
+    let [low, high] = move_w0(index);
+    let end = match body {
+        Body::Zero => branch(address + 28, fallback),
+        Body::Object | Body::Free => RET,
+    };
+    bytes(&[
+        PUSH_FRAME,
+        low,
+        high,
+        page_address_x16(address + 12, hook),
+        load_x16_from_x16((hook & 0xfff) as u32),
+        CALL_X16,
+        POP_FRAME,
+        end,
+    ])
 }
 
 /// Builds the library for `natives`, in their order: stub `i` reports index `i`.
@@ -188,7 +253,7 @@ pub fn build(natives: &[Native]) -> Vec<u8> {
     let mut out = Writer(Vec::with_capacity(end as usize));
     out.u8s(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     out.u16(3); // ET_DYN
-    out.u16(62); // EM_X86_64
+    out.u16(MACHINE);
     out.u32(1);
     out.u64(0); // no entry point
     out.u64(EHDR_SIZE);
@@ -247,7 +312,7 @@ pub fn build(natives: &[Native]) -> Vec<u8> {
     out.at(rela);
     for hook in 0..HOOKS {
         out.u64(hooks + 8 * hook);
-        out.u64(8); // R_X86_64_RELATIVE
+        out.u64(RELATIVE);
         out.u64(text);
     }
 
@@ -262,7 +327,7 @@ pub fn build(natives: &[Native]) -> Vec<u8> {
                 Body::Object => 1,
                 Body::Free => 2,
             };
-        out.u8s(&stub(index as u32, address, hook, body));
+        out.u8s(&stub(index as u32, address, hook, body, text));
     }
 
     out.at(dynamic);
@@ -278,7 +343,7 @@ pub fn build(natives: &[Native]) -> Vec<u8> {
 /// Points the hooks of the library at `library`, which `System.load` already loaded, at the
 /// reporting and allocation functions, and names its natives from `list` on their first call.
 /// Returns how many bodies the library holds.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn attach(library: &str, list: &str) -> Result<usize, String> {
     let path = std::ffi::CString::new(library).map_err(|error| error.to_string())?;
     // SAFETY: RTLD_NOLOAD only finds a library already loaded, which runs nothing.
@@ -340,7 +405,6 @@ mod tests {
         assert_eq!(elf_hash(b"exit"), 0x0006cf04);
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn the_library_loads_and_its_bodies_return_zero_objects_and_free_functions() {
         let natives = parse(

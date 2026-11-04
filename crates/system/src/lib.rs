@@ -216,7 +216,7 @@ unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: 
         }
     };
     let natives = defaults::parse(&list);
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let addresses = match defaults::stubs(&natives) {
         Ok(addresses) => addresses,
         Err(error) => {
@@ -225,7 +225,7 @@ unsafe extern "system" fn bind_defaults(env: *mut JNIEnv, _class: jclass, path: 
             return 0;
         }
     };
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let addresses: Vec<usize> = Vec::new();
 
     let mut by_class: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
@@ -354,12 +354,12 @@ unsafe extern "system" fn attach_defaults(
 ) -> jint {
     // SAFETY: ART passes a valid environment and strings or null.
     let (library, list) = unsafe { (java_string(env, library), java_string(env, list)) };
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let result = match (library, list) {
         (Some(library), Some(list)) => default_library::attach(&library, &list),
         _ => Err("no library or list path".to_string()),
     };
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let result: Result<usize, String> = {
         let _ = (library, list);
         Err("install-time default bodies are x86_64 code".to_string())
