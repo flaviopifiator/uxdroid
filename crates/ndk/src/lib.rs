@@ -20,6 +20,7 @@ mod live;
 mod looper;
 mod opensles;
 mod pixels;
+pub mod present;
 mod window;
 
 /// The EGL, GLES and native window functions, for the framework's Java GL bindings in
