@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 [dependencies]
 uxdroid-bridge = { path = "../bridge" }
 uxdroid-ndk = { path = "../ndk" }
+uxdroid-translate = { path = "../translate" }

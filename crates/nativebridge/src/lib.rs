@@ -1,8 +1,10 @@
 //! ART's `NativeBridge` interface, served by the uxdroid loader.
 //!
 //! ART tries glibc's `dlopen` first and falls back to this library, which it finds through
-//! `-XX:NativeBridge=`. Bionic libraries here share the host's CPU and calling convention, so a
-//! trampoline is simply the function's own address and a JNI call costs nothing extra.
+//! `-XX:NativeBridge=`. Bionic libraries for the host's ABI share its CPU and calling convention, so
+//! a trampoline is simply the function's own address and a JNI call costs nothing extra. An
+//! `arm64-v8a` library runs through the translator: its trampolines are host wrappers made from the
+//! shorty ART passes for each method.
 //!
 //! The Android system libraries apps link against, such as `libandroid.so` or `libEGL.so`, are the
 //! signature tables of `uxdroid_ndk`, served to the loader before the first app library loads.
@@ -15,7 +17,8 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::Once;
 
-use uxdroid_bridge::{Library, load, table};
+use uxdroid_bridge::elf::Machine;
+use uxdroid_bridge::{Library, guest, is_guest_address, load, table};
 
 /// Up to identifying bridged function pointers. Below it, libnativebridge warns on every native
 /// method ART registers, thousands of times for the framework.
@@ -99,6 +102,7 @@ fn provide_system_libraries() {
         for library in uxdroid_ndk::tables() {
             table::provide(library);
         }
+        uxdroid_translate::install();
     });
 }
 
@@ -129,14 +133,23 @@ unsafe extern "C" fn load_library(path: *const c_char, _flag: c_int) -> *mut c_v
 unsafe extern "C" fn get_trampoline(
     handle: *mut c_void,
     name: *const c_char,
-    _shorty: *const c_char,
-    _shorty_length: u32,
+    shorty: *const c_char,
+    shorty_length: u32,
 ) -> *mut c_void {
     // SAFETY: ART passes a handle from `load_library`, which never unloads, and a C string.
     let (library, name) = unsafe { (&*handle.cast::<Library>(), CStr::from_ptr(name)) };
-    name.to_str()
-        .ok()
-        .and_then(|name| library.symbol(name))
+    let Ok(name) = name.to_str() else {
+        return null_mut();
+    };
+    if library.machine() != Machine::X86_64 {
+        // SAFETY: ART passes the method's shorty with its length, or null for `JNI_OnLoad`.
+        let shorty = (!shorty.is_null()).then(|| unsafe {
+            std::slice::from_raw_parts(shorty.cast::<u8>(), shorty_length as usize)
+        });
+        return guest::jni_trampoline(library, name, shorty).unwrap_or(null_mut());
+    }
+    library
+        .symbol(name)
         .map_or(null_mut(), <*const c_void>::cast_mut)
 }
 
@@ -227,18 +240,24 @@ unsafe extern "C" fn get_trampoline_with_jni_call_type(
     unsafe { get_trampoline(handle, name, shorty, shorty_length) }
 }
 
-/// A function a bridged library registers itself. Host-ABI code needs no trampoline; a translator
-/// wraps guest code here.
+/// A function a bridged library registers itself. Host-ABI code needs no trampoline; guest code
+/// gets a wrapper made from the shorty. The guest JNIEnv's RegisterNatives already hands ART
+/// wrappers, so this serves function pointers ART meets some other way.
 unsafe extern "C" fn get_trampoline_for_function_pointer(
     method: *const c_void,
-    _shorty: *const c_char,
-    _shorty_length: u32,
+    shorty: *const c_char,
+    shorty_length: u32,
     _call_type: c_int,
 ) -> *mut c_void {
-    method.cast_mut()
+    if !is_guest_address(method as usize) || shorty.is_null() {
+        return method.cast_mut();
+    }
+    // SAFETY: ART passes the method's shorty with its length.
+    let shorty = unsafe { std::slice::from_raw_parts(shorty.cast::<u8>(), shorty_length as usize) };
+    guest::jni_method_trampoline(method as u64, shorty).unwrap_or(null_mut())
 }
 
-/// No loaded function needs translation while every bridged library has the host's ABI.
-unsafe extern "C" fn is_native_bridge_function_pointer(_method: *const c_void) -> bool {
-    false
+/// Only functions in guest libraries need translation; with none loaded this is one atomic load.
+unsafe extern "C" fn is_native_bridge_function_pointer(method: *const c_void) -> bool {
+    is_guest_address(method as usize)
 }

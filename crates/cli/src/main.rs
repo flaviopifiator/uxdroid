@@ -179,6 +179,8 @@ mod native {
         let Some(args) = parse(args) else {
             return fail(LOAD_USAGE, EXIT_USAGE);
         };
+        // Only a guest library loads the engine; host ones never touch it.
+        uxdroid_translate::install();
         let library = match load(args.library, &args.search_dirs) {
             Ok(library) => library,
             Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),

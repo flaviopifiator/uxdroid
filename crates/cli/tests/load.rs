@@ -685,3 +685,62 @@ fn system_partition_paths_resolve_under_the_runtime_root() {
         stdout(&output)
     );
 }
+
+/// The translation spike's arm64 library, from the bridge's fixtures.
+fn arm64_spike() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let dir = build_root().join("arm64");
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("libspike.so");
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../bridge/tests/fixtures/arm64/spike.cpp");
+        let status = Command::new(toolchain().join("bin/aarch64-linux-android24-clang++"))
+            .arg(source)
+            .args([
+                "-shared",
+                "-fPIC",
+                "-O2",
+                "-static-libstdc++",
+                "-llog",
+                "-o",
+            ])
+            .arg(&output)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to build the arm64 spike");
+        output
+    })
+}
+
+#[test]
+fn an_arm64_library_without_its_translator_is_refused_by_name() {
+    let output = Command::new(env!("CARGO_BIN_EXE_uxdroid"))
+        .args(["load", arm64_spike().to_str().unwrap()])
+        .env("UXDROID_TRANSLATOR", "/nonexistent/libuxdroid_dynarmic.so")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains(
+            "libspike.so is arm64-v8a code, which needs the translator: cannot open /nonexistent/libuxdroid_dynarmic.so"
+        ),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn an_arm64_library_runs_through_the_translator() {
+    if std::env::var_os("UXDROID_TRANSLATOR").is_none() {
+        eprintln!("skipped: UXDROID_TRANSLATOR is not set; run in the translation service");
+        return;
+    }
+    let output = load_and_call(arm64_spike(), "spike_qsort");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("call spike_qsort: 1235789\n"),
+        "{}",
+        stdout(&output)
+    );
+}

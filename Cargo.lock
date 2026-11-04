@@ -372,6 +372,7 @@ dependencies = [
  "uxdroid-bridge",
  "uxdroid-system",
  "uxdroid-testkit",
+ "uxdroid-translate",
  "zip",
 ]
 
@@ -381,6 +382,7 @@ version = "0.1.0"
 dependencies = [
  "uxdroid-bridge",
  "uxdroid-ndk",
+ "uxdroid-translate",
 ]
 
 [[package]]
@@ -425,6 +427,14 @@ name = "uxdroid-testkit"
 version = "0.1.0"
 dependencies = [
  "zip",
+]
+
+[[package]]
+name = "uxdroid-translate"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "uxdroid-bridge",
 ]
 
 [[package]]
