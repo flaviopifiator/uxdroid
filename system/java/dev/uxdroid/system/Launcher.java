@@ -108,6 +108,7 @@ public final class Launcher {
         Services.register("device_identifiers", android.os.IDeviceIdentifiersPolicyService.class,
                 new DeviceIdentifiers());
         AppServices.register(app);
+        StoreServices.register(app);
         // The framework's own switch for devices without GPU rendering: ViewRootImpl then draws in
         // software, through Surface.lockCanvas, which libuxdroid_system.so shows on Wayland.
         android.view.ThreadedRenderer.sRendererEnabled = false;
@@ -171,6 +172,7 @@ public final class Launcher {
         private final File apk;
         private PackageParser.Package parsed;
         private final Record.Contents record;
+        private android.content.pm.ProviderInfo[] providers;
         final ApplicationInfo application;
         final ActivityInfo activity;
 
@@ -203,6 +205,29 @@ public final class Launcher {
                         : apk + " declares no launcher activity");
             }
             return new App(apk, parsed, null, application, activity);
+        }
+
+        /** What a recorded provider holds: all a bind or a provider lookup can ask for. */
+        static final int PROVIDER_FLAGS = android.content.pm.PackageManager.GET_META_DATA
+                | android.content.pm.PackageManager.GET_URI_PERMISSION_PATTERNS;
+
+        /** Every provider the manifest declares, as the package manager describes it, of this application. */
+        static android.content.pm.ProviderInfo[] providers(PackageParser.Package parsed, ApplicationInfo application) {
+            android.content.pm.ProviderInfo[] providers = new android.content.pm.ProviderInfo[parsed.providers.size()];
+            for (int i = 0; i < providers.length; i++) {
+                providers[i] = PackageParser.generateProviderInfo(parsed.providers.get(i), PROVIDER_FLAGS,
+                        FrameworkPackageUserState.DEFAULT, 0);
+                providers[i].applicationInfo = application;
+            }
+            return providers;
+        }
+
+        /** The app's declared providers, from its record or its parse; see {@link Providers}. */
+        synchronized android.content.pm.ProviderInfo[] providers() {
+            if (providers == null) {
+                providers = record != null ? record.providers : providers(parsed(), application);
+            }
+            return providers;
         }
 
         /** The framework's own manifest parser, so the app sees the values Android would give it. */
@@ -333,7 +358,7 @@ public final class Launcher {
             useFrameworkAsParent(info);
             thread.bindApplication(info.processName, info,
                     null, null, false, // not an SDK sandbox
-                    ProviderInfoList.fromList(java.util.Collections.emptyList()),
+                    ProviderInfoList.fromList(Providers.atBind(app)), // installed before Application.onCreate
                     null, null, null, null, null, // no instrumentation, profiler or UI automation
                     0, false, false, false, false, // debug mode, binder tracking, allocation tracking, backup, persistent
                     config, CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO,
@@ -364,6 +389,10 @@ public final class Launcher {
                 String permission, int userId, int flags) throws RemoteException {
             return Broadcasts.register(receiver, filter);
         }
+
+        /** The framework publishes the providers it installed; they are already in the only process. */
+        public void publishContentProviders(IApplicationThread caller,
+                java.util.List<android.app.ContentProviderHolder> providers) {}
 
         public void unregisterReceiver(android.content.IIntentReceiver receiver) {
             Broadcasts.unregister(receiver);
@@ -409,11 +438,15 @@ public final class Launcher {
         }
 
         /**
-         * Providers of the system, such as Settings, live in this process as proxies of IContentProvider.
-         * A call nobody handles returns null, which Settings reads as "use the default".
+         * The app's own providers are made in this process, by the framework, from the info this gives
+         * it; see {@link Providers}. Providers of the system, such as Settings, live in this process as
+         * proxies of IContentProvider. A call nobody handles returns null, which Settings reads as "use
+         * the default".
          */
         public android.app.ContentProviderHolder getContentProvider(IApplicationThread caller, String callingPackage,
                 String authority, int userId, boolean stable) {
+            android.app.ContentProviderHolder own = Providers.holder(app, authority);
+            if (own != null) return own;
             android.content.pm.ProviderInfo info = new android.content.pm.ProviderInfo();
             info.authority = authority;
             info.name = authority;
@@ -524,9 +557,24 @@ public final class Launcher {
     /** The handler of IPackageManager: knows the one installed app. */
     public static final class PackageManager {
         private final App app;
+        private final android.content.pm.IPackageInstaller installer = StoreServices.packageInstaller();
 
         PackageManager(App app) {
             this.app = app;
+        }
+
+        /** Sessions are not served yet: the installer lists none and refuses to create one. */
+        public android.content.pm.IPackageInstaller getPackageInstaller() {
+            return installer;
+        }
+
+        /** As androidx-startup reads its initializers from its provider's meta-data. */
+        public android.content.pm.ProviderInfo getProviderInfo(ComponentName component, long flags, int userId) {
+            return Providers.info(app, component, flags);
+        }
+
+        public android.content.pm.ProviderInfo resolveContentProvider(String authority, long flags, int userId) {
+            return Providers.resolve(app, authority, flags);
         }
 
         public ApplicationInfo getApplicationInfo(String packageName, long flags, int userId) {

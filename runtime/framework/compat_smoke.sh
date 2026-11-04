@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|graphics32|features|textservices|pending|activity|no activity|launched|result|broadcast) " "$WORK/out"
+grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|graphics32|features|textservices|pending|activity|no activity|launched|result|broadcast|provider|stores) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -122,5 +122,34 @@ grep -q "^broadcast manifest .* by implicit" "$WORK/out" && fail "an implicit br
 grep -q "^broadcast manifest .* by later alarm" "$WORK/out" && fail "an alarm broadcast before its time"
 # A result set before finish reaches the activity that started it for one, with its request code.
 expect "^result request 7 code -1 answer 42$" "a result of startActivityForResult did not come back"
+# 10. The app's own content providers are installed as it starts, before Application.onCreate, and
+# read their meta-data as androidx-startup's provider does; a disabled one is never made, and one
+# declared for another process is made in the app's process when first queried.
+expect "^provider created before application onCreate true meta-data startup$" \
+    "the app's provider was not installed before Application.onCreate with its meta-data"
+expect "^provider query provider CompatProvider$" "a query of the app's own authority did not reach its provider"
+expect "^provider created RemoteProvider after application onCreate true$" \
+    "a provider of another process was not made when first queried"
+expect "^provider query remote RemoteProvider$" "a query did not reach the provider of another process"
+expect "^uxdroid: provider com\.example\.compat\.RemoteProvider of process com\.example\.compat:remote runs in the app's process com\.example\.compat$" \
+    "a provider moved into the app's process was not reported"
+expect "^provider query disabled none$" "a disabled provider answered"
+grep -q "^provider created DisabledProvider" "$WORK/out" && fail "a disabled provider was made"
+expect "^provider resolved com\.example\.compat\.CompatProvider meta-data null$" \
+    "resolveContentProvider did not find the provider, or gave meta-data nobody asked for"
+# 11. What Aurora Store and microG asked on start: a package installer with no sessions that refuses
+# to create one by name, power, domain verification of the app's web links, no pending jobs and no
+# accounts.
+expect "^stores installer sessions 0 all 0$" "the package installer does not list its sessions"
+expect "^stores session refused IPackageInstaller\.createSession is not implemented: " \
+    "creating an install session did not fail naming the call"
+expect "^stores power interactive true save false idle false$" "PowerManager does not describe a desktop in use"
+# Nothing restricts an app in the background on a desktop, as Aurora's onboarding asks.
+expect "^stores power ignoring battery optimizations true$" "the app is not exempt from battery optimizations"
+expect "^stores domains allowed true hosts \{links\.example\.com=0\}$" \
+    "domain verification does not list the app's web domains"
+expect "^stores domains of another package not found$" "domain verification answered for another package"
+expect "^stores jobs pending 0 job null$" "JobScheduler does not list its pending jobs"
+expect "^stores accounts 0 google 0 authenticators 0$" "AccountManager does not list its accounts"
 expect "^launched com\.example\.compat/\.CompatActivity " "the activity was not launched"
 echo "ok: the app has its own identity, storage and the system services the corpus asks for"

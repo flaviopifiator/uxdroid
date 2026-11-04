@@ -26,7 +26,7 @@ final class Record {
     private Record() {}
 
     static final String FILE = "package.record";
-    private static final String MAGIC = "uxdroid package record 1";
+    private static final String MAGIC = "uxdroid package record 2";
     /** Files of the runtime a record depends on: the classes it holds and the natives its library lists. */
     private static final String[] RUNTIME_FILES = {
         "framework/framework.jar", "framework/uxdroid-system.jar", "framework/natives.txt",
@@ -36,13 +36,16 @@ final class Record {
     static final class Contents {
         final android.content.pm.ApplicationInfo application;
         final android.content.pm.ActivityInfo activity;
+        /** Every provider the manifest declares, with its meta-data and URI permission patterns. */
+        final android.content.pm.ProviderInfo[] providers;
         /** PackageManager.getPackageInfo with flags 0, decoded again for each caller. */
         final byte[] packageInfo;
 
         Contents(android.content.pm.ApplicationInfo application, android.content.pm.ActivityInfo activity,
-                byte[] packageInfo) {
+                android.content.pm.ProviderInfo[] providers, byte[] packageInfo) {
             this.application = application;
             this.activity = activity;
+            this.providers = providers;
             this.packageInfo = packageInfo;
         }
 
@@ -65,9 +68,13 @@ final class Record {
         return text.append("|apk ").append(apk.length()).append(' ').append(apk.lastModified()).toString();
     }
 
+    /**
+     * Writes a record. Providers whose applicationInfo is {@code application} hold a reference to it,
+     * so a read gives them back the very ApplicationInfo the launcher places.
+     */
     static void write(File file, String identity, android.content.pm.ApplicationInfo application,
-            android.content.pm.ActivityInfo activity, android.content.pm.PackageInfo packageInfo)
-            throws IOException, ReflectiveOperationException {
+            android.content.pm.ActivityInfo activity, android.content.pm.ProviderInfo[] providers,
+            android.content.pm.PackageInfo packageInfo) throws IOException, ReflectiveOperationException {
         Writer info = new Writer();
         info.value(packageInfo);
         Writer out = new Writer();
@@ -75,6 +82,7 @@ final class Record {
         out.data.writeUTF(identity);
         out.value(application);
         out.value(activity);
+        out.value(providers);
         out.bytes(info.toByteArray());
         java.nio.file.Files.write(file.toPath(), out.toByteArray());
     }
@@ -96,7 +104,8 @@ final class Record {
         if (!identity.equals(in.data.readUTF())) throw new IOException("the runtime or the APK changed since install");
         android.content.pm.ApplicationInfo application = (android.content.pm.ApplicationInfo) in.value();
         android.content.pm.ActivityInfo activity = (android.content.pm.ActivityInfo) in.value();
-        return new Contents(application, activity, in.bytes());
+        android.content.pm.ProviderInfo[] providers = (android.content.pm.ProviderInfo[]) in.value();
+        return new Contents(application, activity, providers, in.bytes());
     }
 
     private static final byte NULL = 0, REFERENCE = 1, OBJECT = 2, STRING = 3, ARRAY = 4, BUNDLE = 5, LIST = 6,

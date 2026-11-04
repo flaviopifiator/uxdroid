@@ -44,7 +44,8 @@ public final class Installer {
         // A rename keeps the size and modification time the identity names.
         File record = new File(directory, Record.FILE);
         try {
-            Record.write(record, Record.identity(root, staged), application, activity, info);
+            Record.write(record, Record.identity(root, staged), application, activity,
+                    Launcher.App.providers(parsed, application), info);
         } catch (IllegalArgumentException e) {
             // Something the record cannot hold: the launcher parses the APK at each start instead.
             record.delete();

@@ -24,6 +24,26 @@
                 <action android:name="com.example.compat.REMIND" />
             </intent-filter>
         </receiver>
-        <activity android:name=".ResultActivity" android:exported="false" />
+        <activity android:name=".ResultActivity" android:exported="false">
+            <!-- A web link, which domain verification lists by host. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="links.example.com" />
+            </intent-filter>
+        </activity>
+        <!-- Installed at start, before Application.onCreate, reading its meta-data as androidx-startup's
+             InitializationProvider does. -->
+        <provider android:name=".CompatProvider" android:authorities="com.example.compat.provider"
+            android:exported="false">
+            <meta-data android:name="com.example.compat.Initializer" android:value="startup" />
+        </provider>
+        <!-- Never installed: disabled in the manifest, as libraries ship providers an app turns off. -->
+        <provider android:name=".DisabledProvider" android:authorities="com.example.compat.disabled"
+            android:exported="false" android:enabled="false" />
+        <!-- Declared for another process, which uxdroid does not start: made when first queried. -->
+        <provider android:name=".RemoteProvider" android:authorities="com.example.compat.remote"
+            android:exported="false" android:process=":remote" />
     </application>
 </manifest>

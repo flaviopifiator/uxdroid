@@ -6,8 +6,12 @@ import android.os.Process;
 
 /** Prints what the corpus apps asked of the framework while their Application was created. */
 public class CompatApplication extends Application {
+    /** Set once onCreate starts: providers of the app are made before it. */
+    static volatile boolean created;
+
     @Override
     public void onCreate() {
+        created = true;
         super.onCreate();
         // WebView and TrafficStats refuse the system uid; an app has one of its own.
         System.out.println("identity myUid " + Process.myUid() + " callingUid " + Binder.getCallingUid()
@@ -20,6 +24,85 @@ public class CompatApplication extends Application {
         graphics();
         redirect();
         broadcasts();
+        providers();
+        stores();
+    }
+
+    /** The app's own providers answer through ContentResolver; a disabled one has no authority. */
+    private void providers() {
+        for (String authority : new String[] {"provider", "remote", "disabled"}) {
+            android.net.Uri uri = android.net.Uri.parse("content://com.example.compat." + authority + "/row");
+            try (android.database.Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+                String answer = cursor != null && cursor.moveToFirst() ? cursor.getString(0) : "none";
+                System.out.println("provider query " + authority + " " + answer);
+            }
+        }
+        android.content.pm.ProviderInfo resolved = getPackageManager().resolveContentProvider(
+                "com.example.compat.provider", 0);
+        System.out.println("provider resolved " + (resolved == null ? null : resolved.name) + " meta-data "
+                + (resolved == null ? "none" : resolved.metaData));
+    }
+
+    /**
+     * What Aurora Store and microG asked on start: each manager exists and answers with an object. Each
+     * check runs on its own, so one that fails does not hide the others.
+     */
+    private void stores() {
+        check("installer", () -> {
+            android.content.pm.PackageInstaller installer = getPackageManager().getPackageInstaller();
+            System.out.println("stores installer sessions " + installer.getMySessions().size() + " all "
+                    + installer.getAllSessions().size());
+            try {
+                installer.createSession(new android.content.pm.PackageInstaller.SessionParams(
+                        android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL));
+                System.out.println("stores session created");
+            } catch (java.io.IOException | UnsupportedOperationException e) {
+                System.out.println("stores session refused " + e.getMessage());
+            }
+        });
+        check("power", () -> {
+            android.os.PowerManager power = getSystemService(android.os.PowerManager.class);
+            System.out.println("stores power interactive " + power.isInteractive() + " save " + power.isPowerSaveMode()
+                    + " idle " + power.isDeviceIdleMode());
+            System.out.println("stores power ignoring battery optimizations "
+                    + power.isIgnoringBatteryOptimizations(getPackageName()));
+        });
+        check("domains", () -> {
+            android.content.pm.verify.domain.DomainVerificationManager domains =
+                    getSystemService(android.content.pm.verify.domain.DomainVerificationManager.class);
+            try {
+                android.content.pm.verify.domain.DomainVerificationUserState state =
+                        domains.getDomainVerificationUserState(getPackageName());
+                System.out.println("stores domains allowed " + state.isLinkHandlingAllowed() + " hosts "
+                        + state.getHostToStateMap());
+            } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+                throw new IllegalStateException(e);
+            }
+            try {
+                domains.getDomainVerificationUserState("com.example.absent");
+                System.out.println("stores domains of another package found");
+            } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+                System.out.println("stores domains of another package not found");
+            }
+        });
+        check("jobs", () -> {
+            android.app.job.JobScheduler jobs = getSystemService(android.app.job.JobScheduler.class);
+            System.out.println("stores jobs pending " + jobs.getAllPendingJobs().size() + " job " + jobs.getPendingJob(1));
+        });
+        check("accounts", () -> {
+            android.accounts.AccountManager accounts = android.accounts.AccountManager.get(this);
+            System.out.println("stores accounts " + accounts.getAccounts().length + " google "
+                    + accounts.getAccountsByType("com.google").length + " authenticators "
+                    + accounts.getAuthenticatorTypes().length);
+        });
+    }
+
+    private static void check(String name, Runnable check) {
+        try {
+            check.run();
+        } catch (RuntimeException e) {
+            System.out.println("stores " + name + " failed " + e);
+        }
     }
 
     /**
