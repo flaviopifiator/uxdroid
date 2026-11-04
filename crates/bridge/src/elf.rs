@@ -7,6 +7,7 @@ pub const PHDR_SIZE: usize = 56;
 pub const SYM_SIZE: usize = 24;
 pub const RELA_SIZE: usize = 24;
 const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
 const ET_DYN: u16 = 3;
 const PAGE_SIZE: u64 = 4096;
 /// Android uses at most 64 KiB; the limit keeps address space reservations reasonable.
@@ -35,6 +36,16 @@ pub const R_X86_64_RELATIVE: u32 = 8;
 pub const R_X86_64_DTPMOD64: u32 = 16;
 pub const R_X86_64_DTPOFF64: u32 = 17;
 pub const R_X86_64_IRELATIVE: u32 = 37;
+
+pub const R_AARCH64_ABS64: u32 = 257;
+pub const R_AARCH64_GLOB_DAT: u32 = 1025;
+pub const R_AARCH64_JUMP_SLOT: u32 = 1026;
+pub const R_AARCH64_RELATIVE: u32 = 1027;
+pub const R_AARCH64_TLS_DTPMOD64: u32 = 1028;
+pub const R_AARCH64_TLS_DTPREL64: u32 = 1029;
+pub const R_AARCH64_TLS_TPREL64: u32 = 1030;
+pub const R_AARCH64_TLSDESC: u32 = 1031;
+pub const R_AARCH64_IRELATIVE: u32 = 1032;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ElfError {
@@ -71,9 +82,18 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(word)
 }
 
+/// The CPU a library is built for. Only the native bridge knows any but the host's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Machine {
+    X86_64,
+    /// `arm64-v8a`, which runs through the translator.
+    Aarch64,
+}
+
 /// Where the program headers live, read from the ELF header.
 #[derive(Debug, PartialEq, Eq)]
 pub struct HeaderTable {
+    pub machine: Machine,
     pub offset: u64,
     pub count: usize,
 }
@@ -91,13 +111,16 @@ pub fn parse_header(header: &[u8]) -> Result<HeaderTable> {
     if u16_at(header, 16) != ET_DYN {
         return Err(ElfError::Unsupported("not a shared object"));
     }
-    if u16_at(header, 18) != EM_X86_64 {
-        return Err(ElfError::Unsupported("not built for x86_64"));
-    }
+    let machine = match u16_at(header, 18) {
+        EM_X86_64 => Machine::X86_64,
+        EM_AARCH64 => Machine::Aarch64,
+        _ => return Err(ElfError::Unsupported("not built for x86_64 or arm64")),
+    };
     if usize::from(u16_at(header, 54)) != PHDR_SIZE {
         return Err(ElfError::Malformed("bad program header size"));
     }
     Ok(HeaderTable {
+        machine,
         offset: u64_at(header, 32),
         count: usize::from(u16_at(header, 56)),
     })
@@ -241,12 +264,12 @@ pub fn parse_dynamic(section: &[u8]) -> Result<Dynamic> {
             12 => dynamic.init = value,
             17 | 18 => {
                 if value != 0 {
-                    return Err(ElfError::Unsupported("REL relocations on x86_64"));
+                    return Err(ElfError::Unsupported("REL relocations"));
                 }
             }
             20 => {
                 if value != DT_RELA_TAG {
-                    return Err(ElfError::Unsupported("REL relocations on x86_64"));
+                    return Err(ElfError::Unsupported("REL relocations"));
                 }
             }
             22 => return Err(ElfError::Unsupported("text relocations")),

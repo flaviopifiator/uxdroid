@@ -2,7 +2,7 @@
 #![cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 
 use uxdroid_bridge::elf::{
-    ElfError, Rela, for_each_packed, for_each_relr, gnu_hash, parse_dynamic, parse_header,
+    ElfError, Machine, Rela, for_each_packed, for_each_relr, gnu_hash, parse_dynamic, parse_header,
     parse_program_headers, sysv_hash,
 };
 
@@ -169,7 +169,7 @@ fn elf_headers_are_validated() {
         (0, 0u8, "bad magic"),
         (4, 1, "ELF64"),
         (16, 2, "shared object"),
-        (18, 183, "x86_64"),
+        (18, 40, "x86_64 or arm64"),
         (54, 32, "program header size"),
     ] {
         let mut header = valid_header();
@@ -177,6 +177,17 @@ fn elf_headers_are_validated() {
         let error = parse_header(&header).unwrap_err().to_string();
         assert!(error.contains(message), "{error}");
     }
+}
+
+#[test]
+fn elf_headers_name_the_machine() {
+    assert_eq!(
+        parse_header(&valid_header()).unwrap().machine,
+        Machine::X86_64
+    );
+    let mut header = valid_header();
+    header[18] = 183;
+    assert_eq!(parse_header(&header).unwrap().machine, Machine::Aarch64);
 }
 
 fn load_header(vaddr: u64, offset: u64, filesz: u64, memsz: u64, flags: u32) -> Vec<u8> {
