@@ -115,6 +115,9 @@ def clang(target, source, *extra):
                 "-w", *extra, "-x", "c", "-"], input=source)
 
 
+FORTIFY = ["-D_FORTIFY_SOURCE=2", "-O2"]
+
+
 def compiles(target, source):
     return clang(target, source).returncode == 0
 
@@ -135,8 +138,8 @@ def prelude(included):
     return "".join(f"#include <{header}>\n" for header in included)
 
 
-def declarations(included):
-    result = clang(GUEST, prelude(included), "-Xclang", "-ast-dump=json")
+def declarations(included, *extra):
+    result = clang(GUEST, prelude(included), *extra, "-Xclang", "-ast-dump=json")
     result.check_returncode()
     dump = result.stdout
     found = {}
@@ -232,6 +235,12 @@ def main():
     functions = exports()
     included = headers()
     declared, typedefs = declarations(included)
+    # FORTIFY's checked functions (__memcpy_chk and its kind) are declared only with it on, which
+    # also wraps the plain functions in inline overloads, so only the _chk names are taken.
+    fortified, _ = declarations(included, *FORTIFY)
+    for symbol, declaration in fortified.items():
+        if re.fullmatch(r"__\w+_chk", symbol) and symbol not in declared:
+            declared[symbol] = declaration
 
     pointees = set()
     shapes = {}

@@ -60,6 +60,62 @@ pub fn classes(format: &[u8]) -> Result<Vec<Class>, FormatError> {
     Ok(classes)
 }
 
+/// How many pointers a scanf format reads: one per conversion that is not suppressed with `*`.
+pub fn scan_pointers(format: &[u8]) -> Result<usize, FormatError> {
+    if format.len() > MAX_FORMAT_BYTES {
+        return Err(FormatError::TooLong);
+    }
+    let mut pointers = 0;
+    let mut index = 0;
+    while index < format.len() {
+        if format[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        if format.get(index) == Some(&b'%') {
+            index += 1;
+            continue;
+        }
+        let suppressed = format.get(index) == Some(&b'*');
+        if suppressed {
+            index += 1;
+        }
+        let digits = format[index..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        index += digits;
+        if digits > 0 && format.get(index) == Some(&b'$') {
+            return Err(FormatError::Positional);
+        }
+        while let Some(b'h' | b'l' | b'j' | b'z' | b't' | b'q' | b'L' | b'm') = format.get(index) {
+            index += 1;
+        }
+        let Some(&conversion) = format.get(index) else {
+            break;
+        };
+        index += 1;
+        if conversion == b'[' {
+            // A scan set: a leading `^` and a leading `]` are part of it.
+            if format.get(index) == Some(&b'^') {
+                index += 1;
+            }
+            if format.get(index) == Some(&b']') {
+                index += 1;
+            }
+            while index < format.len() && format[index] != b']' {
+                index += 1;
+            }
+            index += 1;
+        }
+        if !suppressed {
+            pointers += 1;
+        }
+    }
+    Ok(pointers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +142,14 @@ mod tests {
             classes(&vec![b'a'; MAX_FORMAT_BYTES + 1]),
             Err(FormatError::TooLong)
         );
+    }
+
+    #[test]
+    fn scanf_formats_count_their_pointers() {
+        assert_eq!(scan_pointers(b"%d %d"), Ok(2));
+        assert_eq!(scan_pointers(b"%*d %5s %% %lld %[^]x] %n %c"), Ok(5));
+        assert_eq!(scan_pointers(b"%ms"), Ok(1));
+        assert_eq!(scan_pointers(b"%1$d"), Err(FormatError::Positional));
+        assert_eq!(scan_pointers(b"trailing %"), Ok(0));
     }
 }

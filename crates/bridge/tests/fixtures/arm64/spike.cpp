@@ -2,6 +2,15 @@
 // carry across the guest boundary. Built for arm64-v8a with the NDK; each function returns a value
 // the test checks.
 #include <android/log.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <sys/epoll.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <termios.h>
+#include <unistd.h>
 #include <jni.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -135,6 +144,152 @@ static int log_v(const char* format, ...) {
 
 __attribute__((visibility("default"))) int spike_vlog(void) {
     return log_v("vprint %s %d %.1f", "carried", 64, 0.5);
+}
+
+// --- Calls whose arguments differ between arm64 and x86_64 ---
+
+// arm64's struct stat, 128 bytes, filled from the host's.
+__attribute__((visibility("default"))) long spike_stat(const char* path, int which) {
+    struct stat info;
+    memset(&info, 0xAB, sizeof(info));
+    int status = -1;
+    if (which == 0) {
+        status = stat(path, &info);
+    } else if (which == 1) {
+        status = lstat(path, &info);
+    } else if (which == 2) {
+        int fd = open(path, O_RDONLY);
+        status = fstat(fd, &info);
+        close(fd);
+    } else {
+        status = fstatat(AT_FDCWD, path, &info, 0);
+    }
+    if (status != 0) {
+        return -errno;
+    }
+    // The size, the file type bits and the link count, each checked by the test.
+    return info.st_size * 1000 + (S_ISREG(info.st_mode) ? 100 : 0) + info.st_nlink;
+}
+
+// arm64's O_DIRECTORY (040000) is x86_64's O_DIRECT: opening a file with it must fail as a
+// directory open does, and F_GETFL must answer in arm64 values.
+__attribute__((visibility("default"))) int spike_open_flags(const char* file, const char* directory) {
+    int score = 0;
+    int fd = open(file, O_RDONLY | O_DIRECTORY);
+    if (fd < 0 && errno == ENOTDIR) {
+        score += 1;
+    }
+    fd = openat(AT_FDCWD, directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (fd >= 0) {
+        score += 10;
+        close(fd);
+    }
+    fd = open(file, O_RDONLY);
+    int flags = fcntl(fd, F_GETFL);
+    // The host kernel adds its O_LARGEFILE, which arm64 code must see as its own, not O_NOFOLLOW.
+    if ((flags & O_NOFOLLOW) == 0 && (flags & O_ACCMODE) == O_RDONLY) {
+        score += 100;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 && (fcntl(fd, F_GETFL) & O_NONBLOCK)) {
+        score += 1000;
+    }
+    close(fd);
+    int pipes[2];
+    if (pipe2(pipes, O_CLOEXEC | O_NONBLOCK) == 0) {
+        if ((fcntl(pipes[0], F_GETFD) & FD_CLOEXEC) && (fcntl(pipes[0], F_GETFL) & O_NONBLOCK)) {
+            score += 10000;
+        }
+        close(pipes[0]);
+        close(pipes[1]);
+    }
+    return score;
+}
+
+// arm64's epoll_event is 16 bytes with data at 8; x86_64's is packed, with data at 4.
+__attribute__((visibility("default"))) long spike_epoll(void) {
+    int pipes[2];
+    if (pipe(pipes) != 0) {
+        return -1;
+    }
+    int poller = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event event = {};
+    event.events = EPOLLIN;
+    event.data.u64 = 0x1122334455667788ULL;
+    if (epoll_ctl(poller, EPOLL_CTL_ADD, pipes[0], &event) != 0) {
+        return -2;
+    }
+    if (write(pipes[1], "x", 1) != 1) {
+        return -3;
+    }
+    struct epoll_event ready[4];
+    memset(ready, 0, sizeof(ready));
+    int count = epoll_wait(poller, ready, 4, 1000);
+    long result = (count == 1 && ready[0].events == EPOLLIN && ready[0].data.u64 == 0x1122334455667788ULL) ? 1 : -4;
+    int available = -1;
+    if (ioctl(pipes[0], FIONREAD, &available) == 0 && available == 1) {
+        result += 10;
+    }
+    struct termios terminal;
+    if (tcgetattr(pipes[0], &terminal) != 0 && errno == ENOTTY) {
+        result += 100;
+    }
+    close(poller);
+    close(pipes[0]);
+    close(pipes[1]);
+    return result;
+}
+
+static jmp_buf jump;
+
+__attribute__((noinline)) static void jump_back(int value) { longjmp(jump, value); }
+
+// setjmp and longjmp stay in guest code: callee-saved registers and the stack come back.
+__attribute__((visibility("default"))) int spike_setjmp(int value) {
+    volatile int kept = value * 3;
+    int returned = setjmp(jump);
+    if (returned == 0) {
+        jump_back(value);
+        return -1;
+    }
+    return returned + kept;
+}
+
+static volatile sig_atomic_t signalled = 0;
+
+static void on_signal(int number, siginfo_t* info, void*) {
+    signalled = number * 10 + (info != nullptr && info->si_signo == number ? 1 : 0);
+}
+
+// A guest handler, installed through the host and run when the host delivers the signal.
+__attribute__((visibility("default"))) int spike_signal(void) {
+    struct sigaction action = {};
+    action.sa_sigaction = on_signal;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaddset(&action.sa_mask, SIGUSR2);
+    struct sigaction previous = {};
+    if (sigaction(SIGUSR1, &action, &previous) != 0) {
+        return -1;
+    }
+    raise(SIGUSR1);
+    struct sigaction current = {};
+    sigaction(SIGUSR1, nullptr, &current);
+    int same = current.sa_sigaction == on_signal && sigismember(&current.sa_mask, SIGUSR2) == 1 &&
+               (current.sa_flags & SA_SIGINFO) ? 1000 : 0;
+    sigaction(SIGUSR1, &previous, nullptr);
+    return signalled + same;
+}
+
+// arm64's long double is binary128; the host's is x87's.
+__attribute__((visibility("default"))) double spike_strtold(const char* text) {
+    return static_cast<double>(strtold(text, nullptr) * 2);
+}
+
+// More pointers than argument registers: scanf's arguments are placed by its format.
+__attribute__((visibility("default"))) int spike_sscanf(const char* text) {
+    int a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0, i = 0;
+    int read = sscanf(text, "%d %d %d %d %d %d %d %d %d", &a, &b, &c, &d, &e, &f, &g, &h, &i);
+    return read * 1000 + a + b + c + d + e + f + g + h + i;
 }
 
 // A system call made directly, as Go, Rust's std and hand-written assembly do: `svc #0` with the

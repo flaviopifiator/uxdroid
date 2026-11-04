@@ -221,6 +221,81 @@ fn a_guest_va_list_is_read_from_its_save_areas_and_stack() {
     }
 }
 
+/// A private directory with a 5-byte file, for the file system cases.
+fn files() -> (CString, CString) {
+    let dir = private_dir();
+    let file = dir.join("five");
+    std::fs::write(&file, b"12345").unwrap();
+    let text = |path: &Path| CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    (text(&file), text(&dir))
+}
+
+#[test]
+fn stat_fills_arm64_s_struct_stat() {
+    if !engine_available() {
+        return;
+    }
+    let stat: extern "C" fn(*const c_char, i32) -> i64 = function("spike_stat", "i64(ptr,i32)");
+    let (file, _) = files();
+    for which in 0..4 {
+        // 5 bytes, a regular file, one link.
+        assert_eq!(stat(file.as_ptr(), which), 5101, "call {which}");
+    }
+    let missing = CString::new("/nonexistent/uxdroid").unwrap();
+    assert_eq!(stat(missing.as_ptr(), 0), -i64::from(libc::ENOENT));
+}
+
+#[test]
+fn open_flags_are_translated_both_ways() {
+    if !engine_available() {
+        return;
+    }
+    let open: extern "C" fn(*const c_char, *const c_char) -> i32 =
+        function("spike_open_flags", "i32(ptr,ptr)");
+    let (file, dir) = files();
+    assert_eq!(open(file.as_ptr(), dir.as_ptr()), 11111);
+}
+
+#[test]
+fn epoll_events_and_ioctls_cross_in_arm64_layout() {
+    if !engine_available() {
+        return;
+    }
+    let epoll: extern "C" fn() -> i64 = function("spike_epoll", "i64()");
+    assert_eq!(epoll(), 111);
+}
+
+#[test]
+fn longjmp_returns_to_setjmp_inside_guest_code() {
+    if !engine_available() {
+        return;
+    }
+    let jump: extern "C" fn(i32) -> i32 = function("spike_setjmp", "i32(i32)");
+    assert_eq!(jump(7), 7 + 21);
+}
+
+#[test]
+fn a_guest_signal_handler_runs_and_reads_back() {
+    if !engine_available() {
+        return;
+    }
+    let signal: extern "C" fn() -> i32 = function("spike_signal", "i32()");
+    assert_eq!(signal(), 1000 + libc::SIGUSR1 * 10 + 1);
+}
+
+#[test]
+fn long_double_and_scanf_results_cross() {
+    if !engine_available() {
+        return;
+    }
+    let strtold: extern "C" fn(*const c_char) -> f64 = function("spike_strtold", "f64(ptr)");
+    let text = CString::new("1.25").unwrap();
+    assert_eq!(strtold(text.as_ptr()), 2.5);
+    let sscanf: extern "C" fn(*const c_char) -> i32 = function("spike_sscanf", "i32(ptr)");
+    let text = CString::new("1 2 3 4 5 6 7 8 9").unwrap();
+    assert_eq!(sscanf(text.as_ptr()), 9045);
+}
+
 #[test]
 fn raw_system_calls_run_by_their_arm64_number() {
     if !engine_available() {

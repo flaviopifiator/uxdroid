@@ -24,6 +24,21 @@ pub(super) enum Import {
 const FUNCTIONS: &[(&str, &str)] = &[
     // POSIX's, the exported symbol; _GNU_SOURCE renames the declaration to __gnu_strerror_r.
     ("strerror_r", "i32(i32,ptr,u64)"),
+    // Declared by no NDK header the generator reads.
+    ("strtoll_l", "i64(ptr,ptr,i32,ptr)"),
+    ("strtoull_l", "u64(ptr,ptr,i32,ptr)"),
+    // FORTIFY's checked functions that clang knows as builtins, so no header declares them.
+    ("__memcpy_chk", "ptr(ptr,ptr,u64,u64)"),
+    ("__memmove_chk", "ptr(ptr,ptr,u64,u64)"),
+    ("__memset_chk", "ptr(ptr,i32,u64,u64)"),
+    ("__strcpy_chk", "ptr(ptr,ptr,u64)"),
+    ("__stpcpy_chk", "ptr(ptr,ptr,u64)"),
+    ("__strcat_chk", "ptr(ptr,ptr,u64)"),
+    ("__strncpy_chk", "ptr(ptr,ptr,u64,u64)"),
+    ("__stpncpy_chk", "ptr(ptr,ptr,u64,u64)"),
+    ("__strncat_chk", "ptr(ptr,ptr,u64,u64)"),
+    ("__snprintf_chk", "i32(ptr,u64,i32,u64,ptr,...)"),
+    ("__sprintf_chk", "i32(ptr,i32,u64,ptr,...)"),
     // Memory
     ("malloc_usable_size", "u64(ptr)"),
     // Strings
@@ -56,6 +71,32 @@ const FORMAT_FUNCTIONS: &[&str] = &[
     "dprintf",
     "asprintf",
     "syslog",
+    "__snprintf_chk",
+    "__sprintf_chk",
+];
+
+/// Variadic functions whose last fixed argument is a scanf format.
+const SCAN_FUNCTIONS: &[&str] = &["sscanf", "fscanf", "scanf", "swscanf"];
+
+/// Objects guest code reads in place, with the same layout for arm64 and x86_64 bionic; the host
+/// gives each only when its audit lists it.
+const DATA: &[&str] = &[
+    "__sF",
+    "environ",
+    "stdin",
+    "stdout",
+    "stderr",
+    "optarg",
+    "optind",
+    "opterr",
+    "optopt",
+    "__progname",
+    "timezone",
+    "daylight",
+    "tzname",
+    "in6addr_any",
+    "in6addr_loopback",
+    "signgam",
 ];
 
 /// `v` functions of the printf family and the variadic function that serves each: the guest's
@@ -69,6 +110,11 @@ const VARIADIC_TWINS: &[(&str, &str)] = &[
     ("vasprintf", "asprintf"),
     ("vsyslog", "syslog"),
     ("__android_log_vprint", "__android_log_print"),
+    ("__vsnprintf_chk", "__snprintf_chk"),
+    ("__vsprintf_chk", "__sprintf_chk"),
+    ("vsscanf", "sscanf"),
+    ("vfscanf", "fscanf"),
+    ("vscanf", "scanf"),
 ];
 
 pub(super) fn variadic_twin(name: &str) -> Option<&'static str> {
@@ -78,7 +124,7 @@ pub(super) fn variadic_twin(name: &str) -> Option<&'static str> {
         .map(|&(_, twin)| twin)
 }
 
-type Special = fn(&dyn Cpu);
+pub(super) type Special = fn(&dyn Cpu);
 
 const SPECIALS: &[(&str, Special)] = &[
     ("pthread_create", pthread_create),
@@ -94,10 +140,11 @@ const SPECIALS: &[(&str, Special)] = &[
 ];
 
 pub(super) fn find(name: &str) -> Option<Import> {
-    if name == "__sF" {
+    if DATA.contains(&name) {
         return Some(Import::Data);
     }
-    if let Some(&(_, special)) = SPECIALS.iter().find(|(known, _)| *known == name) {
+    let specials = SPECIALS.iter().chain(super::convert::SPECIALS);
+    if let Some(&(_, special)) = specials.clone().find(|(known, _)| *known == name) {
         return Some(Import::Special(special));
     }
     if let Some(&(_, signature)) = FUNCTIONS.iter().find(|(known, _)| *known == name) {
@@ -112,6 +159,10 @@ pub(super) fn find(name: &str) -> Option<Import> {
 
 pub(super) fn is_format_function(name: &str) -> bool {
     FORMAT_FUNCTIONS.contains(&name)
+}
+
+pub(super) fn is_scan_function(name: &str) -> bool {
+    SCAN_FUNCTIONS.contains(&name)
 }
 
 /// A host function pointer for a guest callback, or the program stops: a callback that cannot

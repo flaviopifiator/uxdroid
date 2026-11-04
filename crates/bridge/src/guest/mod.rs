@@ -18,6 +18,7 @@
 //! `TPIDR_EL0` and one CPU per nesting level, as a host call may call guest code again.
 
 mod abi;
+mod convert;
 mod format;
 mod jni;
 mod jni_table;
@@ -139,8 +140,12 @@ enum Variadic {
     /// A `v` function of the printf family served by its variadic twin: the guest passes its
     /// fixed arguments and a `va_list`, from which the arguments its format names are read.
     FormatVaList,
-    /// Integers only, as for `open`'s mode or `ioctl`'s argument: every guest integer register
-    /// left is passed on, and the callee reads what it needs.
+    /// The last fixed argument is a scanf format: one pointer per conversion it names.
+    Scan,
+    /// A `v` function of the scanf family served by its variadic twin.
+    ScanVaList,
+    /// Integers only, as for `prctl`'s or `execl`'s: every guest integer register left is
+    /// passed on, and the callee reads what it needs.
     Integers,
 }
 
@@ -199,7 +204,31 @@ fn return_address() -> Result<u64, String> {
         .ok_or_else(|| "cannot map guest stubs".to_string())
 }
 
+thread_local! {
+    /// How many of this thread's guest CPUs are inside a service, that is, in host code. A guest
+    /// call made while fewer are than are running, from a signal handler, interrupted translated
+    /// code whose stack pointer the engine may not have written back yet.
+    static SERVING: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Counts a service while it runs, also when it leaves by stopping the program.
+struct Serving;
+
+impl Serving {
+    fn enter() -> Serving {
+        SERVING.with(|serving| serving.set(serving.get() + 1));
+        Serving
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        SERVING.with(|serving| serving.set(serving.get().saturating_sub(1)));
+    }
+}
+
 fn supervisor(cpu: &dyn Cpu, number: u32) -> bool {
+    let _serving = Serving::enter();
     if number == SYSCALL_SERVICE {
         libc::raw_syscall(cpu);
         return false;
@@ -335,7 +364,10 @@ fn va_list_service(
         target: Target::Fixed(address),
         returns,
         parameters,
-        variadic: Variadic::FormatVaList,
+        variadic: match libc::is_scan_function(twin) {
+            true => Variadic::ScanVaList,
+            false => Variadic::FormatVaList,
+        },
     }))
     .map(Some)
 }
@@ -361,6 +393,7 @@ fn host_service(name: &str, target: Target, signature: &str) -> Result<u64, ElfE
     let variadic = match variadic {
         false => Variadic::No,
         true if libc::is_format_function(name) => Variadic::Format,
+        true if libc::is_scan_function(name) => Variadic::Scan,
         true => Variadic::Integers,
     };
     add_service(Service::Host(HostFunction {
@@ -410,11 +443,16 @@ fn read_slot(cpu: &dyn Cpu, slot: Slot) -> u64 {
     }
 }
 
-/// The classes of the arguments the printf format at `format` names, or the program stops.
-fn format_classes(cpu: &dyn Cpu, name: &str, format: u64) -> Vec<Class> {
-    // SAFETY: the printf contract makes the format a C string; the read is bounded.
+/// The classes of the arguments the printf or scanf format at `format` names, or the program
+/// stops.
+fn format_classes(cpu: &dyn Cpu, name: &str, format: u64, scan: bool) -> Vec<Class> {
+    // SAFETY: the printf and scanf contracts make the format a C string; the read is bounded.
     let text = unsafe { native::c_string(format, format::MAX_FORMAT_BYTES + 1) };
-    match format::classes(text) {
+    let classes = match scan {
+        false => format::classes(text),
+        true => format::scan_pointers(text).map(|count| vec![Class::Integer; count]),
+    };
+    match classes {
         Ok(extra) => extra,
         Err(error) => fail(cpu, format_args!("{name}: cannot carry format: {error:?}")),
     }
@@ -468,11 +506,12 @@ fn call_host(cpu: &dyn Cpu, function: &HostFunction) {
         .collect();
     match function.variadic {
         Variadic::No => {}
-        Variadic::Format => {
+        Variadic::Format | Variadic::Scan => {
             let Some(&format) = values.last() else {
                 fail(cpu, format_args!("{} has no format", function.name));
             };
-            let extra = format_classes(cpu, &function.name, format);
+            let scan = function.variadic == Variadic::Scan;
+            let extra = format_classes(cpu, &function.name, format, scan);
             classes.extend(&extra);
             let layout = guest_layout(&classes);
             for (index, &class) in extra.iter().enumerate() {
@@ -480,14 +519,15 @@ fn call_host(cpu: &dyn Cpu, function: &HostFunction) {
                 kinds.push(variadic_kind(class));
             }
         }
-        Variadic::FormatVaList => {
+        Variadic::FormatVaList | Variadic::ScanVaList => {
             let Some(&format) = values.last() else {
                 fail(cpu, format_args!("{} has no format", function.name));
             };
             let mut with_list = classes.clone();
             with_list.push(Class::Integer);
             let list = read_slot(cpu, guest_layout(&with_list).slots[fixed]);
-            let extra = format_classes(cpu, &function.name, format);
+            let scan = function.variadic == Variadic::ScanVaList;
+            let extra = format_classes(cpu, &function.name, format, scan);
             values.extend(va_arguments(cpu, &function.name, list, &extra));
             kinds.extend(extra.iter().map(|&class| variadic_kind(class)));
             classes.extend(extra);
@@ -560,6 +600,9 @@ const TLS_REGISTER: usize = 0;
 const TLS_BLOCK_WORDS: usize = 1 + TLS_WORDS;
 /// No red zone exists in AAPCS64, but a nested call leaves room below the outer frame anyway.
 const NESTED_GAP: u64 = 256;
+/// Below translated code a signal interrupted: its frame may already be written below the stack
+/// pointer the engine last stored.
+const INTERRUPTED_GAP: u64 = 64 << 10;
 
 struct Thread {
     /// The register, then the slots it points at.
@@ -639,7 +682,11 @@ pub(crate) fn call(target: u64, parameters: &[Type], values: &[u64]) -> Result<(
             (*thread).stack.top()
         } else {
             let cpus = &(*thread).cpus;
-            cpus[depth - 1].sp().saturating_sub(NESTED_GAP)
+            let gap = match SERVING.with(Cell::get) < depth {
+                true => INTERRUPTED_GAP,
+                false => NESTED_GAP,
+            };
+            cpus[depth - 1].sp().saturating_sub(gap)
         };
 
         let classes: Vec<Class> = parameters.iter().filter_map(|&k| Class::of(k)).collect();
@@ -671,6 +718,16 @@ pub(crate) fn call(target: u64, parameters: &[Type], values: &[u64]) -> Result<(
     }
 }
 
+/// The calling thread's guest state, as an identity, and how many guest runs it is inside.
+pub(super) fn guest_context() -> (u64, usize) {
+    let thread = THREAD.with(Cell::get);
+    if thread.is_null() {
+        return (0, 0);
+    }
+    // SAFETY: this thread's own state; only the depth is read.
+    (thread as u64, unsafe { (*thread).depth })
+}
+
 /// Runs a guest initializer, `void(int, char**, char**)`.
 pub(crate) fn call_initializer(address: u64, environment: u64) -> Result<(), String> {
     call(
@@ -696,6 +753,8 @@ pub(crate) enum Kind {
     Jni,
     /// `JNI_OnLoad`: the host `JavaVM` becomes the guest's.
     OnLoad,
+    /// A signal handler: the third argument, the host's x86-64 `ucontext_t`, becomes null.
+    Signal,
 }
 
 pub(crate) struct Callback {
@@ -765,13 +824,12 @@ fn enter(callback: &Callback, frame: &mut native::EntryFrame) {
             Slot::Stack(slot) => unsafe { native::read_u64(frame.stack + 8 * slot as u64) },
         };
         let mut value = normalize(callback.parameters[index], raw);
-        if index == 0 {
-            value = match callback.kind {
-                Kind::Plain => value,
-                Kind::Jni => jni::guest_env(value),
-                Kind::OnLoad => jni::guest_vm(value),
-            };
-        }
+        value = match (callback.kind, index) {
+            (Kind::Jni, 0) => jni::guest_env(value),
+            (Kind::OnLoad, 0) => jni::guest_vm(value),
+            (Kind::Signal, 2) => 0,
+            _ => value,
+        };
         values.push(value);
     }
     match call(callback.target, &callback.parameters, &values) {
@@ -818,7 +876,7 @@ mod tests {
                 .map(|(_, why)| *why)
         };
         assert_eq!(
-            reason("epoll_wait"),
+            reason("epoll_pwait2"),
             Some("struct epoll_event differs on arm64")
         );
         // Written by hand or carried by a twin, so no longer unsigned.
@@ -826,7 +884,8 @@ mod tests {
             "qsort",
             "pthread_create",
             "vsnprintf",
-            "__android_log_vprint",
+            "epoll_wait",
+            "stat",
             "socket",
         ] {
             assert_eq!(reason(covered), None, "{covered}");
