@@ -316,7 +316,7 @@ fn epoll_events_and_ioctls_cross_in_arm64_layout() {
         return;
     }
     let epoll: extern "C" fn() -> i64 = function("spike_epoll", "i64()");
-    assert_eq!(epoll(), 111);
+    assert_eq!(epoll(), 1111);
 }
 
 #[test]
@@ -335,6 +335,15 @@ fn a_guest_signal_handler_runs_and_reads_back() {
     }
     let signal: extern "C" fn() -> i32 = function("spike_signal", "i32()");
     assert_eq!(signal(), 1000 + libc::SIGUSR1 * 10 + 1);
+}
+
+#[test]
+fn a_guest_fault_signal_handler_is_refused() {
+    if !engine_available() {
+        return;
+    }
+    let fault: extern "C" fn() -> i32 = function("spike_fault_signal", "i32()");
+    assert_eq!(fault(), 11);
 }
 
 #[test]

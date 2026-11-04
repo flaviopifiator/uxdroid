@@ -75,8 +75,9 @@ const FORMAT_FUNCTIONS: &[&str] = &[
     "__sprintf_chk",
 ];
 
-/// Variadic functions whose last fixed argument is a scanf format.
-const SCAN_FUNCTIONS: &[&str] = &["sscanf", "fscanf", "scanf", "swscanf"];
+/// Variadic functions whose last fixed argument is a scanf format of bytes. `swscanf`'s format is
+/// a wide string, so it keeps passing every remaining integer register.
+const SCAN_FUNCTIONS: &[&str] = &["sscanf", "fscanf", "scanf"];
 
 /// Objects guest code reads in place, with the same layout for arm64 and x86_64 bionic; the host
 /// gives each only when its audit lists it.
@@ -392,6 +393,12 @@ pub(super) fn raw_syscall(cpu: &dyn Cpu) {
 mod tests {
     use super::*;
     use crate::table::Signature;
+
+    #[test]
+    fn only_byte_formats_place_scanf_pointers() {
+        assert!(is_scan_function("sscanf"));
+        assert!(!is_scan_function("swscanf"));
+    }
 
     #[test]
     fn functions_whose_arguments_differ_on_arm64_never_take_the_generic_path() {

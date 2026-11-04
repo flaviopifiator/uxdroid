@@ -234,6 +234,11 @@ __attribute__((visibility("default"))) long spike_epoll(void) {
     if (tcgetattr(pipes[0], &terminal) != 0 && errno == ENOTTY) {
         result += 100;
     }
+    // A request outside the converted ones reaches the kernel, which knows FIOASYNC on a pipe.
+    int asynchronous = 0;
+    if (ioctl(pipes[0], FIOASYNC, &asynchronous) == 0) {
+        result += 1000;
+    }
     close(poller);
     close(pipes[0]);
     close(pipes[1]);
@@ -279,6 +284,22 @@ __attribute__((visibility("default"))) int spike_signal(void) {
                (current.sa_flags & SA_SIGINFO) ? 1000 : 0;
     sigaction(SIGUSR1, &previous, nullptr);
     return signalled + same;
+}
+
+// The host keeps its own fault handlers, so a guest one is refused, never recorded as installed.
+__attribute__((visibility("default"))) int spike_fault_signal(void) {
+    struct sigaction action = {};
+    action.sa_sigaction = on_signal;
+    action.sa_flags = SA_SIGINFO;
+    int score = 0;
+    if (sigaction(SIGFPE, &action, nullptr) == -1 && errno == EINVAL) {
+        score += 1;
+    }
+    struct sigaction current = {};
+    if (sigaction(SIGFPE, nullptr, &current) == 0 && current.sa_sigaction != on_signal) {
+        score += 10;
+    }
+    return score;
 }
 
 // arm64's long double is binary128; the host's is x87's.

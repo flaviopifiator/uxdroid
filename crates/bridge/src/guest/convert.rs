@@ -372,25 +372,14 @@ fn epoll_pwait(cpu: &dyn Cpu) {
 
 // --- ioctl and termios ---
 
-/// Requests whose numbers and argument layouts are the same on both, the kernel's generic ones:
-/// FIONREAD, FIONBIO, FIOCLEX, FIONCLEX, the terminal ones (bionic's termios is the kernel's),
-/// window size, and the interface queries of `struct ifreq` and `struct ifconf`.
-const IOCTLS: &[u64] = &[
-    0x541B, 0x5421, 0x5451, 0x5450, 0x5401, 0x5402, 0x5403, 0x5404, 0x5413, 0x5414, 0x540F, 0x5410,
-    0x5422, 0x8912, 0x8913, 0x8915, 0x8917, 0x891B, 0x8921, 0x8927, 0x8933, 0x8910,
-];
-
+/// Requests reach the host's ioctl with their one argument unchanged: the kernel's numbers and
+/// argument layouts are the same for arm64 and x86_64 LP64 code (FIONREAD, termios, `struct ifreq`).
 fn ioctl_raw(cpu: &dyn Cpu, fd: i32, request: u64, argument: u64) -> c_int {
-    if !IOCTLS.contains(&request) {
-        set_errno(libc::ENOTTY);
-        return -1;
-    }
     type Ioctl = unsafe extern "C" fn(c_int, libc::c_ulong, ...) -> c_int;
-    // SAFETY: the host's ioctl with a request whose argument has the same layout on both.
+    // SAFETY: the host's ioctl with the guest's request and argument, both LP64 Linux.
     unsafe { host_fn::<Ioctl>(cpu, "ioctl")(fd, request as libc::c_ulong, argument) }
 }
 
-/// Requests outside the audited list fail with ENOTTY, as on a file that does not know them.
 fn ioctl(cpu: &dyn Cpu) {
     let status = ioctl_raw(cpu, cpu.x(0) as i32, cpu.x(1) as u32 as u64, cpu.x(2));
     set_i32(cpu, status);
@@ -532,7 +521,8 @@ fn longjmp(cpu: &dyn Cpu) {
 
 /// Signals the host itself uses for faults: ART's implicit null checks and the engine's fast
 /// memory both take SIGSEGV first and chain, and a fault in translated code is not yet mapped
-/// back to the guest's PC. A guest handler for one is recorded and read back, never installed.
+/// back to the guest's PC. Setting a guest action for one fails with EINVAL and says so once; a
+/// query reads back the default action.
 const FAULT_SIGNALS: [c_int; 5] = [
     libc::SIGSEGV,
     libc::SIGBUS,
@@ -592,14 +582,21 @@ fn sigaction(cpu: &dyn Cpu) {
     let recorded = actions[slot];
 
     if FAULT_SIGNALS.contains(&signal) {
-        write_action(
-            cpu.x(2),
-            recorded.map_or_else(Action::default, |(action, _)| action),
-        );
-        if let Some(action) = wanted {
-            actions[slot] = Some((action, 0));
+        write_action(cpu.x(2), Action::default());
+        if wanted.is_some() {
+            static SAID: Mutex<u64> = Mutex::new(0);
+            let mut said = SAID.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *said & (1 << slot) == 0 {
+                *said |= 1 << slot;
+                eprintln!(
+                    "uxdroid: arm64 code cannot set an action for signal {signal}, which the host handles"
+                );
+            }
+            set_errno(libc::EINVAL);
+            set_i32(cpu, -1);
+        } else {
+            set_i32(cpu, 0);
         }
-        set_i32(cpu, 0);
         return;
     }
 
