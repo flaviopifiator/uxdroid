@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::elf::{
-    Dynamic, EHDR_SIZE, ElfError, Machine, PHDR_SIZE, PT_DYNAMIC, PT_LOAD, PT_TLS, ProgramHeader,
-    R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_IRELATIVE, R_AARCH64_JUMP_SLOT,
+    Dynamic, EHDR_SIZE, ElfError, Machine, PF_X, PHDR_SIZE, PT_DYNAMIC, PT_LOAD, PT_TLS,
+    ProgramHeader, R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_IRELATIVE, R_AARCH64_JUMP_SLOT,
     R_AARCH64_RELATIVE, R_AARCH64_TLS_DTPMOD64, R_AARCH64_TLS_DTPREL64, R_AARCH64_TLS_TPREL64,
     R_AARCH64_TLSDESC, R_X86_64_64, R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_GLOB_DAT,
     R_X86_64_IRELATIVE, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, RELA_SIZE, Rela, STB_WEAK, STT_FUNC,
@@ -128,6 +128,25 @@ impl Library {
     /// The CPU the library's code is for.
     pub fn machine(&self) -> Machine {
         self.machine
+    }
+
+    /// The file the library was loaded from.
+    pub(crate) fn path(&self) -> &Path {
+        Path::new(std::ffi::OsStr::from_bytes(self.path.as_bytes()))
+    }
+
+    /// What the library's addresses are moved by from its virtual addresses.
+    pub(crate) fn bias(&self) -> u64 {
+        self.image.bias() as u64
+    }
+
+    /// The virtual address ranges, start and end, of the library's executable code in its file.
+    pub(crate) fn code_ranges(&self) -> Vec<(u64, u64)> {
+        self.headers
+            .iter()
+            .filter(|header| header.kind == PT_LOAD && header.flags & PF_X != 0)
+            .map(|header| (header.vaddr, header.vaddr.saturating_add(header.filesz)))
+            .collect()
     }
 
     /// The names of the libraries this one directly depends on, loaded or provided.
@@ -371,6 +390,14 @@ fn snapshot() -> Vec<&'static Library> {
     lock().get().libraries.clone()
 }
 
+/// Every loaded library built for a guest ABI.
+pub(crate) fn guest_libraries() -> Vec<&'static Library> {
+    snapshot()
+        .into_iter()
+        .filter(|library| library.machine != Machine::X86_64)
+        .collect()
+}
+
 /// Loads a library and its dependencies, then runs their initializers.
 ///
 /// A library's own directory and `search_dirs` are searched for its dependencies. Initializers
@@ -395,6 +422,12 @@ pub fn load(path: &Path, search_dirs: &[PathBuf]) -> Result<&'static Library, Er
         link_tree(path, registry)?
     };
 
+    // Mapped and relocated, so the code is final: translation of it may start ahead.
+    for library in &new_libraries {
+        if library.machine != Machine::X86_64 {
+            guest::profile::library_loaded(library);
+        }
+    }
     run_initializers(&new_libraries)?;
     Ok(root)
 }

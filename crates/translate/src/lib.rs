@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 
 use uxdroid_bridge::guest::{Cpu, Engine, Supervisor, set_engine_loader};
 
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 const LIBRARY: &str = "libuxdroid_dynarmic.so";
 /// Dynarmic's `HaltReason` bits that `uxd_cpu_run` returns.
 const HALT_CACHE_INVALIDATION: u32 = 0x0000_0002;
@@ -107,6 +107,8 @@ struct Api {
     stats: unsafe extern "C" fn(*mut Stats),
     watch: unsafe extern "C" fn(u64),
     retire_cache: unsafe extern "C" fn(),
+    translated: unsafe extern "C" fn(*mut u64, usize) -> usize,
+    pretranslate: unsafe extern "C" fn(*const u64, usize) -> usize,
 }
 
 fn library_path() -> PathBuf {
@@ -160,7 +162,11 @@ fn load() -> Result<Box<dyn Engine>, String> {
         Ok(api) => {
             let api: &'static Api = Box::leak(Box::new(api));
             let _ = LOADED.set(api);
-            Ok(Box::new(Dynarmic { api }))
+            Ok(Box::new(Dynarmic {
+                api,
+                path,
+                identity: OnceLock::new(),
+            }))
         }
         Err(reason) => {
             // SAFETY: the handle is open, and nothing of the library is in use.
@@ -197,6 +203,8 @@ unsafe fn api(symbol: &dyn Fn(&CStr) -> Result<*mut c_void, String>) -> Result<A
             stats: cast(symbol(c"uxd_stats_get")?),
             watch: cast(symbol(c"uxd_watch")?),
             retire_cache: cast(symbol(c"uxd_retire_cache")?),
+            translated: cast(symbol(c"uxd_translated")?),
+            pretranslate: cast(symbol(c"uxd_pretranslate")?),
         })
     }
 }
@@ -213,6 +221,9 @@ unsafe fn cast<F: Copy>(address: *mut c_void) -> F {
 
 struct Dynarmic {
     api: &'static Api,
+    /// The engine's file, whose contents are its identity.
+    path: PathBuf,
+    identity: OnceLock<u64>,
 }
 
 impl Engine for Dynarmic {
@@ -260,6 +271,41 @@ impl Engine for Dynarmic {
         }
         cpu.raw = raw;
         Ok(cpu)
+    }
+
+    fn translated(&self) -> Vec<u64> {
+        let mut locations = Vec::new();
+        loop {
+            // SAFETY: the shim writes at most `capacity` words into the buffer.
+            let count =
+                unsafe { (self.api.translated)(locations.as_mut_ptr(), locations.capacity()) };
+            if count <= locations.capacity() {
+                // SAFETY: the shim wrote `count` words, within the capacity.
+                unsafe { locations.set_len(count) };
+                return locations;
+            }
+            // More than room for: blocks were added meanwhile; ask again with room to spare.
+            locations.reserve(count + count / 8);
+        }
+    }
+
+    unsafe fn pretranslate(&self, locations: &[u64]) -> usize {
+        // SAFETY: the slice is valid for its length; the caller keeps the code readable.
+        unsafe { (self.api.pretranslate)(locations.as_ptr(), locations.len()) }
+    }
+
+    fn identity(&self) -> u64 {
+        // FNV-1a of the engine's file and its interface version, computed once, when first asked,
+        // which is off the thread starting the app.
+        *self.identity.get_or_init(|| {
+            let bytes = std::fs::read(&self.path).unwrap_or_default();
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for &byte in ABI_VERSION.to_le_bytes().iter().chain(&bytes) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash
+        })
     }
 }
 
@@ -416,6 +462,12 @@ mod tests {
     unsafe extern "C" fn stats(_: *mut Stats) {}
     unsafe extern "C" fn watch(_: u64) {}
     unsafe extern "C" fn retire_cache() {}
+    unsafe extern "C" fn translated(_: *mut u64, _: usize) -> usize {
+        0
+    }
+    unsafe extern "C" fn pretranslate(_: *const u64, _: usize) -> usize {
+        0
+    }
     fn supervisor(_: &dyn Cpu, _: u32) -> bool {
         true
     }
@@ -444,7 +496,11 @@ mod tests {
                 stats,
                 watch,
                 retire_cache,
+                translated,
+                pretranslate,
             })),
+            path: PathBuf::new(),
+            identity: OnceLock::new(),
         }
     }
 

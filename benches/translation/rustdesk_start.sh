@@ -8,10 +8,16 @@
 # Needs /samples/rustdesk-1.5.1-universal-signed.apk (x86_64) and
 # /samples/rustdesk-1.5.1-arm64-only.apk (its arm64 libraries only), the release build in
 # CARGO_TARGET_DIR and UXDROID_TRANSLATOR. Each ABI is installed once; every run starts from a fresh
-# copy of that install, and runs alternate between the ABIs. A run measures, when the first frame
+# copy of that install, and runs alternate between the builds. A run measures, when the first frame
 # is posted on Flutter's SurfaceView: the time since the VM started, Private_Dirty of the process,
 # its user plus system CPU time, and the resident part of its anonymous executable and writable
 # mappings, which is where Dynarmic keeps translated code.
+#
+# The arm64 build runs twice per round: without a translation profile, as on its first start
+# (UXDROID_TRANSLATION_PROFILE=0, so it neither reads nor writes one), and with the profile one
+# earlier start saved beside its libraries (lib/arm64-v8a.profile), whose blocks it translates ahead
+# on a thread of its own. That earlier start runs once, before the rounds, until its profile is
+# saved, 3 s after its first arm64 library loaded.
 set -u -o pipefail
 RUNS="${1:-5}"
 WORK=$(mktemp -d)
@@ -38,12 +44,19 @@ for abi in x86_64 arm64-v8a; do
     echo "install $abi: $(( ($(date +%s%N) - start) / 1000000 )) ms"
 done
 
-# One run: prints "<abi> <ms to frame> <private dirty KiB> <cpu ms> <anonymous rwx KiB> <their count>".
+PROFILE="$WORK/arm64-v8a/data/$PACKAGE/lib/arm64-v8a.profile"
+
+# One run: prints "<label> <ms to frame> <private dirty KiB> <cpu ms> <anonymous rwx KiB> <their count>".
+# Labels: x86_64, arm64-v8a (no profile) and arm64-v8a+profile.
 run() {
-    local abi=$1 data="$WORK/run" out="$WORK/out" app start ms
+    local label=$1 abi=${1%+profile} data="$WORK/run" out="$WORK/out" app start ms use_profile=0
+    [ "$label" = "$abi" ] || use_profile=1
     rm -rf "$data" && cp -a "$WORK/$abi" "$data"
+    if [ "$abi" = arm64-v8a ] && [ "$use_profile" = 0 ]; then
+        rm -f "$data/data/$PACKAGE/lib/arm64-v8a.profile"
+    fi
     start=$(date +%s%N)
-    ANDROID_DATA="$data" "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" \
+    UXDROID_TRANSLATION_PROFILE=$use_profile ANDROID_DATA="$data" "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" \
         -XX:NativeBridge=libuxdroid_nativebridge.so -Xforce-nb-testing -cp "$CP" \
         dev.uxdroid.system.Launcher "$RUNTIME" "$TARGET/libuxdroid_system.so" \
         "$data/app/$PACKAGE/base.apk" >"$out" 2>&1 &
@@ -59,7 +72,7 @@ run() {
             count=$(grep -c -E '^[0-9a-f]+-[0-9a-f]+ rwx. [0-9a-f]+ 00:00 0 *$' "/proc/$app/maps")
             kill "$app" 2>/dev/null
             wait "$app" 2>/dev/null
-            echo "$abi $ms $dirty $cpu $rwx $count"
+            echo "$label $ms $dirty $cpu $rwx $count"
             return
         fi
         kill -0 "$app" 2>/dev/null || break
@@ -68,13 +81,35 @@ run() {
     kill "$app" 2>/dev/null
     wait "$app" 2>/dev/null
     grep -v "^	at " "$out" | tail -15 >&2
-    echo "FAIL: $abi did not post a frame" >&2
+    echo "FAIL: $label did not post a frame" >&2
     exit 1
 }
 
+# The earlier start that saves the profile, kept in the arm64 install for the profiled runs.
+profile_run() {
+    local data="$WORK/run" out="$WORK/out" app saved="$WORK/run/data/$PACKAGE/lib/arm64-v8a.profile"
+    rm -rf "$data" && cp -a "$WORK/arm64-v8a" "$data"
+    UXDROID_TRANSLATION_PROFILE=1 ANDROID_DATA="$data" "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" \
+        -XX:NativeBridge=libuxdroid_nativebridge.so -Xforce-nb-testing -cp "$CP" \
+        dev.uxdroid.system.Launcher "$RUNTIME" "$TARGET/libuxdroid_system.so" \
+        "$data/app/$PACKAGE/base.apk" >"$out" 2>&1 &
+    app=$!
+    for _ in $(seq 3000); do
+        [ -s "$saved" ] && break
+        kill -0 "$app" 2>/dev/null || break
+        sleep 0.01
+    done
+    kill "$app" 2>/dev/null
+    wait "$app" 2>/dev/null
+    [ -s "$saved" ] || { tail -15 "$out" >&2; echo "FAIL: no translation profile was saved" >&2; exit 1; }
+    cp "$saved" "$PROFILE"
+    echo "profile: $(stat -c %s "$PROFILE") bytes"
+}
+profile_run
+
 for i in $(seq "$RUNS"); do
-    for abi in x86_64 arm64-v8a; do
-        run "$abi" | tee -a "$WORK/results"
+    for label in x86_64 arm64-v8a arm64-v8a+profile; do
+        run "$label" | tee -a "$WORK/results"
     done
 done
 
@@ -96,11 +131,15 @@ medians = {abi: [median(c) for c in zip(*runs)] for abi, runs in rows.items()}
 print(f"medians of {len(rows['x86_64'])} runs")
 print("| Build | First frame ms | Private dirty MiB | CPU ms | Anonymous rwx MiB | rwx mappings |")
 print("|---|---|---|---|---|---|")
-for abi, label in (("x86_64", "native x86_64"), ("arm64-v8a", "translated arm64-v8a")):
+labels = (("x86_64", "native x86_64"), ("arm64-v8a", "translated arm64-v8a, no profile"),
+          ("arm64-v8a+profile", "translated arm64-v8a, with profile"))
+for abi, label in labels:
     ms, dirty, cpu, rwx, count = medians[abi]
     print(f"| {label} | {ms:.0f} | {dirty / 1024:.1f} | {cpu:.0f} | {rwx / 1024:.1f} | {count:.0f} |")
-native, translated = medians["x86_64"], medians["arm64-v8a"]
-print(f"translated first frame: {translated[0] / native[0]:.2f}x the native time, "
-      f"{(translated[1] - native[1]) / 1024:+.1f} MiB private dirty, "
-      f"{translated[2] - native[2]:+.0f} ms CPU")
+native = medians["x86_64"]
+for abi, label in labels[1:]:
+    translated = medians[abi]
+    print(f"{label} first frame: {translated[0] / native[0]:.2f}x the native time, "
+          f"{(translated[1] - native[1]) / 1024:+.1f} MiB private dirty, "
+          f"{translated[2] - native[2]:+.0f} ms CPU")
 EOF

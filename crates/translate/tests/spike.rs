@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
-use uxdroid_bridge::guest::{host_function, jni_trampoline, missing_signatures};
+use uxdroid_bridge::guest::{host_function, jni_trampoline, missing_signatures, profile};
 use uxdroid_bridge::table::{Export, Table};
 use uxdroid_bridge::{Library, load, table};
 
@@ -43,6 +43,19 @@ fn private_dir() -> PathBuf {
     out
 }
 
+/// The directory the test library was built into and loaded from.
+static LIBRARY_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Taken by the cases that watch translations, retire the code cache or translate ahead: each
+/// would see the others' translations in its counts.
+static ENGINE_COUNTS: Mutex<()> = Mutex::new(());
+
+fn engine_counts() -> std::sync::MutexGuard<'static, ()> {
+    ENGINE_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Builds the arm64 test library once per test process.
 fn library() -> &'static Library {
     static LIBRARY: OnceLock<&'static Library> = OnceLock::new();
@@ -51,6 +64,7 @@ fn library() -> &'static Library {
         let clang = Path::new(&ndk)
             .join("toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++");
         let out = private_dir();
+        let _ = LIBRARY_DIR.set(out.clone());
         let path = out.join("libspike.so");
         let status = Command::new(clang)
             .args([
@@ -265,6 +279,7 @@ fn code_translated_once_is_run_by_every_thread_until_its_cache_retires() {
     if !engine_available() {
         return;
     }
+    let _counts = engine_counts();
     let entry = library().symbol("spike_shared_code").unwrap() as u64;
     assert!(uxdroid_translate::watch_translations(entry));
     let run: extern "C" fn(i32) -> i32 = function("spike_shared_code", "i32(i32)");
@@ -312,6 +327,76 @@ fn code_translated_once_is_run_by_every_thread_until_its_cache_retires() {
         sum
     );
     assert!(uxdroid_translate::stats().unwrap().caches > caches);
+}
+
+#[test]
+fn a_saved_profile_translates_code_ahead_in_a_new_code_cache() {
+    if !engine_available() {
+        return;
+    }
+    let _counts = engine_counts();
+    let entry = library().symbol("spike_shared_code").unwrap() as u64;
+    let run: extern "C" fn(i32) -> i32 = function("spike_shared_code", "i32(i32)");
+    assert_eq!(run(300), shared_code(300));
+    let dir = LIBRARY_DIR.get().unwrap();
+    let saved = profile::save(dir).unwrap();
+    assert!(saved > 0);
+    assert!(dir.join(profile::FILE).is_file());
+
+    // As at the next start: a code cache that has translated nothing of the library yet.
+    assert!(uxdroid_translate::watch_translations(entry));
+    assert!(uxdroid_translate::retire_code_cache());
+    let ahead = profile::pretranslate(library()).unwrap();
+    assert!(ahead > 0 && ahead <= saved, "{ahead} of {saved}");
+    let translations = || uxdroid_translate::stats().unwrap().watched_translations;
+    assert_eq!(translations(), 1);
+    // The code was ready before any thread ran it.
+    assert_eq!(
+        std::thread::spawn(move || run(300)).join().unwrap(),
+        shared_code(300)
+    );
+    assert_eq!(translations(), 1);
+}
+
+#[test]
+fn a_stale_profile_is_ignored() {
+    if !engine_available() {
+        return;
+    }
+    let _counts = engine_counts();
+    let entry = library().symbol("spike_shared_code").unwrap() as u64;
+    let run: extern "C" fn(i32) -> i32 = function("spike_shared_code", "i32(i32)");
+    assert_eq!(run(300), shared_code(300));
+    let dir = LIBRARY_DIR.get().unwrap();
+    profile::save(dir).unwrap();
+    let path = dir.join(profile::FILE);
+    let saved = std::fs::read(&path).unwrap();
+
+    // Made by another engine: bytes 8 to 16 hold the engine's identity.
+    let mut other_engine = saved.clone();
+    other_engine[8] ^= 0xff;
+    std::fs::write(&path, &other_engine).unwrap();
+    assert!(uxdroid_translate::watch_translations(entry));
+    assert!(uxdroid_translate::retire_code_cache());
+    let refused = profile::pretranslate(library()).unwrap_err();
+    assert!(refused.ends_with("made by another engine"), "{refused}");
+    assert_eq!(uxdroid_translate::stats().unwrap().watched_translations, 0);
+
+    // For a library that changed since: a reinstall gives the file a new modification time.
+    std::fs::write(&path, &saved).unwrap();
+    let library_file = std::fs::File::options()
+        .write(true)
+        .open(dir.join("libspike.so"))
+        .unwrap();
+    library_file
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .unwrap();
+    let refused = profile::pretranslate(library()).unwrap_err();
+    assert!(
+        refused.ends_with("libspike.so has changed since it was made"),
+        "{refused}"
+    );
+    assert_eq!(uxdroid_translate::stats().unwrap().watched_translations, 0);
 }
 
 #[test]

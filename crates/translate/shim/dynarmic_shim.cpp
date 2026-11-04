@@ -44,6 +44,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
@@ -51,7 +52,7 @@
 
 namespace {
 
-constexpr std::uint32_t ABI_VERSION = 2;
+constexpr std::uint32_t ABI_VERSION = 3;
 // Address space a code cache reserves; only the pages code is written to take memory.
 constexpr std::size_t DEFAULT_CODE_CACHE_MIB = 128;
 // Dynarmic keeps a 2 MiB constant pool and 1 MiB of headroom inside each emitter's part.
@@ -427,6 +428,48 @@ __attribute__((visibility("default"))) void uxd_stats_get(uxd_stats* out) noexce
 __attribute__((visibility("default"))) void uxd_watch(std::uint64_t address) noexcept {
     watched_translations.store(0, std::memory_order_relaxed);
     watched_address.store(address, std::memory_order_relaxed);
+}
+
+// Copies the location descriptors (PC and FPCR bits) of the blocks the current cache translated,
+// oldest first, up to `capacity` of them, and returns how many there are.
+__attribute__((visibility("default"))) std::size_t uxd_translated(std::uint64_t* out, std::size_t capacity) noexcept {
+    std::shared_ptr<Dynarmic::A64::CodeCache> current;
+    {
+        Shared& state = shared();
+        std::lock_guard<std::mutex> guard{state.mutex};
+        current = state.current;
+    }
+    if (!current) {
+        return 0;
+    }
+    try {
+        const std::vector<std::uint64_t> locations = current->Locations();
+        const std::size_t copied = std::min(capacity, locations.size());
+        std::memcpy(out, locations.data(), copied * sizeof(std::uint64_t));
+        return locations.size();
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Translates the block at each location descriptor ahead of any CPU needing it, into the current
+// cache, on the calling thread, which need not run guest code. The code at each must be readable.
+// Returns how many it went through before the cache filled.
+__attribute__((visibility("default"))) std::size_t uxd_pretranslate(const std::uint64_t* locations, std::size_t count) noexcept {
+    if (!shared().sharing) {
+        return 0;
+    }
+    try {
+        std::shared_ptr<Dynarmic::A64::CodeCache> cache = cache_for(nullptr);
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!cache->Translate(locations[i])) {
+                return i;
+            }
+        }
+        return count;
+    } catch (...) {
+        return 0;
+    }
 }
 
 // Makes the current cache take no more blocks and a new one current: each CPU moves to it at the

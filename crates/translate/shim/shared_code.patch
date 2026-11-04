@@ -9,7 +9,9 @@ docker/translation/dynarmic.patch.
   table before taking the lock when it enters guest code). A cache never clears or invalidates code; with no room
   left it makes the Jit stop with the new HaltReason::CodeCacheFull (interface/halt_reason.h) and
   its owner moves it to another cache with Jit::SetCodeCache. ClearCache and InvalidateCacheRange
-  stop the program instead. The block lookup the dispatcher calls finds the running Jit through a
+  stop the program instead. CodeCache::Translate translates a block ahead of any Jit, and
+  CodeCache::Locations lists what a cache translated, for profiles kept between runs. The block
+  lookup the dispatcher calls finds the running Jit through a
   thread-local record that each Run saves and restores.
 - backend/x64/a64_jitstate.h: what code used to bake in per Jit is in its state, read through r15:
   TPIDR_EL0 and TPIDRRO_EL0 pointers, the fast dispatch table (one per Jit, 1 MiB of lazily
@@ -17,6 +19,12 @@ docker/translation/dynarmic.patch.
 - backend/x64/a64_emit_x64.{h,cpp}, emit_x64.{h,cpp}: links between blocks are retargeted with one
   aligned 4- or 8-byte atomic store of a jump displacement or immediate, never rewritten in place,
   so other threads may run the code being linked; the unlinked path is a stub after each location.
+- backend/x64/emit_x64.{h,cpp}: the blocks and the jumps waiting for them are one link table
+  shared by a cache's emitters, each writing into its own part of one region, under a lock taken
+  inside the emitter's; a block registered twice keeps its first copy. a64_emit_x64.cpp records
+  no guest ranges, since nothing invalidates by range.
+- backend/x64/block_of_code.{h,cpp}: a BlockOfCode can take its memory from a given allocator,
+  and the constant pool is not cleared, since fresh mappings are zero.
 - backend/x64/emit_x64_memory.cpp.inc: exclusive loads and stores keep the reservation in the
   Jit's state and compare and swap against the value read (the global monitor is ignored, as
   Unsafe_IgnoreGlobalMonitor does); the fastmem fault handler reads its table under a lock of its
@@ -456,7 +464,7 @@ index eba2bb4..8e310b4 100644
  
  }  // namespace Dynarmic::Backend::X64
 diff --git a/src/dynarmic/backend/x64/a64_interface.cpp b/src/dynarmic/backend/x64/a64_interface.cpp
-index b9373f7..eac0ab2 100644
+index b9373f7..7ecc88a 100644
 --- a/src/dynarmic/backend/x64/a64_interface.cpp
 +++ b/src/dynarmic/backend/x64/a64_interface.cpp
 @@ -3,11 +3,18 @@
@@ -514,7 +522,7 @@ index b9373f7..eac0ab2 100644
      return [conf](BlockOfCode& code) {
          if (conf.page_table) {
              code.mov(code.r14, mcl::bit_cast<u64>(conf.page_table));
-@@ -48,36 +72,256 @@ static std::function<void(BlockOfCode&)> GenRCP(const A64::UserConfig& conf) {
+@@ -48,36 +72,272 @@ static std::function<void(BlockOfCode&)> GenRCP(const A64::UserConfig& conf) {
      };
  }
  
@@ -636,6 +644,10 @@ index b9373f7..eac0ab2 100644
 +        const CodePtr entrypoint = chosen.emitter.Emit(ir_block).entrypoint;
 +        blocks.fetch_add(1, std::memory_order_relaxed);
 +        total_blocks.fetch_add(1, std::memory_order_relaxed);
++        {
++            std::lock_guard order_lock{order_mutex};
++            order.push_back(location.Value());
++        }
 +        return entrypoint;
 +    }
 +
@@ -703,6 +715,9 @@ index b9373f7..eac0ab2 100644
 +
 +    std::atomic<bool> full{false};
 +    std::atomic<size_t> blocks{0};
++    // What was translated, in order, for Locations. A leaf lock: nothing is taken under it.
++    mutable std::mutex order_mutex;
++    std::vector<u64> order;
 +};
 +
 +CodeCache::CodeCache(UserConfig conf, std::size_t emitters)
@@ -728,6 +743,15 @@ index b9373f7..eac0ab2 100644
 +
 +size_t CodeCache::TotalBlockCount() {
 +    return total_blocks.load(std::memory_order_relaxed);
++}
++
++bool CodeCache::Translate(std::uint64_t location) {
++    return impl->GetBlock(IR::LocationDescriptor{location}) != nullptr;
++}
++
++std::vector<std::uint64_t> CodeCache::Locations() const {
++    std::lock_guard lock{impl->order_mutex};
++    return impl->order;
 +}
 +
 +namespace {
@@ -781,7 +805,7 @@ index b9373f7..eac0ab2 100644
          const CodePtr current_code_ptr = [this] {
              // RSB optimization
              const u32 new_rsb_ptr = (jit_state.rsb_ptr - 1) & A64JitState::RSBPtrMask;
-@@ -86,49 +330,44 @@ public:
+@@ -86,49 +346,44 @@ public:
                  return reinterpret_cast<CodePtr>(jit_state.rsb_codeptrs[new_rsb_ptr]);
              }
  
@@ -848,7 +872,7 @@ index b9373f7..eac0ab2 100644
      }
  
      void HaltExecution(HaltReason hr) {
-@@ -229,108 +468,113 @@ public:
+@@ -229,108 +484,113 @@ public:
      }
  
      void DumpDisassembly() const {
@@ -1034,7 +1058,7 @@ index b9373f7..eac0ab2 100644
  HaltReason Jit::Run() {
      return impl->Run();
  }
-@@ -340,11 +584,11 @@ HaltReason Jit::Step() {
+@@ -340,11 +600,11 @@ HaltReason Jit::Step() {
  }
  
  void Jit::ClearCache() {
@@ -1396,10 +1420,10 @@ index 272b896..2e91272 100644
      if constexpr (bitsize == 128) {
          code.mov(rax, qword[tmp + 0]);
 diff --git a/src/dynarmic/interface/A64/a64.h b/src/dynarmic/interface/A64/a64.h
-index a150da8..a91f2da 100644
+index a150da8..7c4c742 100644
 --- a/src/dynarmic/interface/A64/a64.h
 +++ b/src/dynarmic/interface/A64/a64.h
-@@ -18,11 +18,60 @@
+@@ -18,11 +18,67 @@
  namespace Dynarmic {
  namespace A64 {
  
@@ -1442,6 +1466,13 @@ index a150da8..a91f2da 100644
 +    /// Blocks translated into every cache of the process.
 +    static std::size_t TotalBlockCount();
 +
++    /// uxdroid: translates the block at `location` (a location descriptor: PC and FPCR bits)
++    /// ahead of any Jit needing it, unless the cache has it. The code there must be readable.
++    /// False when the cache is full.
++    bool Translate(std::uint64_t location);
++    /// uxdroid: the location descriptors of the blocks this cache translated, oldest first.
++    std::vector<std::uint64_t> Locations() const;
++
 +    struct Impl;
 +    std::unique_ptr<Impl> impl;
 +};
@@ -1460,7 +1491,7 @@ index a150da8..a91f2da 100644
      /**
       * Runs the emulated CPU.
       * Cannot be recursively called.
-@@ -38,6 +87,8 @@ public:
+@@ -38,6 +94,8 @@ public:
      /**
       * Clears the code cache of all compiled code.
       * Can be called at any time. Halts execution if called within a callback.
@@ -1469,7 +1500,7 @@ index a150da8..a91f2da 100644
       */
      void ClearCache();
  
-@@ -45,6 +96,7 @@ public:
+@@ -45,6 +103,7 @@ public:
       * Invalidate the code cache at a range of addresses.
       * @param start_address The starting address of the range to invalidate.
       * @param length The length (in bytes) of the range to invalidate.

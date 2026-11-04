@@ -26,6 +26,7 @@ mod libc;
 mod libc_table;
 mod native;
 pub mod plan;
+pub mod profile;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -72,6 +73,29 @@ pub trait Engine: Send + Sync {
         tpidr_el0: *mut u64,
         supervisor: Supervisor,
     ) -> Result<Box<dyn Cpu>, String>;
+
+    /// The blocks the engine translated, oldest first, as locations: the guest PC in the low
+    /// [`profile::PC_BITS`] bits and the engine's own flags for the block above them. Engines that
+    /// keep no such list return none.
+    fn translated(&self) -> Vec<u64> {
+        Vec::new()
+    }
+
+    /// Translates the blocks at `locations`, as [`Engine::translated`] gives them, before any CPU
+    /// runs them, on the calling thread. Returns how many it went through.
+    ///
+    /// # Safety
+    /// The guest code at each location must be mapped and readable.
+    unsafe fn pretranslate(&self, locations: &[u64]) -> usize {
+        let _ = locations;
+        0
+    }
+
+    /// Changes whenever the engine's locations or translation could: persisted lists of locations
+    /// made by another engine are not used.
+    fn identity(&self) -> u64 {
+        0
+    }
 }
 
 type Loader = fn() -> Result<Box<dyn Engine>, String>;

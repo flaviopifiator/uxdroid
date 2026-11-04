@@ -26,30 +26,45 @@ QEMU runs in its best configuration for this workload as far as tested: user mod
 
 ## Last result
 
-2026-11-03, AMD Ryzen 5 5600X, 12 threads, in one Docker container on a machine shared with other builds (load average about 3). Medians of 5 runs.
+2026-11-04, AMD Ryzen 5 5600X, 12 threads, in one Docker container on a machine shared with other builds (load average about 1.4), with the shared code cache. Medians of 5 runs.
 
 | Configuration (64 MiB) | SHA-256 ms | deflate ms | Kernel ms | % of native speed | First-run extra ms | Peak RSS MiB | Private dirty MiB |
 |---|---|---|---|---|---|---|---|
-| native x86_64 | 215 | 2239 | 2454 | 100.0% | 8.2 | 78.3 | 75.9 |
-| translated (uxdroid, Dynarmic) | 577 | 5498 | 6075 | 40.4% | 27.7 | 88.2 | 83.2 |
-| QEMU user | 625 | 6162 | 6787 | 36.2% | 20.7 | 86.9 | 80.9 |
+| native x86_64 | 205 | 2206 | 2411 | 100.0% | 3.1 | 78.5 | 76.0 |
+| translated (uxdroid, Dynarmic) | 559 | 5385 | 5944 | 40.6% | 47.5 | 87.7 | 82.5 |
+| QEMU user | 616 | 6051 | 6666 | 36.2% | 32.9 | 86.9 | 80.9 |
 
 Every configuration produced SHA-256 `91ad201e806745412d7703b38a3f9311ccf1e7599d0c954f844e69da18f871ec` and 12057555 compressed bytes.
 
-The translator ran this kernel 11.7% faster than QEMU user and at 40.4% of native speed. It used 9.9 MiB more peak memory than native and 1.3 MiB more than QEMU; of that, about 4 MiB is translated code in Dynarmic's code cache and 1 MiB is its dispatch table, which `docker/translation/dynarmic.patch` shrinks from 16 MiB. Translation time here is within the noise of one run (tens of milliseconds for both translators).
+The translator ran this kernel 12.2% faster than QEMU user and at 40.6% of native speed; before the shared cache, the same day, it ran at 40.2% (QEMU 35.9%). It used 9.2 MiB more peak memory than native and 0.8 MiB more than QEMU. First-run extra is within the noise of one run for both translators.
 
 ## RustDesk to its first frame
 
-`rustdesk_start.sh [runs]` starts RustDesk 1.5.1 to its first Flutter frame twice per run, from its x86_64 build (native) and from its arm64-v8a build alone (translated), each from a fresh copy of one install, and reads, when Flutter posts its first frame: the time since the VM started, `Private_Dirty` of the process, its user plus system CPU time, and the resident part of its anonymous `rwx` mappings, which hold Dynarmic's translated code, one per guest CPU. RustDesk is untrusted, so it runs only in a sandbox with the engine, mounted as `runtime/framework/rustdesk_arm64_smoke.sh` describes, with both APKs in `/samples`.
+`rustdesk_start.sh [runs]` starts RustDesk 1.5.1 to its first Flutter frame three times per round: from its x86_64 build (native), from its arm64-v8a build alone without a translation profile, as on a first start, and from the arm64-v8a build with the profile an earlier start saved, each from a fresh copy of one install. That earlier start runs once before the rounds, until it saves its profile. A run reads, when Flutter posts its first frame: the time since the VM started, `Private_Dirty` of the process, its user plus system CPU time, and the resident part of its anonymous `rwx` mappings, which hold Dynarmic's translated code. RustDesk is untrusted, so it runs only in a sandbox with the engine, mounted as `runtime/framework/rustdesk_arm64_smoke.sh` describes, with both APKs in `/samples`.
 
-2026-11-04, same machine, load average about 1, medians of 5 alternating runs. The arm64 build reached its first frame only with nine GL extension functions added to `crates/ndk`'s GLES table, a change not committed (see docs/architecture.md, "Not yet"); without them it stops at Skia's GL setup.
+2026-11-04, same machine, load average about 1.4, medians of 5 alternating rounds:
 
 | Build | First frame ms | Private dirty MiB | CPU ms | Anonymous rwx MiB | rwx mappings |
 |---|---|---|---|---|---|
-| native x86_64 | 254 | 149.0 | 320 | 0.0 | 1 |
-| translated arm64-v8a | 2426 | 603.9 | 4930 | 188.5 | 41 |
+| native x86_64 | 265 | 149.2 | 320 | 0.0 | 1 |
+| translated arm64-v8a, no profile | 2157 | 354.4 | 3090 | 33.7 | 3 |
+| translated arm64-v8a, with profile | 1649 | 334.4 | 3290 | 36.3 | 3 |
 
-The translated build took 9.6 times as long to its first frame and 455 MiB more private dirty memory, and spent 4.6 s more CPU time, which is translation and translated execution together. About 190 MiB of that memory is translated code, 4.5 MiB in each of 41 code caches, and anonymous writable memory grew by 282 MiB, which these runs do not attribute further. Every guest thread and nesting level has its own Dynarmic JIT with its own code cache and 1 MiB dispatch table, so code one thread translated is translated again on the next; that is the likely main part. Installing took 398 ms for arm64-v8a, translation plan included, and 353 ms for x86_64.
+Before the shared code cache, on the same machine that day: native 265 ms and 149.2 MiB, translated 2447 ms, 600.2 MiB, 4950 ms of CPU and 188.2 MiB of translated code in 41 caches, one per guest thread and nesting level. Sharing one cache cut private dirty memory by 246 MiB, translated code by 154 MiB, CPU time by 1.9 s and the time to the first frame by 290 ms; the profile cut 508 ms more and 20 MiB. The translated build still takes 6.2 times as long as the native one and 185 MiB more memory.
+
+What the engine's settings changed, medians of 3 rounds each:
+
+| Setting | First frame ms | Private dirty MiB | CPU ms | rwx MiB |
+|---|---|---|---|---|
+| a cache per guest CPU, as before (`UXDROID_SHARED_CODE=0`) | 2439 | 533.8 | 4470 | 165.6 |
+| one emitter per cache (`UXDROID_CODE_EMITTERS=1`) | 2680 | 342.1 | 3400 | 35.1 |
+| two emitters, the default | 2179 | 356.6 | 3120 | 37.8 |
+| four emitters | 2145 | 384.4 | 3100 | 45.3 |
+| eight emitters, 16 MiB each, which fill and are replaced | 2896 | 499.7 | 4480 | 133.8 |
+| profile translated ahead by one thread, the default | 1641 | 334.1 | 3270 | 36.1 |
+| profile translated ahead by two threads | 1559 | 362.7 | 3650 | 35.4 |
+
+The emitter and per-CPU rows were taken before the constant pool stopped being cleared, which saves 2 MiB per emitter. An instrumented build of the shared cache with one emitter counted, up to the first frame, about 150,000 blocks translated, 0.7 s of CPU decoding guest code into IR and 1.8 s emitting it under the cache's lock, so translation is most of the CPU time; a cache per guest CPU translated 193,000 blocks, so most of the old memory was per-cache overhead rather than code translated twice. Installing took 403 ms for arm64-v8a, translation plan included, and 355 ms for x86_64.
 
 ## Not measured
 
@@ -57,5 +72,6 @@ The translated build took 9.6 times as long to its first frame and 455 MiB more 
 - Houdini and other closed translators, which cannot run here.
 - Workloads other than this integer kernel: floating point and SIMD heavy code, code that calls the host often (each host call moves registers by signature), many threads, and an app's start under QEMU user, which cannot run the bridge's libraries.
 - A GPU or another CPU; one machine, shared, so differences of a few percent are noise.
-- How the CPU time of RustDesk's start splits between translating and running translated code: the engine has no counters for it yet.
+- How the CPU time of RustDesk's start splits between translating and running translated code, in the shipped engine: only the instrumented build above counted it, once.
+- RustDesk's start with a profile saved later than 3 s, or kept over many starts, and apps other than RustDesk.
 - RustDesk's translated start on the committed tables, which stops before its first frame.
