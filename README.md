@@ -114,6 +114,9 @@ UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runt
 # the same on RustDesk's Flutter widgets in the sandbox.
 docker compose run --rm -T dev bash /work/runtime/framework/agent_smoke.sh
 UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_agent_smoke.sh
+# Which renderer a headless GLES 2 context gets: llvmpipe in dev, the host GPU in dev-gpu, which passes
+# the host's GPU nodes and mounts its driver's libraries read-only (paths in compose.yaml).
+docker compose --profile gpu run --rm -T -e EXPECT=NVIDIA dev-gpu bash /work/runtime/gpu/gpu_probe.sh
 # The compatibility corpus, F-Droid builds of Loop Habit Tracker, Markor, Aegis, AnkiDroid and
 # Mindustry (verified against F-Droid's key, untrusted: sandbox only), each to a first screen that is
 # not blank. A missing APK is skipped; CORPUS_APPS picks some; SHOTS=<dir> keeps the screenshots.

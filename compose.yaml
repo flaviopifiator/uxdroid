@@ -25,6 +25,38 @@ services:
       - art_runtime:/runtime:ro
       - ${UXDROID_SAMPLES:-./samples}:/samples:ro
 
+  # `dev` with the host's GPU, for the GPU rendering path. No vendor package is installed: the GPU
+  # nodes are passed in and the host driver's user-space libraries are mounted read-only, the same
+  # set a CDI spec would inject, so they always match the host's kernel driver. Mesa's llvmpipe
+  # stays in the image as the fallback. Paths are for the host's NVIDIA 595 driver; another host
+  # adjusts them or uses only /dev/dri with Mesa's own drivers.
+  dev-gpu:
+    extends: dev
+    profiles: [gpu]
+    environment:
+      XDG_CACHE_HOME: /tmp/cache
+    group_add: ["${UXDROID_RENDER_GID:-990}"]
+    devices:
+      - /dev/dri/renderD128
+      - /dev/nvidia0
+      - /dev/nvidiactl
+      - /dev/nvidia-modeset
+      - /dev/nvidia-uvm
+    volumes:
+      - /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro
+      - /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json:/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json:ro
+      - /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0:/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0:ro
+      - /usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2:/usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2:ro
+      - /usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1:/usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.99.02:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.595.99.02:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.99.02:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-tls.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-tls.so.595.99.02:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.99.02:/usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.99.02:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so:/usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so:ro
+
   # Compares loader performance against competitors. Offline, with real libraries read-only.
   bench:
     profiles: [bench]
