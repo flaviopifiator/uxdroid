@@ -175,8 +175,9 @@ final class Record {
                 Class<?> type = value.getClass();
                 if (type.isArray()) {
                     Class<?> component = type.getComponentType();
-                    if (!component.isPrimitive() && component != String.class
-                            && !component.getName().startsWith("android.")) {
+                    Class<?> element = component;
+                    while (element.isArray()) element = element.getComponentType();
+                    if (!element.isPrimitive() && element != String.class && !element.getName().startsWith("android.")) {
                         throw new IllegalArgumentException("cannot record an array of " + component.getName());
                     }
                     data.writeByte(ARRAY);
@@ -303,8 +304,13 @@ final class Record {
             case "double": return double.class;
             case "java.lang.String": return String.class;
             default:
-                // A record names only the framework's own classes; nothing else is loaded from one.
-                if (!name.startsWith("android.")) throw new ClassNotFoundException("unexpected class in record: " + name);
+                // A record names only the framework's own classes, and arrays of them, of strings or of
+                // primitives; nothing else is loaded from one.
+                String element = name.replaceFirst("^\\[+", "");
+                boolean allowed = name.startsWith("[")
+                        ? element.matches("[ZBCSIJFD]|Ljava\\.lang\\.String;|Landroid\\.[\\w.$]+;")
+                        : name.startsWith("android.");
+                if (!allowed) throw new ClassNotFoundException("unexpected class in record: " + name);
                 return Class.forName(name);
         }
     }

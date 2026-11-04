@@ -1,4 +1,4 @@
-//! The framework's Java GL bindings: `android.opengl.GLES20` and `GLES30`, and the EGL10 of
+//! The framework's Java GL bindings: `android.opengl.GLES20` to `GLES32`, and the EGL10 of
 //! `javax.microedition.khronos`, `com.google.android.gles_jni.EGLImpl`, which `GLSurfaceView`
 //! uses. On Android they are JNI code in `libandroid_runtime`, which AOSP's host build leaves out,
 //! so every one had a default body: Mindustry's renderer found no EGL config and stopped with
@@ -8,8 +8,9 @@
 //! buffer, or take an array of strings, are here. EGL goes to the same functions app native code
 //! reaches through `libEGL`'s table: Mesa's surfaceless display, and a window surface on a `Surface`
 //! is a pbuffer read back into it at each swap (`uxdroid_ndk::host_gl`). The GL10 of `GLImpl`
-//! answers the functions GLES shares with it, such as glGetString; its fixed-function rest,
-//! `android.opengl.EGL14`, `GLES31` and `GLES32` keep their default bodies.
+//! answers the functions GLES shares with it, such as glGetString; its fixed-function rest and
+//! `android.opengl.EGL14` keep their default bodies. `GLES31` and `GLES32` are generated like
+//! `GLES20` and `GLES30`.
 
 mod egl10;
 #[rustfmt::skip]
@@ -40,6 +41,16 @@ pub(crate) unsafe fn register(env: *mut JNIEnv) -> Result<(), String> {
         .copied()
         .chain(HAND_GLES30.iter().copied())
         .collect();
+    let gles31: Vec<Method> = gles::GLES31
+        .iter()
+        .copied()
+        .chain(HAND_GLES31.iter().copied())
+        .collect();
+    let gles32: Vec<Method> = gles::GLES32
+        .iter()
+        .copied()
+        .chain(HAND_GLES32.iter().copied())
+        .collect();
     // GLImpl's methods that GLES has too, such as glGetString, which libGDX's renderers call on the
     // GL10 they are handed; its fixed-function rest keeps the default bodies.
     let gl10: Vec<Method> = gles::GL_IMPL
@@ -57,6 +68,8 @@ pub(crate) unsafe fn register(env: *mut JNIEnv) -> Result<(), String> {
     unsafe {
         crate::register_uninitialized(env, c"android.opengl.GLES20", &gles20)?;
         crate::register_uninitialized(env, c"android.opengl.GLES30", &gles30)?;
+        crate::register_uninitialized(env, c"android.opengl.GLES31", &gles31)?;
+        crate::register_uninitialized(env, c"android.opengl.GLES32", &gles32)?;
         crate::register_uninitialized(env, c"com.google.android.gles_jni.EGLImpl", egl10::METHODS)?;
         crate::register_uninitialized(env, c"com.google.android.gles_jni.GLImpl", &gl10)
     }
@@ -159,6 +172,20 @@ unsafe extern "system" fn program_info_log(
     unsafe { iv(program as u32, INFO_LOG_LENGTH, &mut length) };
     // SAFETY: as above.
     unsafe { object_string(env, program, length, log) }
+}
+
+unsafe extern "system" fn program_pipeline_info_log(
+    env: *mut JNIEnv,
+    _class: jclass,
+    pipeline: jint,
+) -> jstring {
+    let iv = host!(env, c"glGetProgramPipelineiv": GetIv, std::ptr::null_mut());
+    let log = host!(env, c"glGetProgramPipelineInfoLog": GetLog, std::ptr::null_mut());
+    let mut length = 0;
+    // SAFETY: GL writes one value.
+    unsafe { iv(pipeline as u32, INFO_LOG_LENGTH, &mut length) };
+    // SAFETY: as above.
+    unsafe { object_string(env, pipeline, length, log) }
 }
 
 unsafe extern "system" fn shader_source_string(
@@ -679,6 +706,17 @@ const HAND_GL_IMPL: &[Method] = &[(
     c"(I)Ljava/lang/String;",
     get_string as *mut c_void,
 )];
+
+const HAND_GLES31: &[Method] = &[
+    (c"_nativeClassInit", c"()V", class_init as *mut c_void),
+    (
+        c"glGetProgramPipelineInfoLog",
+        c"(I)Ljava/lang/String;",
+        program_pipeline_info_log as *mut c_void,
+    ),
+];
+
+const HAND_GLES32: &[Method] = &[(c"_nativeClassInit", c"()V", class_init as *mut c_void)];
 
 const HAND_GLES30: &[Method] = &[
     (c"_nativeClassInit", c"()V", class_init as *mut c_void),

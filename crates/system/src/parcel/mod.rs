@@ -614,11 +614,15 @@ impl<B: Clone> Parcel<B> {
     }
 
     /// The data as bytes; a position past the buffer reads as zeros.
-    fn marshall_unchecked(&self) -> Vec<u8> {
+    fn marshall_unchecked(&self) -> Result<Vec<u8>, Status> {
         let size = self.data_size();
-        let mut bytes = self.buffer[..size.min(self.buffer.len())].to_vec();
+        // The size counts a position set past the data, up to 2 GiB of zeros: a parcel that cannot
+        // have them fails as out of memory instead of aborting the process.
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(size).map_err(|_| NO_MEMORY)?;
+        bytes.extend_from_slice(&self.buffer[..size.min(self.buffer.len())]);
         bytes.resize(size, 0);
-        bytes
+        Ok(bytes)
     }
 
     /// The data as bytes, which only a parcel without objects has.
@@ -626,7 +630,7 @@ impl<B: Clone> Parcel<B> {
         if !self.objects.is_empty() {
             return Err(INVALID_OPERATION);
         }
-        Ok(self.marshall_unchecked())
+        self.marshall_unchecked()
     }
 
     /// Replaces the data with `bytes`, which hold no objects, and leaves the position after them.

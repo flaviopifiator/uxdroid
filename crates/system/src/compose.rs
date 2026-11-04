@@ -2,8 +2,10 @@
 //! SurfaceFlinger does on Android: each layer's frame drawn in order, through its transform, buffer
 //! transform, clip, alpha and rounded corners, and only inside the damaged part of the window.
 //!
-//! Pixels are 0xAARRGGBB without premultiplied alpha, as `Bitmap.getPixels` gives them. The result
-//! is opaque, because the window's buffer is XRGB8888. Sampling is nearest-neighbour.
+//! Layers' pixels are 0xAARRGGBB without premultiplied alpha, as `Bitmap.getPixels` gives them. The
+//! result is premultiplied, as Wayland's ARGB8888 is: composed over black and opaque for an opaque
+//! window, whose buffer is XRGB8888, and over nothing for a translucent one, such as a dialog with
+//! its shadow, whose buffer is ARGB8888. Sampling is nearest-neighbour.
 
 /// A rectangle of whole pixels, right and bottom exclusive. Empty when either side is not positive.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -295,9 +297,13 @@ impl Item<'_> {
     }
 }
 
-const OPAQUE: u32 = 0xff00_0000;
+/// The background of an opaque window: black.
+pub const OPAQUE: u32 = 0xff00_0000;
+/// The background of a translucent window: nothing.
+pub const TRANSPARENT: u32 = 0;
 
-/// `source` with `alpha` over the opaque `destination`.
+/// `source`, unpremultiplied, with `alpha` over the premultiplied `destination`: source over, as
+/// Porter and Duff define it. Over an opaque destination the result stays opaque.
 fn over(source: u32, alpha: u32, destination: u32) -> u32 {
     match alpha {
         255 => source | OPAQUE,
@@ -308,7 +314,8 @@ fn over(source: u32, alpha: u32, destination: u32) -> u32 {
                 let d = (destination >> shift) & 0xff;
                 ((s * alpha + d * (255 - alpha) + 127) / 255) << shift
             };
-            OPAQUE | blend(16) | blend(8) | blend(0)
+            let a = alpha + ((destination >> 24) * (255 - alpha) + 127) / 255;
+            (a.min(255) << 24) | blend(16) | blend(8) | blend(0)
         }
     }
 }
@@ -375,16 +382,23 @@ fn draw(frame: &mut [u32], width: i32, area: Rect, item: &Item<'_>) {
     }
 }
 
-/// Redraws the `damage` part of `frame`, `width` by `height`, from black and the items in order,
-/// bottom first. Pixels outside `damage` keep what they had.
-pub fn compose(frame: &mut [u32], width: i32, height: i32, damage: Rect, items: &[Item<'_>]) {
+/// Redraws the `damage` part of `frame`, `width` by `height`, from `background`, [`OPAQUE`] or
+/// [`TRANSPARENT`], and the items in order, bottom first. Pixels outside `damage` keep what they had.
+pub fn compose(
+    frame: &mut [u32],
+    width: i32,
+    height: i32,
+    damage: Rect,
+    items: &[Item<'_>],
+    background: u32,
+) {
     let area = damage.intersect(&Rect::sized(width, height));
     if area.is_empty() || frame.len() < width as usize * height as usize {
         return;
     }
     for row in area.top..area.bottom {
         let start = row as usize * width as usize;
-        frame[start + area.left as usize..start + area.right as usize].fill(OPAQUE);
+        frame[start + area.left as usize..start + area.right as usize].fill(background);
     }
     for item in items {
         draw(frame, width, area, item);
@@ -415,7 +429,14 @@ mod tests {
     }
 
     fn all(frame: &mut [u32], width: i32, height: i32, items: &[Item<'_>]) {
-        compose(frame, width, height, Rect::sized(width, height), items);
+        compose(
+            frame,
+            width,
+            height,
+            Rect::sized(width, height),
+            items,
+            OPAQUE,
+        );
     }
 
     #[test]
@@ -459,6 +480,43 @@ mod tests {
         all(&mut frame, 1, 1, &[at(&base, 1, 1, 0.0, 0.0)]);
 
         assert_eq!(frame, [0xff80_8080]);
+    }
+
+    #[test]
+    fn a_translucent_window_keeps_its_alpha_premultiplied() {
+        // A dialog's window: half-transparent red over nothing, and a pixel nothing covers.
+        let base = [0x80ff_0000];
+        let mut frame = [0xffff_ffff; 2];
+
+        compose(
+            &mut frame,
+            2,
+            1,
+            Rect::sized(2, 1),
+            &[at(&base, 1, 1, 0.0, 0.0)],
+            TRANSPARENT,
+        );
+
+        assert_eq!(frame, [0x8080_0000, TRANSPARENT]);
+    }
+
+    #[test]
+    fn translucent_layers_over_a_translucent_one_add_their_alpha() {
+        let below = [0x80ff_0000];
+        let above = [0x8000_00ff];
+        let mut frame = [0; 1];
+
+        compose(
+            &mut frame,
+            1,
+            1,
+            Rect::sized(1, 1),
+            &[at(&below, 1, 1, 0.0, 0.0), at(&above, 1, 1, 0.0, 0.0)],
+            TRANSPARENT,
+        );
+
+        // Source over, premultiplied: alpha 128 + 128 * 127 / 255, red 128 * 127 / 255, blue 128.
+        assert_eq!(frame, [0xc040_0080]);
     }
 
     #[test]
@@ -611,6 +669,7 @@ mod tests {
             1,
             Rect::new(1, 0, 2, 1),
             &[at(&base, 3, 1, 0.0, 0.0)],
+            OPAQUE,
         );
 
         assert_eq!(frame, [GREEN, RED, GREEN]);

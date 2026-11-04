@@ -87,6 +87,8 @@ docker compose run --rm -T dev bash /work/runtime/framework/parcel_smoke.sh
 # An NDK-built library using liblog, libandroid (with AChoreographer), libjnigraphics, EGL, GLES and
 # OpenSL ES.
 docker compose run --rm -T dev bash /work/runtime/framework/ndk_smoke.sh
+# An NDK-built library that finds no AMediaCodec and keeps an AMediaFormat through libmediandk.
+docker compose run --rm -T dev bash /work/runtime/framework/media_smoke.sh
 # Sound through AudioTrack, AudioRecord, OpenSL ES and AAudio, checked sample by sample in files, then
 # played through a private PulseAudio server.
 docker compose run --rm -T dev bash /work/runtime/framework/audio_smoke.sh
@@ -99,11 +101,12 @@ docker compose run --rm -T dev bash /work/runtime/framework/control_smoke.sh
 # control socket, again after stop, once per profile, and with a socket passed at once.
 docker compose run --rm -T dev bash /work/runtime/framework/service_smoke.sh
 # Composition through a scripted compositor: an app's own layer changed by one atomic transaction,
-# damage-only redraws, a dialog and a popup as subsurfaces, frame callbacks pacing an animation, a
-# resize and a close.
+# damage-only redraws, a dialog and a popup as subsurfaces (the dialog's translucent, with alpha),
+# frame callbacks pacing an animation, a resize and a close.
 docker compose run --rm -T dev bash /work/runtime/framework/compose_smoke.sh
-# What the F-Droid corpus needed, checked with an app of ours: its own application uid, storage and
-# the system services the corpus asks for.
+# What the F-Droid corpus needed, checked with an app of ours: its own application uid, storage, the
+# system services the corpus asks for, startActivityForResult results, broadcasts to registered and
+# manifest receivers (alarms included), network callbacks, GLES 3.1 and 3.2, and a PC's features.
 docker compose run --rm -T dev bash /work/runtime/framework/compat_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
@@ -116,7 +119,12 @@ docker compose run --rm -T dev bash /work/runtime/framework/agent_smoke.sh
 UXDROID_SAMPLES=/path/to/apks docker compose run --rm -T sandbox bash /work/runtime/framework/rustdesk_agent_smoke.sh
 # Which renderer a headless GLES 2 context gets: llvmpipe in dev, the host GPU in dev-gpu, which passes
 # the host's GPU nodes and mounts its driver's libraries read-only (paths in compose.yaml).
-docker compose --profile gpu run --rm -T -e EXPECT=NVIDIA dev-gpu bash /work/runtime/gpu/gpu_probe.sh
+# With DMABUF=1 it also fails unless a GPU frame comes out as a dmabuf, the path app EGL takes.
+docker compose --profile gpu run --rm -T -e EXPECT=NVIDIA -e DMABUF=1 dev-gpu bash /work/runtime/gpu/gpu_probe.sh
+# App EGL on the GPU end to end: the NDK sample's frame drawn through GBM, shown by weston's GL
+# renderer as a dmabuf with no copy, and checked in a screenshot. RENDERER=gl gives the other smokes
+# that compositor too.
+docker compose --profile gpu run --rm -T dev-gpu bash /work/runtime/gpu/gpu_smoke.sh
 # The compatibility corpus, F-Droid builds of Loop Habit Tracker, Markor, Aegis, AnkiDroid and
 # Mindustry (verified against F-Droid's key, untrusted: sandbox only), each to a first screen that is
 # not blank. A missing APK is skipped; CORPUS_APPS picks some; SHOTS=<dir> keeps the screenshots.

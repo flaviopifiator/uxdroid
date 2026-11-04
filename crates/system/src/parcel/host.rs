@@ -84,8 +84,6 @@ macro_rules! refuse {
 
 refuse!(motion_read, "android.view.MotionEvent.nativeReadFromParcel", (event: jlong, parcel: jobject) -> jlong);
 refuse!(motion_write, "android.view.MotionEvent.nativeWriteToParcel", (event: jlong, parcel: jobject) -> ());
-refuse!(keys_read, "android.view.KeyCharacterMap.nativeReadFromParcel", (parcel: jobject) -> jlong);
-refuse!(keys_write, "android.view.KeyCharacterMap.nativeWriteToParcel", (map: jlong, parcel: jobject) -> ());
 refuse!(region_read, "android.graphics.Region.nativeCreateFromParcel", (parcel: jobject) -> jlong);
 refuse!(region_write, "android.graphics.Region.nativeWriteToParcel", (region: jlong, parcel: jobject) -> jboolean);
 refuse!(gainmap_read, "android.graphics.Gainmap.nReadGainmapFromParcel", (gainmap: jlong, parcel: jobject) -> ());
@@ -118,18 +116,6 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
             c"nativeWriteToParcel",
             c"(JLandroid/os/Parcel;)V",
             f!(motion_write),
-        ),
-    ];
-    let keys: [Method; 2] = [
-        (
-            c"nativeReadFromParcel",
-            c"(Landroid/os/Parcel;)J",
-            f!(keys_read),
-        ),
-        (
-            c"nativeWriteToParcel",
-            c"(JLandroid/os/Parcel;)V",
-            f!(keys_write),
         ),
     ];
     let region: [Method; 2] = [
@@ -172,7 +158,6 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
     unsafe {
         register(env, c"android/graphics/Bitmap", &bitmap)?;
         register(env, c"android/view/MotionEvent", &motion)?;
-        register(env, c"android/view/KeyCharacterMap", &keys)?;
         register(env, c"android/graphics/Region", &region)?;
         register(env, c"android/graphics/Gainmap", &gainmap)?;
         register(env, c"android/database/CursorWindow", &cursor)?;

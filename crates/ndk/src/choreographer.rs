@@ -85,6 +85,16 @@ struct Clock {
     arm: unsafe extern "C" fn(fd: i32, tick: *const AtomicI64) -> i32,
     disarm: extern "C" fn(fd: i32),
     delivered: extern "C" fn(tick: i64),
+    /// Version 2: where EGL hands GPU frames over as dmabufs.
+    presenter: *const crate::present::Presenter,
+}
+
+/// The system library's [`Presenter`](crate::present::Presenter), when it has one.
+pub(crate) fn presenter() -> Option<&'static crate::present::Presenter> {
+    let clock = clock()?;
+    // SAFETY: version 2 has the field, and it points at the library's static Presenter, which lives
+    // as long as the process.
+    (clock.version >= 2 && !clock.presenter.is_null()).then(|| unsafe { &*clock.presenter })
 }
 
 fn clock() -> Option<&'static Clock> {

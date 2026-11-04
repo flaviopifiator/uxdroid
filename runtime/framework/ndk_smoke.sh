@@ -4,7 +4,9 @@
 # Mesa, and OpenSL ES. The native bridge loads it and binds those libraries to their signature tables.
 # Two screenshots from a headless compositor check the ANativeWindow frame, then the EGL one. Runs in
 # the dev service, which has the NDK and Mesa; the APK is ours, built by build_system.sh. With
-# KEEP=<directory>, the log and both screenshots are copied there.
+# KEEP=<directory>, the log and both screenshots are copied there. With RENDERER=gl the compositor
+# renders with GL, which imports dmabufs on a GPU, and with DMABUF=1 the EGL frame must reach it as
+# one, drawn on the GPU (runtime/gpu/gpu_smoke.sh, in dev-gpu).
 set -u -o pipefail
 WORK=$(mktemp -d)
 # Removed however the script ends, a failure before the full trap below included.
@@ -26,6 +28,7 @@ mkdir -p "$LIBS"
     -landroid -ljnigraphics -llog -lEGL -lGLESv2 -lOpenSLES || fail "the NDK could not build the sample"
 
 source /work/runtime/art/test_lib.sh
+source /work/runtime/gpu/compositor.sh
 start_compositor
 
 export LD_LIBRARY_PATH="$RUNTIME/lib64:$TARGET"
@@ -117,6 +120,12 @@ for _ in range(height):
             row[i] = (row[i] + (left if pa <= pb and pa <= pc else up if pb <= pc else corner)) & 255
     rows.append(row)
     previous = row
+# Weston's GL renderer writes screenshots bottom row first. Its panel, a dark bar along the top of
+# the desktop, then shows at the bottom: put the rows back.
+brightness = lambda y: sum(rows[y][x * channels] for x in range(width)) / width
+if brightness(height - 8) < brightness(8) / 2:
+    rows.reverse()
+    print("screenshot rows reversed, as weston's GL renderer writes them")
 
 def where(target):
     return [(x, y) for y in range(height) for x in range(width)
@@ -157,6 +166,13 @@ expect "^ndk egl frame: EGL 1\.[0-9]+, .+, [0-9]+x[0-9]+, visual 1, corner 204 5
 pause 0.5
 shoot egl >/dev/null
 check egl "$WORK/egl.png"
+if [ "${DMABUF:-0}" = 1 ]; then
+    expect "^uxdroid: EGL renders on the GPU through GBM on /dev/dri/renderD" "EGL did not open the GPU through GBM"
+    expect "^uxdroid: GPU frames of .+ go to the compositor as dmabufs" "the EGL frame was read back, not handed over"
+    grep -q -E "^ndk egl frame: .*llvmpipe" "$WORK/out" && fail "the EGL frame was drawn by llvmpipe"
+    grep -q -E "^uxdroid: (EGL frames are read back|a GPU frame of)" "$WORK/out" && fail "a GPU frame was read back"
+    echo "ok: the EGL frame was drawn on the GPU and shown as a dmabuf, top row first"
+fi
 kill -0 "$app" 2>/dev/null || fail "the app exited after its frames"
 
 grep -E "^ndk |looper callback|unhandled|unimplemented native|uxdroid: " "$WORK/out" | cut -c1-240

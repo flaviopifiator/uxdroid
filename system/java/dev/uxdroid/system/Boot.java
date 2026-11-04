@@ -157,7 +157,12 @@ public final class Boot {
      * on Android they go to the log, never to the app's own descriptors, and AnkiDroid's backend copies
      * a pipe it puts over them into the log, which looped every line.
      */
+    /** Whether keepConsole made its copies, which a start retried after a failure keeps. */
+    private static boolean consoleKept;
+
     private static void keepConsole() {
+        if (consoleKept) return;
+        consoleKept = true;
         try {
             System.setOut(new java.io.PrintStream(new java.io.FileOutputStream(kept(java.io.FileDescriptor.out)), true));
             System.setErr(new java.io.PrintStream(new java.io.FileOutputStream(kept(java.io.FileDescriptor.err)), true));

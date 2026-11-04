@@ -76,12 +76,13 @@ public final class Launcher {
         }
         if (app == null) app = App.parse(apk, activityName);
         String packageName = app.application.packageName;
-        // Before ActivityThread runs: the framework reads the app's uid once and keeps it.
-        Natives.becomeApplication(packageName);
         if (!claimInstance(packageName)) {
             if (Control.activated()) refuseActivation(packageName);
             forward(packageName, intent);
         }
+        // Only the instance that runs the app takes its identity, before ActivityThread runs: the
+        // framework reads the app's uid once and keeps it.
+        Natives.becomeApplication(packageName);
         App started = app;
         Permissions.declare(() -> {
             String[] names = started.packageInfo(android.content.pm.PackageManager.GET_PERMISSIONS, 0)
@@ -345,6 +346,7 @@ public final class Launcher {
             // Created only with --once: a report needs no window, so it runs with no compositor.
             ActivityStack stack = new ActivityStack(app, thread, !once);
             ActivityStack.current = stack;
+            Broadcasts.attach(app, thread);
             Control.start(info.packageName);
             try {
                 Intent launch = Control.intentOf(intent);
@@ -354,6 +356,30 @@ public final class Launcher {
                 throw new IllegalArgumentException("cannot launch " + info.packageName + ": " + e.getMessage(), e);
             }
             if (once) exitWhenLaunched(stack.top());
+        }
+
+        /** Context.registerReceiver: see {@link Broadcasts}. */
+        public Intent registerReceiverWithFeature(IApplicationThread caller, String callerPackage, String featureId,
+                String receiverId, android.content.IIntentReceiver receiver, android.content.IntentFilter filter,
+                String permission, int userId, int flags) throws RemoteException {
+            return Broadcasts.register(receiver, filter);
+        }
+
+        public void unregisterReceiver(android.content.IIntentReceiver receiver) {
+            Broadcasts.unregister(receiver);
+        }
+
+        /** Context.sendBroadcast and its ordered and sticky kinds, to the app's own receivers. */
+        public int broadcastIntentWithFeature(IApplicationThread caller, String featureId, Intent intent,
+                String resolvedType, android.content.IIntentReceiver resultTo, int resultCode, String resultData,
+                Bundle resultExtras, String[] permissions, String[] excludedPermissions, String[] excludedPackages,
+                int appOp, Bundle options, boolean serialized, boolean sticky, int userId) throws RemoteException {
+            return Broadcasts.send(new Intent(intent), resultTo, resultCode, resultData, resultExtras, serialized, sticky);
+        }
+
+        public void finishReceiver(IBinder who, int resultCode, String resultData, Bundle resultExtras,
+                boolean abort, int flags) throws RemoteException {
+            Broadcasts.finished(who, resultCode, resultData, resultExtras, abort);
         }
 
         /** PendingIntent.getActivity, getBroadcast and their kind: see {@link IntentSenders}. */
@@ -454,10 +480,10 @@ public final class Launcher {
 
     /** The handler of IActivityClientController. */
     public static final class ActivityClientController {
-        /** Activity.finish: the task drops it and resumes the one below. */
+        /** Activity.finish: the task drops it, hands its result to who asked, and resumes the one below. */
         public boolean finishActivity(IBinder token, int resultCode, Intent resultData, int finishTask)
                 throws RemoteException {
-            return ActivityStack.current != null && ActivityStack.current.finish(token);
+            return ActivityStack.current != null && ActivityStack.current.finish(token, resultCode, resultData);
         }
 
         /**
@@ -483,20 +509,7 @@ public final class Launcher {
                 android.app.ProfilerInfo profilerInfo, Bundle options) throws RemoteException {
             ActivityStack stack = ActivityStack.current;
             if (stack == null) return android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
-            if (Looper.myLooper() == Looper.getMainLooper()) return stack.startFromApp(intent, false);
-            // The task runs on the main thread; a start from another thread is checked against the
-            // manifest now, so its caller still sees a refusal, and queued there.
-            int refused = stack.startFromApp(intent, true);
-            if (refused != android.app.ActivityManager.START_SUCCESS) return refused;
-            Intent copy = new Intent(intent);
-            new android.os.Handler(Looper.getMainLooper()).post(() -> {
-                try {
-                    stack.startFromApp(copy, false);
-                } catch (RemoteException e) {
-                    System.err.println("uxdroid: cannot start " + copy + ": " + e);
-                }
-            });
-            return android.app.ActivityManager.START_SUCCESS;
+            return stack.startFromAnyThread(intent, ActivityStack.Result.of(resultTo, resultWho, requestCode));
         }
     }
 
@@ -544,6 +557,14 @@ public final class Launcher {
 
         public String[] getPackagesForUid(int uid) {
             return uid == app.application.uid ? new String[] {app.application.packageName} : null;
+        }
+
+        public boolean hasSystemFeature(String name, int version) {
+            return Features.has(name, version);
+        }
+
+        public android.content.pm.ParceledListSlice<android.content.pm.FeatureInfo> getSystemAvailableFeatures() {
+            return new android.content.pm.ParceledListSlice<>(Features.list());
         }
     }
 

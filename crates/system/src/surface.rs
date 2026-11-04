@@ -30,7 +30,7 @@ use crate::handles::Handles;
 use crate::input::natives::{Channel, channel_of};
 use crate::java::{self, Field, Pending};
 use crate::scene::{self, Change, Composer, Transaction};
-use crate::wayland::{self, Window};
+use crate::wayland::{self, Dmabuf, Plane, Window};
 use crate::windows::{Placement, Source, Stack};
 use crate::{Method, java_string, register, throw};
 
@@ -55,6 +55,10 @@ pub struct Platform {
     placement: Mutex<Option<Placement>>,
     /// The window manager removed this layer's window.
     closed: AtomicBool,
+    /// A child layer's GPU frames, shown on a subsurface of its window.
+    plane: Mutex<Option<Plane>>,
+    /// A window's own layer: the children whose frames show on planes.
+    planes: Mutex<Vec<Weak<Layer>>>,
 }
 
 type Layer = scene::Layer<Platform>;
@@ -168,7 +172,7 @@ unsafe extern "system" fn control_create(
     name: jstring,
     width: jint,
     height: jint,
-    _format: jint,
+    format: jint,
     flags: jint,
     parent: jlong,
     _metadata: jobject,
@@ -185,7 +189,16 @@ unsafe extern "system" fn control_create(
         Platform::default(),
     );
     layer.set_size(width, height);
+    layer.set_opaque(opaque(format, flags));
     SURFACE_CONTROLS.add(layer)
+}
+
+/// Whether a layer made with `format` and `flags` covers itself entirely: `SurfaceControl.OPAQUE`, or
+/// a `PixelFormat` without alpha. A dialog's window is `TRANSLUCENT`, for its shadow.
+fn opaque(format: jint, flags: jint) -> bool {
+    const OPAQUE: jint = 0x400;
+    // PixelFormat.OPAQUE, RGBX_8888, RGB_888 and RGB_565.
+    flags & OPAQUE != 0 || matches!(format, -1 | 2 | 3 | 4)
 }
 
 unsafe extern "system" fn control_copy(_env: *mut JNIEnv, _class: jclass, control: jlong) -> jlong {
@@ -721,7 +734,7 @@ impl Target {
                 return Err(Failure::Message(format!("{} was removed", layer.name)));
             }
             let (x, y) = placement.map_or((0, 0), |placement| placement.surface());
-            let window = Window::open(&layer.name, width, height, x, y)
+            let window = Window::open(&layer.name, width, height, x, y, layer.is_opaque())
                 .map_err(|error| Failure::Message(format!("cannot open a window: {error}")))?;
             let key = window.key();
             locked(&WINDOWS).push((key, Arc::downgrade(layer)));
@@ -816,9 +829,15 @@ unsafe fn lock(
     if target.is_none() {
         // SAFETY: as above.
         let opened = unsafe { Target::open(env, layer)? };
-        if opened.window.is_some() {
+        // Input between frames needs the watch, the frame does not: a watch that cannot be set up
+        // is reported, and the window still draws, reading input after each frame's round trip.
+        // SAFETY: as above.
+        if opened.window.is_some() && unsafe { watch(env) }.is_err() {
             // SAFETY: as above.
-            unsafe { watch(env)? };
+            unsafe { crate::clear_exception(env) };
+            uxdroid_bridge::report!(
+                "uxdroid: the display's connection is not watched; input is read only when a frame is drawn"
+            );
         }
         *target = Some(opened);
     }
@@ -1099,15 +1118,29 @@ fn present(target: &mut Target, window_layer: &Arc<Layer>) -> Result<(), Failure
     let Some(window) = window.as_mut() else {
         return Ok(());
     };
+    // A window made opaque or translucent since gets a buffer of its format, all drawn again: the
+    // composer says which it needs once it composed.
     let frame = window.frame();
     let (width, height) = (frame.width, frame.height);
-    let damage = composer.compose(window_layer, frame.pixels, width, height);
+    let mut damage = composer.compose(window_layer, frame.pixels, width, height);
+    // A layer on a plane below the window needs its frame clear there: an alpha channel.
+    if window
+        .set_opaque(!composer.over_nothing())
+        .map_err(|error| Failure::Message(format!("cannot change a window's format: {error}")))?
+    {
+        *composer = Composer::default();
+        let frame = window.frame();
+        damage = composer.compose(window_layer, frame.pixels, width, height);
+    }
+    place_planes(window, composer, window_layer);
     if damage.is_empty() {
         return Ok(());
     }
-    window
-        .present(damage)
-        .map_err(|error| Failure::Message(format!("cannot present a frame: {error}")))?;
+    if let Err(error) = window.present(damage) {
+        // The composer already counts this damage as shown: the next frame redraws everything.
+        *composer = Composer::default();
+        return Err(Failure::Message(format!("cannot present a frame: {error}")));
+    }
     PRESENTED.fetch_add(1, Ordering::Relaxed);
     // The round trip may have read input, which the Looper will not see as readable.
     route();
@@ -1176,6 +1209,11 @@ unsafe fn post(env: *mut JNIEnv, layer: &Arc<Layer>, canvas: jobject) -> Result<
         )?;
     }
     target.fresh = false;
+    // Frames in memory again after GPU frames: composed into the window, the plane gone.
+    if layer.external().is_some() {
+        layer.set_external(None);
+        locked(&layer.extra.plane).take();
+    }
     // Changes merged into this frame show with it.
     let mut pending = std::mem::take(&mut *locked(&layer.extra.pending));
     let windows = pending.apply();
@@ -1260,6 +1298,235 @@ unsafe extern "system" fn surface_unlock_and_post(
     if let Err(failure) = unsafe { post(env, &layer, canvas) } {
         // SAFETY: as above.
         unsafe { report(env, failure) };
+    }
+}
+
+/// Moves each plane of the window to where its layer is now, as the composer found it.
+fn place_planes(window: &Window, composer: &Composer, window_layer: &Arc<Layer>) {
+    let planes = locked(&window_layer.extra.planes)
+        .iter()
+        .filter_map(Weak::upgrade)
+        .collect::<Vec<_>>();
+    for child in planes {
+        let key = Arc::as_ptr(&child) as usize;
+        let Some(external) = composer.externals().iter().find(|e| e.layer == key) else {
+            continue;
+        };
+        if let Some(plane) = locked(&child.extra.plane).as_mut()
+            && let Err(error) = plane.place(window, external.x, external.y, external.below)
+        {
+            uxdroid_bridge::report!(
+                "uxdroid: cannot place the GPU frames of {}: {error}",
+                child.name
+            );
+        }
+    }
+}
+
+/// The window system's side of `uxdroid_ndk::present`, which EGL in either library reaches.
+pub static PRESENTER: uxdroid_ndk::present::Presenter = uxdroid_ndk::present::Presenter {
+    version: 1,
+    modifiers: gpu_modifiers,
+    present: gpu_present,
+    busy: gpu_busy,
+    forget: gpu_forget,
+};
+
+/// Whether a GPU frame was reported as reaching the compositor whole, once per process.
+static GPU_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// A layer that shows a window and has one open.
+fn shows_window(layer: &Arc<Layer>) -> bool {
+    layer
+        .window_layer()
+        .is_some_and(|window| window.target().as_ref().is_some_and(|t| t.window.is_some()))
+}
+
+unsafe extern "C" fn gpu_modifiers(
+    surface: i64,
+    format: u32,
+    out: *mut u64,
+    capacity: usize,
+) -> i32 {
+    let Some(layer) = SURFACES.get(surface) else {
+        return -1;
+    };
+    if !shows_window(&layer) {
+        return -1;
+    }
+    let Some(modifiers) = wayland::dmabuf_modifiers(format) else {
+        return -1;
+    };
+    if !out.is_null() {
+        for (at, modifier) in modifiers.iter().take(capacity).enumerate() {
+            // SAFETY: the caller gives room for `capacity` modifiers.
+            unsafe { *out.add(at) = *modifier };
+        }
+    }
+    i32::try_from(modifiers.len()).unwrap_or(i32::MAX)
+}
+
+unsafe extern "C" fn gpu_present(surface: i64, frame: *const uxdroid_ndk::present::Frame) -> i32 {
+    use uxdroid_ndk::present::{READ_BACK, SHOWN};
+    let (Some(layer), false) = (SURFACES.get(surface), frame.is_null()) else {
+        return READ_BACK;
+    };
+    // SAFETY: checked non-null; the caller passes a Frame.
+    let frame = unsafe { *frame };
+    // An opaque layer's alpha means nothing, as Android ignores an RGBX buffer's.
+    let format = if frame.format == wayland::ARGB8888
+        && layer.is_opaque()
+        && wayland::dmabuf_supports(wayland::XRGB8888, frame.modifier)
+    {
+        wayland::XRGB8888
+    } else {
+        frame.format
+    };
+    let dmabuf = Dmabuf {
+        fd: frame.fd,
+        width: frame.width,
+        height: frame.height,
+        stride: frame.stride,
+        offset: frame.offset,
+        format,
+        modifier: frame.modifier,
+        id: frame.id,
+    };
+    let Some(window_layer) = layer.window_layer() else {
+        return READ_BACK;
+    };
+    let shown = if Arc::ptr_eq(&layer, &window_layer) {
+        present_own(&layer, &dmabuf)
+    } else {
+        present_plane(&layer, &window_layer, &dmabuf)
+    };
+    match shown {
+        Ok(true) => {
+            PRESENTED.fetch_add(1, Ordering::Relaxed);
+            if !GPU_REPORTED.swap(true, Ordering::Relaxed) {
+                uxdroid_bridge::report!(
+                    "uxdroid: GPU frames of {} go to the compositor as dmabufs ({}x{}, modifier {:#x})",
+                    layer.name,
+                    frame.width,
+                    frame.height,
+                    frame.modifier
+                );
+            }
+            SHOWN
+        }
+        Ok(false) => READ_BACK,
+        Err(error) => {
+            uxdroid_bridge::report!(
+                "uxdroid: a GPU frame of {} is read back instead: {error}",
+                layer.name
+            );
+            READ_BACK
+        }
+    }
+}
+
+/// A window's own layer shows a dmabuf as its frame, when nothing else composes into it.
+fn present_own(layer: &Arc<Layer>, dmabuf: &Dmabuf) -> Result<bool, Box<dyn std::error::Error>> {
+    if layer.has_children() {
+        return Ok(false);
+    }
+    let mut target = layer.target();
+    let Some(window) = target.as_mut().and_then(|target| target.window.as_mut()) else {
+        return Ok(false);
+    };
+    window.present_dmabuf(dmabuf)?;
+    Ok(true)
+}
+
+/// A child layer shows a dmabuf on its plane, placed where composition would have drawn it.
+fn present_plane(
+    layer: &Arc<Layer>,
+    window_layer: &Arc<Layer>,
+    dmabuf: &Dmabuf,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut guard = window_layer.target();
+    let Some(target) = guard.as_mut() else {
+        return Ok(false);
+    };
+    if target.window.is_none() {
+        return Ok(false);
+    }
+    layer.set_external(Some((dmabuf.width, dmabuf.height)));
+    {
+        let mut planes = locked(&window_layer.extra.planes);
+        planes.retain(|plane| plane.strong_count() > 0);
+        if !planes
+            .iter()
+            .any(|plane| std::ptr::eq(plane.as_ptr(), Arc::as_ptr(layer)))
+        {
+            planes.push(Arc::downgrade(layer));
+        }
+    }
+    // Composition leaves the layer out, clears the window under it, and places its plane.
+    let composed = present(target, window_layer);
+    let key = Arc::as_ptr(layer) as usize;
+    let external = target
+        .composer
+        .externals()
+        .iter()
+        .find(|e| e.layer == key)
+        .copied();
+    let window = target.window.as_ref().expect("checked above");
+    if let Err(failure) = composed {
+        layer.set_external(None);
+        return Err(match failure {
+            Failure::Message(message) => message.into(),
+            Failure::Pending => "composition failed".into(),
+        });
+    }
+    let Some(external) = external else {
+        // Hidden: nothing to show, and nothing to read back either.
+        return Ok(true);
+    };
+    if !external.plain {
+        layer.set_external(None);
+        locked(&layer.extra.plane).take();
+        let _ = present(target, window_layer);
+        return Ok(false);
+    }
+    let mut plane = locked(&layer.extra.plane);
+    if plane.is_none() {
+        let mut made = window.plane()?;
+        made.place(window, external.x, external.y, external.below)?;
+        *plane = Some(made);
+    }
+    plane.as_mut().expect("made above").present_dmabuf(dmabuf)?;
+    Ok(true)
+}
+
+extern "C" fn gpu_busy(surface: i64, id: u64) -> i32 {
+    let Some(layer) = SURFACES.get(surface) else {
+        return 0;
+    };
+    let busy = if layer.owns_window() {
+        layer
+            .target()
+            .as_ref()
+            .and_then(|target| target.window.as_ref())
+            .is_some_and(|window| window.dmabuf_busy(id))
+    } else {
+        locked(&layer.extra.plane)
+            .as_ref()
+            .is_some_and(|plane| plane.dmabuf_busy(id))
+    };
+    i32::from(busy)
+}
+
+extern "C" fn gpu_forget(surface: i64, id: u64) {
+    let Some(layer) = SURFACES.get(surface) else {
+        return;
+    };
+    if layer.owns_window() {
+        if let Some(window) = layer.target().as_mut().and_then(|t| t.window.as_mut()) {
+            window.forget_dmabuf(id);
+        }
+    } else if let Some(plane) = locked(&layer.extra.plane).as_mut() {
+        plane.forget_dmabuf(id);
     }
 }
 

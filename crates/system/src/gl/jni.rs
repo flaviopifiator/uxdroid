@@ -11,6 +11,7 @@ pub(super) use crate::Method;
 
 pub(super) const GL_COLOR: u32 = 0x1800;
 pub(super) const GL_CURRENT_VERTEX_ATTRIB: u32 = 0x8626;
+pub(super) const GL_TEXTURE_BORDER_COLOR: u32 = 0x1004;
 
 /// Throws `class` with `message`.
 ///
@@ -327,6 +328,18 @@ pub(super) fn get_needed(name: u32) -> usize {
     }
 }
 
+/// Bytes GL reads from client indices: `count` of the index `kind`. A negative count or a type GL
+/// does not take reads nothing, as GL refuses the call with an error.
+pub(super) fn index_bytes(count: i32, kind: u32) -> usize {
+    let size = match kind {
+        0x1401 => 1, // GL_UNSIGNED_BYTE
+        0x1403 => 2, // GL_UNSIGNED_SHORT
+        0x1405 => 4, // GL_UNSIGNED_INT
+        _ => 0,
+    };
+    (count.max(0) as usize).saturating_mul(size)
+}
+
 /// Bytes glReadPixels writes for a `width` by `height` rectangle, with the current pack alignment.
 /// A format or type this does not know counts 16 bytes a pixel, the most any takes.
 pub(super) fn pixel_bytes(width: i32, height: i32, format: u32, kind: u32) -> usize {
@@ -367,6 +380,15 @@ mod tests {
         assert_eq!(get_needed(0x0BA2), 4, "GL_VIEWPORT");
         assert_eq!(get_needed(0x0B70), 2, "GL_DEPTH_RANGE");
         assert_eq!(get_needed(0x0D33), 1, "GL_MAX_TEXTURE_SIZE");
+    }
+
+    #[test]
+    fn client_indices_hold_their_count_of_their_type() {
+        assert_eq!(index_bytes(6, 0x1403), 12, "GL_UNSIGNED_SHORT");
+        assert_eq!(index_bytes(6, 0x1405), 24, "GL_UNSIGNED_INT");
+        assert_eq!(index_bytes(6, 0x1401), 6, "GL_UNSIGNED_BYTE");
+        assert_eq!(index_bytes(-1, 0x1405), 0);
+        assert_eq!(index_bytes(6, 0x1406), 0, "GL_FLOAT is refused by GL");
     }
 
     #[test]

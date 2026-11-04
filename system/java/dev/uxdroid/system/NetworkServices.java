@@ -18,9 +18,8 @@ import java.util.List;
  * is the one active network, with internet; with no default route there is none. Every corpus app
  * looked both services up, and Glide, in Aegis, stops without a ConnectivityManager.
  *
- * <p>Not yet: callbacks of registered network requests, which the framework delivers through a
- * Messenger protocol of the connectivity module; the network is not probed, so it is not reported as
- * validated; and an app's own traffic is not counted apart from the host's.
+ * <p>Not yet: changes of the network after a callback heard of it; the network is not probed, so it is
+ * not reported as validated; and an app's own traffic is not counted apart from the host's.
  */
 final class NetworkServices {
     private NetworkServices() {}
@@ -28,7 +27,13 @@ final class NetworkServices {
     /** Android's netId of the one network; any value above the reserved ones would do. */
     static final int NET_ID = 100;
 
-    /** The interface of the host's default route, from /proc/net/route, or null when it has none. */
+    /** IPv6's default destination, ::, as /proc/net/ipv6_route writes it. */
+    private static final String ANY6 = "00000000000000000000000000000000";
+
+    /**
+     * The interface of the host's default route, IPv4's from /proc/net/route, else IPv6's from
+     * /proc/net/ipv6_route, so a host with only IPv6 is online; null when it has neither.
+     */
     static String defaultInterface() {
         try {
             for (String line : Files.readAllLines(new File("/proc/net/route").toPath())) {
@@ -36,6 +41,18 @@ final class NetworkServices {
                 if (fields.length > 2 && fields[1].equals("00000000") && !fields[0].equals("Iface")) return fields[0];
             }
         } catch (IOException e) {
+            // No IPv4 routing table to read: IPv6's may still have a default route.
+        }
+        try {
+            for (String line : Files.readAllLines(new File("/proc/net/ipv6_route").toPath())) {
+                // Destination, its prefix length, source, its length, next hop, metric, use counts, flags, device.
+                String[] fields = line.trim().split("\\s+");
+                if (fields.length < 10 || !fields[0].equals(ANY6) || !fields[1].equals("00")) continue;
+                // Up, and not the kernel's unreachable default on loopback (RTF_REJECT).
+                long flags = Long.parseLong(fields[8], 16);
+                if ((flags & 0x1) != 0 && (flags & 0x200) == 0 && !fields[9].equals("lo")) return fields[9];
+            }
+        } catch (IOException | NumberFormatException e) {
             // No routing table to read, as in a namespace without /proc: no network.
         }
         return null;
@@ -72,6 +89,9 @@ final class NetworkServices {
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED)
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)
+                    // A NetworkRequest.Builder asks for these by default.
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VCN_MANAGED)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_BANDWIDTH_CONSTRAINED)
                     .build();
         }
 
@@ -125,19 +145,60 @@ final class NetworkServices {
 
         public boolean isActiveNetworkMetered() { return false; }
 
-        /** The app's network callbacks: the request is kept, but no callback is delivered yet. */
+        /**
+         * The app's network callbacks, registerNetworkCallback, registerDefaultNetworkCallback and
+         * requestNetwork alike: the request is kept, and if the host's network satisfies it, its
+         * callback hears of it once, as ConnectivityService's first CALLBACK_AVAILABLE, which carries
+         * the capabilities and link properties. The network never changes after, as nothing watches
+         * the host's routes.
+         */
         public synchronized NetworkRequest requestNetwork(int uid, NetworkCapabilities need, int type,
                 android.os.Messenger messenger, int timeout, android.os.IBinder binder, int legacyType,
                 int callbackFlags, String callingPackage, String callingAttributionTag, int declaredMethods) {
-            return new NetworkRequest(need != null ? need : new NetworkCapabilities(), legacyType, ++requests,
-                    NetworkRequest.Type.values()[Math.max(0, Math.min(type, NetworkRequest.Type.values().length - 1))]);
+            NetworkRequest.Type[] types = NetworkRequest.Type.values();
+            NetworkRequest request = new NetworkRequest(need != null ? need : new NetworkCapabilities(), legacyType,
+                    ++requests, types[Math.max(0, Math.min(type, types.length - 1))]);
+            available(request, messenger);
+            return request;
         }
 
         public synchronized NetworkRequest listenForNetwork(NetworkCapabilities need, android.os.Messenger messenger,
                 android.os.IBinder binder, int callbackFlags, String callingPackage, String callingAttributionTag,
                 int declaredMethods) {
-            return new NetworkRequest(need != null ? need : new NetworkCapabilities(),
+            NetworkRequest request = new NetworkRequest(need != null ? need : new NetworkCapabilities(),
                     android.net.ConnectivityManager.TYPE_NONE, ++requests, NetworkRequest.Type.LISTEN);
+            available(request, messenger);
+            return request;
+        }
+
+        /**
+         * Tells {@code messenger} the network is available for {@code request}. The message is queued,
+         * so ConnectivityManager has filed the callback under the request before it is handled.
+         */
+        private static void available(NetworkRequest request, android.os.Messenger messenger) {
+            NetworkCapabilities capabilities = capabilities();
+            if (messenger == null || capabilities == null) return;
+            // A default request follows the default network, whatever it asked; others need a match.
+            boolean wanted = request.type == NetworkRequest.Type.TRACK_DEFAULT
+                    || request.type == NetworkRequest.Type.TRACK_SYSTEM_DEFAULT
+                    || request.canBeSatisfiedBy(capabilities);
+            if (!wanted) return;
+            android.os.Bundle data = new android.os.Bundle();
+            data.putParcelable(NetworkRequest.class.getSimpleName(), new NetworkRequest(request));
+            data.putParcelable(Network.class.getSimpleName(), new Network(NET_ID));
+            data.putParcelable(NetworkCapabilities.class.getSimpleName(), capabilities);
+            LinkProperties properties = new LinkProperties();
+            properties.setInterfaceName(defaultInterface());
+            data.putParcelable(LinkProperties.class.getSimpleName(), properties);
+            android.os.Message message = android.os.Message.obtain();
+            message.what = android.net.ConnectivityManager.CALLBACK_AVAILABLE;
+            message.arg1 = 0; // not blocked
+            message.setData(data);
+            try {
+                messenger.send(message);
+            } catch (android.os.RemoteException e) {
+                // The app's own handler: it cannot be gone while the app runs.
+            }
         }
 
         public void releaseNetworkRequest(NetworkRequest request) {}

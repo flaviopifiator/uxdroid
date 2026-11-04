@@ -3,20 +3,24 @@
 //! GLES has the same C ABI on both sides, so its table binds Mesa's own functions, at no cost. EGL
 //! differs where Android's window system shows through, and those functions are translated here:
 //!
-//! - the display is Mesa's surfaceless platform, which needs no window system and renders on the
-//!   GPU's render node, or with llvmpipe where there is none, as in the test container;
-//! - a window surface on an `ANativeWindow` is a pbuffer of the window's size, and swapping reads
-//!   it back and posts it through the window, which shows it in the Activity's Wayland window;
+//! - the display is EGL's GBM platform on the first render node that imports dmabufs
+//!   (`crate::gpu`), else Mesa's surfaceless platform, which needs no window system and renders
+//!   with llvmpipe where there is no GPU, as in the test container;
+//! - a window surface on an `ANativeWindow` is a pbuffer of the window's size. On the GPU display
+//!   a swap blits it into a dmabuf the compositor shows as it is; otherwise, or when the compositor
+//!   imports no dmabufs, swapping reads it back and posts it through the window, which shows it in
+//!   the Activity's Wayland window;
 //! - configs report `EGL_WINDOW_BIT` where they support pbuffers, and the visual ID Android gives,
 //!   which is the `ANativeWindow` format of their color sizes.
 //!
-//! The readback costs a copy per frame; an EGL window on the Activity's own `wl_surface` would remove
-//! it once the window system shares that surface. Every other EGL function goes straight to Mesa.
+//! The readback costs a copy per frame, and three more on the way to Wayland; the dmabuf path none.
+//! Every other EGL function goes straight to the host's EGL.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::gpu;
 use crate::java::{Jni, Thrown};
 use crate::window::{self, Window};
 
@@ -126,7 +130,7 @@ macro_rules! mesa {
     };
 }
 
-fn gles_or_egl(name: &CStr) -> Option<*const c_void> {
+pub(crate) fn gles_or_egl(name: &CStr) -> Option<*const c_void> {
     if name.to_bytes().starts_with(b"gl") {
         gles_symbol(name)
     } else {
@@ -152,11 +156,28 @@ mesa! {
     read_pixels: c"glReadPixels" => fn(i32, i32, i32, i32, u32, u32, *mut c_void);
 }
 
-/// Window surfaces by their pbuffer, each holding a reference to its window.
-static WINDOW_SURFACES: Mutex<Option<HashMap<usize, Arc<Window>>>> = Mutex::new(None);
+/// A window surface: a reference to its window, and its GPU swapchain once a swap made one.
+struct WindowSurface {
+    window: Arc<Window>,
+    chain: Option<gpu::Chain>,
+    /// Frames of this surface are read back for good, as the GPU path refused it.
+    read_back: bool,
+}
 
-fn window_surfaces() -> std::sync::MutexGuard<'static, Option<HashMap<usize, Arc<Window>>>> {
+/// Window surfaces by their pbuffer.
+static WINDOW_SURFACES: Mutex<Option<HashMap<usize, WindowSurface>>> = Mutex::new(None);
+
+fn window_surfaces() -> std::sync::MutexGuard<'static, Option<HashMap<usize, WindowSurface>>> {
     WINDOW_SURFACES.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `eglGetPlatformDisplay` of the host, for the GPU display.
+pub(crate) fn platform_display(platform: u32, native: *mut c_void) -> Display {
+    match mesa() {
+        // SAFETY: the host's function, with no attributes.
+        Some(mesa) => unsafe { (mesa.get_platform_display)(platform, native, std::ptr::null()) },
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// Reads an attribute list up to `EGL_NONE`, or `None` when it has no end within the bound.
@@ -180,9 +201,14 @@ unsafe fn attributes<T: Copy + PartialEq>(list: *const T, none: T) -> Option<Vec
     None
 }
 
+/// Android's one display: the GPU's through GBM when it can show frames without copies, else
+/// Mesa's surfaceless one.
 fn surfaceless() -> Display {
     static DISPLAY: OnceLock<usize> = OnceLock::new();
     *DISPLAY.get_or_init(|| {
+        if let Some(display) = gpu::display() {
+            return display as usize;
+        }
         let Some(mesa) = mesa() else {
             uxdroid_bridge::report!(
                 "uxdroid: EGL needs the host's Mesa (libEGL.so.1, libGLESv2.so.2)"
@@ -385,9 +411,14 @@ fn window_surface(
     if !surface.is_null() {
         // SAFETY: a live window of this module; the reference goes back in destroy_surface.
         unsafe { window::acquire(native) };
-        window_surfaces()
-            .get_or_insert_with(HashMap::new)
-            .insert(surface as usize, window);
+        window_surfaces().get_or_insert_with(HashMap::new).insert(
+            surface as usize,
+            WindowSurface {
+                window,
+                chain: None,
+                read_back: false,
+            },
+        );
     }
     surface
 }
@@ -400,12 +431,15 @@ pub unsafe extern "C" fn destroy_surface(display: Display, surface: Surface) -> 
     let Some(mesa) = mesa() else {
         return FALSE;
     };
-    let window = window_surfaces()
+    let entry = window_surfaces()
         .get_or_insert_with(HashMap::new)
         .remove(&(surface as usize));
-    if let Some(window) = window {
+    if let Some(entry) = entry {
+        if let Some(chain) = entry.chain {
+            chain.release(crate::choreographer::presenter());
+        }
         // SAFETY: gives back the reference window_surface took.
-        unsafe { window::release(Arc::as_ptr(&window).cast_mut().cast()) };
+        unsafe { window::release(Arc::as_ptr(&entry.window).cast_mut().cast()) };
     }
     // SAFETY: forwards the caller's arguments to Mesa.
     unsafe { (mesa.destroy_surface)(display, surface) }
@@ -483,19 +517,103 @@ pub unsafe extern "C" fn swap_buffers(display: Display, surface: Surface) -> Boo
     let Some(mesa) = mesa() else {
         return FALSE;
     };
-    let window = window_surfaces()
+    // The chain is taken out while the frame is handed over, so the map is not held meanwhile.
+    let entry = window_surfaces()
         .get_or_insert_with(HashMap::new)
-        .get(&(surface as usize))
-        .cloned();
-    if let Some(window) = window
-        && present(mesa, display, surface, &window).is_err()
-    {
-        uxdroid_bridge::report!(
-            "uxdroid: eglSwapBuffers could not post a frame of a surface that is not current"
-        );
+        .get_mut(&(surface as usize))
+        .map(|entry| (entry.window.clone(), entry.chain.take(), entry.read_back));
+    if let Some((window, mut chain, read_back)) = entry {
+        let started = std::time::Instant::now();
+        // SAFETY: Mesa's functions on the calling thread's context.
+        let current = unsafe { (mesa.get_current_surface)(DRAW) } == surface;
+        let mut refused = None;
+        if current && !read_back {
+            match gpu_present(mesa, display, surface, &window, &mut chain) {
+                Ok(()) => {}
+                Err(gpu::Refused::Now) => refused = Some(false),
+                Err(gpu::Refused::Always(why)) => {
+                    if let Some(chain) = chain.take() {
+                        chain.release(crate::choreographer::presenter());
+                    }
+                    report_read_back(why);
+                    refused = Some(true);
+                }
+            }
+        }
+        if let Some(entry) = window_surfaces()
+            .get_or_insert_with(HashMap::new)
+            .get_mut(&(surface as usize))
+        {
+            entry.chain = chain;
+            entry.read_back |= refused == Some(true);
+        }
+        let readback = !current || read_back || refused.is_some();
+        if readback && present(mesa, display, surface, &window).is_err() {
+            uxdroid_bridge::report!(
+                "uxdroid: eglSwapBuffers could not post a frame of a surface that is not current"
+            );
+        }
+        swap_stats(readback, started.elapsed());
     }
     // SAFETY: forwards the caller's arguments to Mesa.
     unsafe { (mesa.swap_buffers)(display, surface) }
+}
+
+/// Hands the frame to the compositor as a dmabuf, when the display is the GPU's.
+fn gpu_present(
+    mesa: &Mesa,
+    display: Display,
+    surface: Surface,
+    window: &Window,
+    chain: &mut Option<gpu::Chain>,
+) -> Result<(), gpu::Refused> {
+    let jni = Jni::current().ok_or(gpu::Refused::Now)?;
+    let handle = window.handle(jni).map_err(|_| gpu::Refused::Now)?;
+    let (mut width, mut height) = (0, 0);
+    // SAFETY: Mesa's functions on the current surface.
+    unsafe {
+        (mesa.query_surface)(display, surface, WIDTH, &mut width);
+        (mesa.query_surface)(display, surface, HEIGHT, &mut height);
+        // SAFETY: the surface is current, drawn on `display`.
+        gpu::present(display, chain, handle, width, height)
+    }
+}
+
+/// With `UXDROID_EGL_STATS` set, reports every 30 window swaps how long they took to hand their
+/// frames over and which way, for benchmarks (`benches/framework/gpu.sh`).
+fn swap_stats(readback: bool, took: std::time::Duration) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ON: OnceLock<bool> = OnceLock::new();
+    static SWAPS: AtomicU64 = AtomicU64::new(0);
+    static READ_BACK: AtomicU64 = AtomicU64::new(0);
+    static NANOS: AtomicU64 = AtomicU64::new(0);
+    static SINCE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    if !*ON.get_or_init(|| std::env::var_os("UXDROID_EGL_STATS").is_some()) {
+        return;
+    }
+    let mut since = SINCE.lock().unwrap_or_else(|p| p.into_inner());
+    let start = *since.get_or_insert_with(std::time::Instant::now);
+    NANOS.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
+    READ_BACK.fetch_add(u64::from(readback), Ordering::Relaxed);
+    let swaps = SWAPS.fetch_add(1, Ordering::Relaxed) + 1;
+    if swaps.is_multiple_of(30) {
+        let elapsed = start.elapsed().as_secs_f64();
+        uxdroid_bridge::report!(
+            "uxdroid: egl stats: {swaps} swaps, {} read back, {:.1} us each to hand over, {:.2} ms between swaps",
+            READ_BACK.swap(0, Ordering::Relaxed),
+            NANOS.swap(0, Ordering::Relaxed) as f64 / 30.0 / 1000.0,
+            elapsed * 1000.0 / 30.0
+        );
+        *since = Some(std::time::Instant::now());
+    }
+}
+
+/// Says once per process why frames are read back although the display is the GPU's.
+fn report_read_back(why: &str) {
+    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if gpu::display().is_some() && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        uxdroid_bridge::report!("uxdroid: EGL frames are read back: {why}");
+    }
 }
 
 /// `EGLBoolean eglSwapBuffersWithDamageKHR(..., const EGLint* rects, EGLint n_rects)`: every frame

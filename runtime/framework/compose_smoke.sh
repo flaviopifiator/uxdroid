@@ -58,10 +58,10 @@ send() {
 mark() { wc -l <"$WORK/compositor"; }
 since() { tail -n +"$(( $1 + 1 ))" "$WORK/compositor"; }
 # Pixels of the composed toplevel at each X,Y, as RRGGBB.
-SHOTS=0
+# Each shot has a name of its own: callers run it in a subshell, which a counter would not survive.
 pixels() {
-    SHOTS=$((SHOTS + 1))
-    local shot="$WORK/shot-$SHOTS.ppm"
+    local shot
+    shot=$(mktemp -u "$WORK/shot-XXXXXX.ppm")
     send "shot $shot"
     C=1 wait_for "shot $shot\$" "a screenshot"
     python3 - "$shot" "$@" <<'PY'
@@ -127,6 +127,16 @@ wait_for "^compose: dialog shown$" "a dialog"
 C=1 wait_for "subsurface [0-9]+ commit [0-9]+x[0-9]+ at -?[0-9]+,-?[0-9]+" "the dialog's subsurface"
 DIALOG=$(grep -o -E "subsurface [0-9]+ commit [0-9]+x[0-9]+ at -?[0-9]+,-?[0-9]+" "$WORK/compositor" | tail -1)
 echo "ok: the dialog is a subsurface: $DIALOG"
+# A dialog's window is translucent, for its shadow: its buffer has alpha, and the activity shows
+# through its transparent corner instead of black. The activity's own window stays opaque.
+grep -q -E "subsurface [0-9]+ commit [0-9]+x[0-9]+ at .* format argb8888$" "$WORK/compositor" \
+    || fail "the dialog's buffer has no alpha"
+grep -E "^\[compositor\] commit [0-9]+ " "$WORK/compositor" | grep -v -q "format xrgb8888$" \
+    && fail "the activity's opaque window has a buffer with alpha"
+read -r _ _ _ _ _ _ CX CY < <(echo "$DIALOG" | tr 'x,' '  ')
+read -r SHADOW < <(pixels "$(( (CX > 0 ? CX : 0) + 1 )),$(( (CY > 0 ? CY : 0) + 1 ))")
+[ -n "$SHADOW" ] && [ "$SHADOW" != 000000 ] || fail "the dialog's transparent corner shows black"
+echo "ok: the dialog's buffer has alpha and its corner shows the activity ($SHADOW)"
 send "tap 5 5"
 wait_for "^compose: dialog canceled$" "the dialog canceled by a touch outside it"
 C=1 wait_for "subsurface [0-9]+ destroyed" "the dialog's subsurface removed"

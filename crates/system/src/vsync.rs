@@ -176,6 +176,8 @@ pub struct Clock {
     pub arm: unsafe extern "C" fn(fd: i32, tick: *const AtomicI64) -> i32,
     pub disarm: extern "C" fn(fd: i32),
     pub delivered: extern "C" fn(tick: i64),
+    /// Version 2: where EGL in the other library hands GPU frames over as dmabufs.
+    pub presenter: &'static uxdroid_ndk::present::Presenter,
 }
 
 unsafe extern "C" fn clock_arm(fd: i32, tick: *const AtomicI64) -> i32 {
@@ -198,10 +200,11 @@ extern "C" fn clock_delivered(tick: i64) {
 }
 
 static CLOCK: Clock = Clock {
-    version: 1,
+    version: 2,
     arm: clock_arm,
     disarm: clock_disarm,
     delivered: clock_delivered,
+    presenter: &crate::surface::PRESENTER,
 };
 
 /// `VsyncListener.clock()`.

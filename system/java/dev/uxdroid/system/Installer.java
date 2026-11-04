@@ -42,7 +42,14 @@ public final class Installer {
         // The launcher gives the caller its own ApplicationInfo, so the record need not hold it twice.
         info.applicationInfo = null;
         // A rename keeps the size and modification time the identity names.
-        Record.write(new File(directory, Record.FILE), Record.identity(root, staged), application, activity, info);
+        File record = new File(directory, Record.FILE);
+        try {
+            Record.write(record, Record.identity(root, staged), application, activity, info);
+        } catch (IllegalArgumentException e) {
+            // Something the record cannot hold: the launcher parses the APK at each start instead.
+            record.delete();
+            System.err.println("uxdroid: no install record, the APK is parsed at each start: " + e.getMessage());
+        }
         int defaults = Natives.writeDefaults(root + "/framework/natives.txt", new File(directory, DEFAULTS).getPath());
 
         System.out.println("launcher " + (activity == null ? "none" : activity.name));

@@ -83,11 +83,21 @@ struct Track {
     sound: Option<Mutex<Vec<f32>>>,
     /// The output's position when the current static play began.
     base: AtomicU64,
+    notices: Notices,
 }
 
 struct Record {
     input: Input,
     format: Format,
+    notices: Notices,
+}
+
+/// The marker and the period of position updates an app set, which its getters read back. Their
+/// events are not sent yet.
+#[derive(Default)]
+struct Notices {
+    marker: AtomicI32,
+    period: AtomicI32,
 }
 
 static TRACKS: Handles<Arc<Track>> = Handles::new();
@@ -244,6 +254,7 @@ unsafe extern "system" fn track_setup(
         format,
         sound: (mode == MODE_STATIC).then(|| Mutex::new(Vec::new())),
         base: AtomicU64::new(0),
+        notices: Notices::default(),
     };
     let id = TRACKS.add(Arc::new(track));
     // SAFETY: as above.
@@ -571,10 +582,44 @@ fn presented(output: &Output) -> (u64, i64) {
 }
 
 /// Marker and period events are not sent; the values are kept so the getters agree.
-unsafe extern "system" fn track_set_marker(env: *mut JNIEnv, this: jobject, _frames: jint) -> jint {
+unsafe extern "system" fn track_set_marker(env: *mut JNIEnv, this: jobject, frames: jint) -> jint {
     unimplemented_once(c"android.media.AudioTrack marker and period events");
     // SAFETY: ART passes a valid environment and object.
-    unsafe { with_track(env, this, INVALID_OPERATION, |_| SUCCESS) }
+    unsafe {
+        with_track(env, this, INVALID_OPERATION, |track| {
+            track.notices.marker.store(frames, Ordering::Relaxed);
+            SUCCESS
+        })
+    }
+}
+
+unsafe extern "system" fn track_set_period(env: *mut JNIEnv, this: jobject, frames: jint) -> jint {
+    unimplemented_once(c"android.media.AudioTrack marker and period events");
+    // SAFETY: ART passes a valid environment and object.
+    unsafe {
+        with_track(env, this, INVALID_OPERATION, |track| {
+            track.notices.period.store(frames, Ordering::Relaxed);
+            SUCCESS
+        })
+    }
+}
+
+unsafe extern "system" fn track_marker(env: *mut JNIEnv, this: jobject) -> jint {
+    // SAFETY: ART passes a valid environment and object.
+    unsafe {
+        with_track(env, this, 0, |track| {
+            track.notices.marker.load(Ordering::Relaxed)
+        })
+    }
+}
+
+unsafe extern "system" fn track_period(env: *mut JNIEnv, this: jobject) -> jint {
+    // SAFETY: ART passes a valid environment and object.
+    unsafe {
+        with_track(env, this, 0, |track| {
+            track.notices.period.load(Ordering::Relaxed)
+        })
+    }
 }
 
 unsafe extern "system" fn track_loop(
@@ -678,7 +723,11 @@ unsafe extern "system" fn record_setup(
             return SETUP_NATIVE_INIT_FAILED;
         }
     };
-    let id = RECORDS.add(Arc::new(Record { input, format }));
+    let id = RECORDS.add(Arc::new(Record {
+        input,
+        format,
+        notices: Notices::default(),
+    }));
     // SAFETY: as above.
     unsafe { set_long_field(env, this, RECORD_FIELD, id) };
     SUCCESS
@@ -912,18 +961,43 @@ unsafe extern "system" fn record_capacity(env: *mut JNIEnv, this: jobject) -> ji
     }
 }
 
-unsafe extern "system" fn record_set_marker(
+unsafe extern "system" fn record_set_marker(env: *mut JNIEnv, this: jobject, frames: jint) -> jint {
+    // SAFETY: ART passes a valid environment and object.
+    unsafe { record_set(env, this, frames, |notices| &notices.marker) }
+}
+
+unsafe extern "system" fn record_set_period(env: *mut JNIEnv, this: jobject, frames: jint) -> jint {
+    // SAFETY: ART passes a valid environment and object.
+    unsafe { record_set(env, this, frames, |notices| &notices.period) }
+}
+
+/// # Safety
+/// `env` must be the calling thread's JNI environment and `this` an AudioRecord.
+unsafe fn record_set(
     env: *mut JNIEnv,
     this: jobject,
-    _frames: jint,
+    frames: jint,
+    value: impl FnOnce(&Notices) -> &AtomicI32,
 ) -> jint {
     unimplemented_once(c"android.media.AudioRecord marker and period events");
-    // SAFETY: ART passes a valid environment and object.
-    if unsafe { record(env, this) }.is_some() {
-        SUCCESS
-    } else {
-        INVALID_OPERATION
+    // SAFETY: as above.
+    match unsafe { record(env, this) } {
+        Some(record) => {
+            value(&record.notices).store(frames, Ordering::Relaxed);
+            SUCCESS
+        }
+        None => INVALID_OPERATION,
     }
+}
+
+unsafe extern "system" fn record_marker(env: *mut JNIEnv, this: jobject) -> jint {
+    // SAFETY: ART passes a valid environment and object.
+    unsafe { record(env, this) }.map_or(0, |record| record.notices.marker.load(Ordering::Relaxed))
+}
+
+unsafe extern "system" fn record_period(env: *mut JNIEnv, this: jobject) -> jint {
+    // SAFETY: ART passes a valid environment and object.
+    unsafe { record(env, this) }.map_or(0, |record| record.notices.period.load(Ordering::Relaxed))
 }
 
 /// The host's server owns routing, and a stream's device never changes under it, so there is no
@@ -988,7 +1062,9 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
         (c"native_set_playback_rate", c"(I)I", f!(track_set_rate)),
         (c"native_get_playback_rate", c"()I", f!(track_rate)),
         (c"native_set_marker_pos", c"(I)I", f!(track_set_marker)),
-        (c"native_set_pos_update_period", c"(I)I", f!(track_set_marker)),
+        (c"native_get_marker_pos", c"()I", f!(track_marker)),
+        (c"native_set_pos_update_period", c"(I)I", f!(track_set_period)),
+        (c"native_get_pos_update_period", c"()I", f!(track_period)),
         (c"native_get_position", c"()I", f!(track_position)),
         (c"native_get_latency", c"()I", f!(track_latency)),
         (c"native_get_underrun_count", c"()I", f!(track_underruns)),
@@ -1036,11 +1112,13 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
             f!(record_capacity),
         ),
         (c"native_set_marker_pos", c"(I)I", f!(record_set_marker)),
+        (c"native_get_marker_pos", c"()I", f!(record_marker)),
         (
             c"native_set_pos_update_period",
             c"(I)I",
-            f!(record_set_marker),
+            f!(record_set_period),
         ),
+        (c"native_get_pos_update_period", c"()I", f!(record_period)),
         (c"native_get_min_buff_size", c"(III)I", f!(track_min_buffer)),
         (c"native_enableDeviceCallback", c"()V", f!(no_routing)),
         (c"native_disableDeviceCallback", c"()V", f!(no_routing)),
