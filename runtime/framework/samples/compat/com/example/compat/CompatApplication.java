@@ -252,6 +252,24 @@ public class CompatApplication extends Application {
         }
         System.out.println("shortcuts over the limit " + refused + " kept " + shortcuts.getDynamicShortcuts().size());
 
+        // Apps choose their layout and features by what the device has: a desktop with a touchscreen,
+        // sound, a microphone and OpenGL ES, and no camera, telephony or WebView.
+        android.content.pm.PackageManager pm = getPackageManager();
+        StringBuilder features = new StringBuilder("features");
+        for (String feature : new String[] {"android.hardware.type.pc", "android.hardware.touchscreen",
+                "android.hardware.audio.output", "android.hardware.microphone", "android.hardware.camera",
+                "android.hardware.telephony", "android.software.webview"}) {
+            features.append(' ').append(feature.substring(feature.lastIndexOf('.') + 1)).append(' ')
+                    .append(pm.hasSystemFeature(feature));
+        }
+        features.append(" listed ").append(pm.getSystemAvailableFeatures().length > 0);
+        System.out.println(features);
+        // AnkiDroid's text fields ask for spell checkers; a desktop has none, and says so.
+        android.view.textservice.TextServicesManager text =
+                getSystemService(android.view.textservice.TextServicesManager.class);
+        System.out.println("textservices " + (text != null) + " spell checker "
+                + (text != null && text.isSpellCheckerEnabled()));
+
         // Mindustry's graphics setup asks for its game mode.
         android.app.GameManager games = getSystemService(android.app.GameManager.class);
         System.out.println("game mode " + (games == null ? "none" : games.getGameMode()));

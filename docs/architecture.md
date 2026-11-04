@@ -165,7 +165,11 @@ The corpus also looked up services nobody served, and an app usually stops on th
 | `alarm` | Alarms fire on time from a timer thread, repeating ones again: a listener runs on its handler, and a `PendingIntent` is sent, so a broadcast one reaches the app's receivers |
 | `appops` | What the app asks for is allowed, as its requested permissions are granted; an operation for another package is refused |
 | `shortcut` | Dynamic shortcuts kept, at most 15 per activity as Android's default; pinning is not supported |
-| `game` | A game by its manifest's category plays in the standard mode, as Android gives a game nobody configured; other apps have none | `runtime/framework/compat_smoke.sh` checks these, and the rest of what the F-Droid corpus below needed, with an app of ours.
+| `game` | A game by its manifest's category plays in the standard mode, as Android gives a game nobody configured; other apps have none |
+| `textservices` | No spell checker is enabled, so text fields offer no suggestions; without the service, `TextServicesManager` itself was null |
+| `package`, `hasSystemFeature` | A PC, as Android describes ChromeOS (`android.hardware.type.pc`), with a touchscreen, faketouch, both orientations, sound output and a microphone, and OpenGL ES 3.2 as the version entry of `getSystemAvailableFeatures`; no camera, telephony, sensors, NFC or WebView, so apps hide what needs them |
+
+`runtime/framework/compat_smoke.sh` checks these, and the rest of what the F-Droid corpus below needed, with an app of ours.
 
 Not yet: key repeat, a soft keyboard and the input method service, pointer capture and cursors, drag and drop, more than one seat, sub-windows placed relative to a parent that is not at the display's origin, dim layers behind dialogs, color layers, `setGeometry` and `setDestinationFrame`, a window of its own for a second activity (it is a subsurface of the first one's toplevel, and goes with it), and hardware rendering.
 

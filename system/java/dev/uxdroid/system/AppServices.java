@@ -30,6 +30,23 @@ final class AppServices {
         Services.register("appops", com.android.internal.app.IAppOpsService.class, new AppOps(app));
         Services.register("shortcut", android.content.pm.IShortcutService.class, new Shortcuts(app));
         Services.register("game", android.app.IGameManagerService.class, new Games(app));
+        Services.register("textservices", com.android.internal.textservice.ITextServicesManager.class,
+                new TextServices());
+    }
+
+    /**
+     * The handler of ITextServicesManager: a desktop has no spell checker service, so none is enabled,
+     * which text fields read as no suggestions. Without the service, TextServicesManager itself is
+     * null and AnkiDroid's text fields log its absence.
+     */
+    public static final class TextServices {
+        public boolean isSpellCheckerEnabled(int userId) { return false; }
+        public android.view.textservice.SpellCheckerInfo getCurrentSpellChecker(int userId, String locale) {
+            return null;
+        }
+        public android.view.textservice.SpellCheckerInfo[] getEnabledSpellCheckers(int userId) {
+            return new android.view.textservice.SpellCheckerInfo[0];
+        }
     }
 
     /**

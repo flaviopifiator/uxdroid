@@ -22,7 +22,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|pending|activity|no activity|launched|result|broadcast) " "$WORK/out"
+grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|features|textservices|pending|activity|no activity|launched|result|broadcast) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -70,6 +70,9 @@ expect "^appops note 0 check 0$" "app ops are not allowed"
 expect "^shortcuts dynamic 1 scan max 15 pin false$" "dynamic shortcuts are not kept"
 expect "^shortcuts over the limit refused kept 1$" "a refused list of shortcuts was kept in part"
 expect "^alarm clock went off, next in the future true$" "an alarm clock that went off is still the next one"
+expect "^features pc true touchscreen true output true microphone true camera false telephony false webview false listed true$" \
+    "the device does not list the features a desktop has"
+expect "^textservices true spell checker false$" "the text services manager is missing"
 expect "^game mode 1$" "the game mode is not standard"
 
 # 7. The device is uxdroid, not the Robolectric build the framework comes from, which apps take for a

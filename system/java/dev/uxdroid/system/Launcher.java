@@ -558,6 +558,14 @@ public final class Launcher {
         public String[] getPackagesForUid(int uid) {
             return uid == app.application.uid ? new String[] {app.application.packageName} : null;
         }
+
+        public boolean hasSystemFeature(String name, int version) {
+            return Features.has(name, version);
+        }
+
+        public android.content.pm.ParceledListSlice<android.content.pm.FeatureInfo> getSystemAvailableFeatures() {
+            return new android.content.pm.ParceledListSlice<>(Features.list());
+        }
     }
 
     /**
