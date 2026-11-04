@@ -370,6 +370,7 @@ dependencies = [
  "serde_json",
  "uxdroid-apk",
  "uxdroid-bridge",
+ "uxdroid-ndk",
  "uxdroid-system",
  "uxdroid-testkit",
  "uxdroid-translate",

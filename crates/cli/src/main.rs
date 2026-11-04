@@ -80,6 +80,8 @@ fn app_command(_args: &[OsString]) -> ExitCode {
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 mod run;
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+mod translation;
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 fn run_command(args: &[OsString]) -> ExitCode {

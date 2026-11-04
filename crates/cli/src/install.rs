@@ -292,6 +292,35 @@ fn prepare(
 
 type Report = (String, Option<String>);
 
+/// The guest ABI an APK's code can run as on this host, through the translator.
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+fn translated_abi(abis: &[String]) -> Option<&'static str> {
+    use crate::translation::GUEST_ABI;
+    abis.iter().any(|abi| abi == GUEST_ABI).then_some(GUEST_ABI)
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")))]
+fn translated_abi(_abis: &[String]) -> Option<&'static str> {
+    None
+}
+
+/// Resolves the staged guest libraries' imports and writes the plan beside them; the report's
+/// line names where the plan ends up.
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+fn plan_translation(staging: &Path, package: &str) -> Result<String, String> {
+    let summary = crate::translation::prepare(staging, package)?;
+    let installed = staging
+        .parent()
+        .map_or_else(|| staging.to_path_buf(), |app| app.join("lib"))
+        .join(crate::translation::PLAN_FILE);
+    Ok(summary.describe(&installed))
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")))]
+fn plan_translation(_staging: &Path, _package: &str) -> Result<String, String> {
+    Err("translation is not built for this host".to_string())
+}
+
 fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
     if !data.is_absolute() {
         return Err(format!(
@@ -304,13 +333,19 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
     if !valid_package(package) {
         return Err(format!("bad package name {}", package.escape_debug()));
     }
-    let abi = host_abi();
-    if let ExecutionPath::NeedsAbiBridge(abis) = apk.execution_path(abi) {
-        return Err(format!(
-            "this APK has native code only for {}, and running it on {abi} needs translation, which is not built yet",
-            abis.join(", ").escape_debug()
-        ));
-    }
+    let host = host_abi();
+    let (abi, translated) = match apk.execution_path(host) {
+        ExecutionPath::NeedsAbiBridge(abis) => match translated_abi(&abis) {
+            Some(guest) => (guest, true),
+            None => {
+                return Err(format!(
+                    "this APK has native code only for {}, and running it on {host} needs translation, which is not built yet",
+                    abis.join(", ").escape_debug()
+                ));
+            }
+        },
+        _ => (host, false),
+    };
 
     let _lock = lock_package(data, package)?;
     let pid = std::process::id();
@@ -340,6 +375,10 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
         std::fs::create_dir_all(&staging).map_err(|error| cannot(&staging, error))?;
         let count =
             extract_native_libs(apk_path, abi, &staging).map_err(|error| error.to_string())?;
+        let translation = match translated {
+            true => Some(plan_translation(&staging, package)?),
+            false => None,
+        };
         let prepared = match &runtime {
             Framework::Found(runtime) => Some(
                 prepare(runtime, apk_path, &staged_code, &code, data).map_err(|error| {
@@ -372,19 +411,22 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
             renames.undo();
             return Err(error);
         }
-        Ok((count, prepared))
+        Ok((count, prepared, translation))
     })();
     let _ = std::fs::remove_file(&pending);
     for leftover in [&staging, &staged_code, &old_libraries, &old_code] {
         let _ = std::fs::remove_dir_all(leftover);
     }
-    let (count, prepared) = result?;
+    let (count, prepared, translation) = result?;
 
     let mut report = format!(
         "installed {}: {count} native libraries for {abi} in {}\n",
         package.escape_debug(),
         libraries.display()
     );
+    if let Some(translation) = translation {
+        report.push_str(&translation);
+    }
     let note = match (prepared, runtime) {
         (Some((launcher, defaults)), _) => {
             report.push_str(&format!(

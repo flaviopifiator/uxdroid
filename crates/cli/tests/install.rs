@@ -218,24 +218,174 @@ fn an_apk_without_native_code_installs_an_empty_directory() {
 
 #[cfg(target_arch = "x86_64")]
 #[test]
-fn an_apk_only_for_another_cpu_says_translation_is_missing() {
+fn an_apk_only_for_a_cpu_with_no_translator_says_translation_is_missing() {
     let dir = scratch("foreign");
     let apk = dir.join("app.apk");
     Apk::new()
         .manifest(&sample_manifest())
-        .native_lib("arm64-v8a", "liba.so")
+        .native_lib("armeabi-v7a", "liba.so")
         .write(&apk);
     let data = dir.join("data");
 
     let output = install(&apk, &data);
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(
-        text(&output.stderr).contains("only for arm64-v8a"),
-        "{}",
-        text(&output.stderr)
+    assert_eq!(
+        text(&output.stderr),
+        "error: this APK has native code only for armeabi-v7a, and running it on x86_64 needs translation, which is not built yet\n"
     );
     assert!(!data.exists());
+}
+
+/// Builds an arm64 library with the NDK, which the dev image has.
+#[cfg(target_arch = "x86_64")]
+fn arm64_library(dir: &Path, name: &str, source: &Path, extra: &[&str]) -> Vec<u8> {
+    let ndk = std::env::var_os("ANDROID_NDK_ROOT").expect("run in the dev image");
+    let clang = Path::new(&ndk)
+        .join("toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++");
+    let out = dir.join(name);
+    let status = Command::new(clang)
+        .args(["-O2", "-fPIC", "-shared", "-static-libstdc++"])
+        .arg(source)
+        .args(extra)
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::fs::read(out).unwrap()
+}
+
+#[cfg(target_arch = "x86_64")]
+fn spike_source() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../bridge/tests/fixtures/arm64/spike.cpp")
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_only_apk_installs_for_translation_with_every_import_resolved() {
+    let dir = scratch("arm64");
+    let library = arm64_library(&dir, "libspike.so", &spike_source(), &["-llog"]);
+    let apk = dir.join("app.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .file("lib/arm64-v8a/libspike.so", &library)
+        .write(&apk);
+    let data = dir.join("data");
+
+    let output = install(&apk, &data);
+
+    let stdout = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let libraries = data.join("data/com.example.app/lib");
+    assert!(
+        stdout.starts_with(&format!(
+            "installed com.example.app: 1 native libraries for arm64-v8a in {}\n",
+            libraries.display()
+        )),
+        "{stdout}"
+    );
+    let plan_path = libraries.join("arm64-v8a.plan.json");
+    assert!(
+        stdout.contains(&format!("plan in {}", plan_path.display())),
+        "{stdout}"
+    );
+    assert!(stdout.contains("translated for x86_64: "), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(data.join("data/com.example.app/abi")).unwrap(),
+        "arm64-v8a\n"
+    );
+    assert_eq!(listing(&libraries), ["arm64-v8a.plan.json", "libspike.so"]);
+
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plan_path).unwrap()).unwrap();
+    let spike = &plan["libraries"]["libspike.so"];
+    assert_eq!(plan["abi"], "arm64-v8a");
+    assert!(
+        spike["needed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n == "liblog.so")
+    );
+    let jni: Vec<&str> = spike["jni"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        jni.contains(&"JNI_OnLoad") && jni.contains(&"Java_dev_uxdroid_Spike_scale"),
+        "{jni:?}"
+    );
+    assert!(!spike["functions"].as_array().unwrap().is_empty());
+    let imports = &spike["imports"];
+    assert_eq!(imports["qsort"], "libc");
+    assert_eq!(imports["stat"], "libc");
+    assert_eq!(imports["__android_log_print"], "table liblog.so");
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_library_needing_a_library_nobody_provides_fails_the_install_naming_it() {
+    let dir = scratch("arm64-needed");
+    let source = dir.join("lib.cpp");
+    std::fs::write(&source, "extern \"C\" int nothing(void) { return 0; }\n").unwrap();
+    arm64_library(&dir, "libnotthere.so", &source, &[]);
+    let library = arm64_library(
+        &dir,
+        "libneeds.so",
+        &source,
+        &[
+            "-Wl,--no-as-needed",
+            "-L",
+            dir.to_str().unwrap(),
+            "-lnotthere",
+        ],
+    );
+    let apk = dir.join("app.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .file("lib/arm64-v8a/libneeds.so", &library)
+        .write(&apk);
+    let data = dir.join("data");
+
+    let output = install(&apk, &data);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        text(&output.stderr),
+        "error: cannot translate com.example.app: libneeds.so needs libnotthere.so, which is neither in the APK nor a system library uxdroid provides\n"
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_import_found_nowhere_fails_the_install_naming_it() {
+    let dir = scratch("arm64-unresolved");
+    let source = dir.join("lib.cpp");
+    std::fs::write(
+        &source,
+        "extern \"C\" int uxdroid_nowhere(void);\n\
+         extern \"C\" int calls_it(void) { return uxdroid_nowhere(); }\n",
+    )
+    .unwrap();
+    let library = arm64_library(&dir, "libnowhere.so", &source, &["-Wl,-z,undefs"]);
+    let apk = dir.join("app.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .file("lib/arm64-v8a/libnowhere.so", &library)
+        .write(&apk);
+    let data = dir.join("data");
+
+    let output = install(&apk, &data);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        text(&output.stderr),
+        "error: cannot translate com.example.app: libnowhere.so imports what no library, table or the guest libc has: uxdroid_nowhere\n"
+    );
+    assert!(!data.join("data/com.example.app/lib").exists());
 }
 
 #[test]
