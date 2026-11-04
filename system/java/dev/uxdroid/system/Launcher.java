@@ -483,20 +483,7 @@ public final class Launcher {
                 android.app.ProfilerInfo profilerInfo, Bundle options) throws RemoteException {
             ActivityStack stack = ActivityStack.current;
             if (stack == null) return android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
-            if (Looper.myLooper() == Looper.getMainLooper()) return stack.startFromApp(intent, false);
-            // The task runs on the main thread; a start from another thread is checked against the
-            // manifest now, so its caller still sees a refusal, and queued there.
-            int refused = stack.startFromApp(intent, true);
-            if (refused != android.app.ActivityManager.START_SUCCESS) return refused;
-            Intent copy = new Intent(intent);
-            new android.os.Handler(Looper.getMainLooper()).post(() -> {
-                try {
-                    stack.startFromApp(copy, false);
-                } catch (RemoteException e) {
-                    System.err.println("uxdroid: cannot start " + copy + ": " + e);
-                }
-            });
-            return android.app.ActivityManager.START_SUCCESS;
+            return stack.startFromAnyThread(intent);
         }
     }
 

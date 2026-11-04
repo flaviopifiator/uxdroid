@@ -6,7 +6,6 @@ import android.content.IIntentSender;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.os.Looper;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -128,21 +127,11 @@ final class IntentSenders {
         }
         ActivityStack stack = ActivityStack.current;
         if (stack == null) return ActivityManager.START_CANCELED;
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            try {
-                return stack.startFromApp(intent);
-            } catch (android.os.RemoteException e) {
-                throw new IllegalStateException("cannot start " + intent, e);
-            }
+        try {
+            return stack.startFromAnyThread(intent);
+        } catch (android.os.RemoteException e) {
+            throw new IllegalStateException("cannot start " + intent, e);
         }
-        new android.os.Handler(Looper.getMainLooper()).post(() -> {
-            try {
-                stack.startFromApp(intent);
-            } catch (android.os.RemoteException e) {
-                throw new IllegalStateException("cannot start " + intent, e);
-            }
-        });
-        return ActivityManager.START_SUCCESS;
     }
 
     /** IActivityManager.getInfoForIntentSender: made by the app itself, under its uid. */

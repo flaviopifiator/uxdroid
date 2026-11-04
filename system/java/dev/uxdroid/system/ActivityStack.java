@@ -188,6 +188,25 @@ final class ActivityStack {
         }
     }
 
+    /**
+     * {@link #startFromApp} from any thread: the task runs on the main thread, so a start from another
+     * thread is checked against the manifest now, so its caller still sees a refusal, and queued there.
+     */
+    int startFromAnyThread(Intent intent) throws RemoteException {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return startFromApp(intent, false);
+        int refused = startFromApp(intent, true);
+        if (refused != android.app.ActivityManager.START_SUCCESS) return refused;
+        Intent copy = new Intent(intent);
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            try {
+                startFromApp(copy, false);
+            } catch (RemoteException | RuntimeException e) {
+                System.err.println("uxdroid: cannot start " + copy + ": " + e);
+            }
+        });
+        return android.app.ActivityManager.START_SUCCESS;
+    }
+
     private Entry highest(ActivityInfo info) {
         for (int i = entries.size() - 1; i >= 0; i--) {
             if (entries.get(i).info.name.equals(info.name)) return entries.get(i);
