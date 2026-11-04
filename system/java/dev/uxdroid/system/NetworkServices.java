@@ -27,7 +27,13 @@ final class NetworkServices {
     /** Android's netId of the one network; any value above the reserved ones would do. */
     static final int NET_ID = 100;
 
-    /** The interface of the host's default route, from /proc/net/route, or null when it has none. */
+    /** IPv6's default destination, ::, as /proc/net/ipv6_route writes it. */
+    private static final String ANY6 = "00000000000000000000000000000000";
+
+    /**
+     * The interface of the host's default route, IPv4's from /proc/net/route, else IPv6's from
+     * /proc/net/ipv6_route, so a host with only IPv6 is online; null when it has neither.
+     */
     static String defaultInterface() {
         try {
             for (String line : Files.readAllLines(new File("/proc/net/route").toPath())) {
@@ -35,6 +41,18 @@ final class NetworkServices {
                 if (fields.length > 2 && fields[1].equals("00000000") && !fields[0].equals("Iface")) return fields[0];
             }
         } catch (IOException e) {
+            // No IPv4 routing table to read: IPv6's may still have a default route.
+        }
+        try {
+            for (String line : Files.readAllLines(new File("/proc/net/ipv6_route").toPath())) {
+                // Destination, its prefix length, source, its length, next hop, metric, use counts, flags, device.
+                String[] fields = line.trim().split("\\s+");
+                if (fields.length < 10 || !fields[0].equals(ANY6) || !fields[1].equals("00")) continue;
+                // Up, and not the kernel's unreachable default on loopback (RTF_REJECT).
+                long flags = Long.parseLong(fields[8], 16);
+                if ((flags & 0x1) != 0 && (flags & 0x200) == 0 && !fields[9].equals("lo")) return fields[9];
+            }
+        } catch (IOException | NumberFormatException e) {
             // No routing table to read, as in a namespace without /proc: no network.
         }
         return null;
