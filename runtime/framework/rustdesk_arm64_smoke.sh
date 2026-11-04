@@ -5,10 +5,14 @@
 # so the install cannot pick native code. Untrusted, so sandbox only:
 #
 #   docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
-#   UXDROID_SAMPLES=<directory with the APK> docker compose run --rm translation-sandbox ...
+#   docker run --rm --network none --read-only --tmpfs /tmp --cap-drop ALL --user 1000:1000 \
+#       -v .:/work:ro -v uxdroid_cache:/cache:ro -v <directory with the APK>:/samples:ro \
+#       <the runtime at /runtime/art> -w /work uxdroid-translation \
+#       bash runtime/framework/rustdesk_arm64_smoke.sh
 #
-# The engine is found through UXDROID_TRANSLATOR, as in the translation image. The APK is
-# /samples/rustdesk-1.5.1-arm64-only.apk unless RUSTDESK_APK names another.
+# that is the sandbox service's isolation with the translation image, whose UXDROID_TRANSLATOR
+# names the engine. The APK is /samples/rustdesk-1.5.1-arm64-only.apk unless RUSTDESK_APK names
+# another.
 set -u -o pipefail
 export RUSTDESK_APK="${RUSTDESK_APK:-/samples/rustdesk-1.5.1-arm64-only.apk}"
 export RUSTDESK_ABI=arm64-v8a

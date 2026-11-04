@@ -38,9 +38,24 @@ Every configuration produced SHA-256 `91ad201e806745412d7703b38a3f9311ccf1e7599d
 
 The translator ran this kernel 11.7% faster than QEMU user and at 40.4% of native speed. It used 9.9 MiB more peak memory than native and 1.3 MiB more than QEMU; of that, about 4 MiB is translated code in Dynarmic's code cache and 1 MiB is its dispatch table, which `docker/translation/dynarmic.patch` shrinks from 16 MiB. Translation time here is within the noise of one run (tens of milliseconds for both translators).
 
+## RustDesk to its first frame
+
+`rustdesk_start.sh [runs]` starts RustDesk 1.5.1 to its first Flutter frame twice per run, from its x86_64 build (native) and from its arm64-v8a build alone (translated), each from a fresh copy of one install, and reads, when Flutter posts its first frame: the time since the VM started, `Private_Dirty` of the process, its user plus system CPU time, and the resident part of its anonymous `rwx` mappings, which hold Dynarmic's translated code, one per guest CPU. RustDesk is untrusted, so it runs only in a sandbox with the engine, mounted as `runtime/framework/rustdesk_arm64_smoke.sh` describes, with both APKs in `/samples`.
+
+2026-11-04, same machine, load average about 1, medians of 5 alternating runs. The arm64 build reached its first frame only with nine GL extension functions added to `crates/ndk`'s GLES table, a change not committed (see docs/architecture.md, "Not yet"); without them it stops at Skia's GL setup.
+
+| Build | First frame ms | Private dirty MiB | CPU ms | Anonymous rwx MiB | rwx mappings |
+|---|---|---|---|---|---|
+| native x86_64 | 254 | 149.0 | 320 | 0.0 | 1 |
+| translated arm64-v8a | 2426 | 603.9 | 4930 | 188.5 | 41 |
+
+The translated build took 9.6 times as long to its first frame and 455 MiB more private dirty memory, and spent 4.6 s more CPU time, which is translation and translated execution together. About 190 MiB of that memory is translated code, 4.5 MiB in each of 41 code caches, and anonymous writable memory grew by 282 MiB, which these runs do not attribute further. Every guest thread and nesting level has its own Dynarmic JIT with its own code cache and 1 MiB dispatch table, so code one thread translated is translated again on the next; that is the likely main part. Installing took 398 ms for arm64-v8a, translation plan included, and 353 ms for x86_64.
+
 ## Not measured
 
 - Berberis and its Digitalis fork, which build only inside an AOSP tree for the emulator.
 - Houdini and other closed translators, which cannot run here.
-- Workloads other than this integer kernel: floating point and SIMD heavy code, code that calls the host often (each host call moves registers by signature), many threads, and startup of a real app such as RustDesk's arm64 build.
+- Workloads other than this integer kernel: floating point and SIMD heavy code, code that calls the host often (each host call moves registers by signature), many threads, and an app's start under QEMU user, which cannot run the bridge's libraries.
 - A GPU or another CPU; one machine, shared, so differences of a few percent are noise.
+- How the CPU time of RustDesk's start splits between translating and running translated code: the engine has no counters for it yet.
+- RustDesk's translated start on the committed tables, which stops before its first frame.
