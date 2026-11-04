@@ -825,9 +825,15 @@ unsafe fn lock(
     if target.is_none() {
         // SAFETY: as above.
         let opened = unsafe { Target::open(env, layer)? };
-        if opened.window.is_some() {
+        // Input between frames needs the watch, the frame does not: a watch that cannot be set up
+        // is reported, and the window still draws, reading input after each frame's round trip.
+        // SAFETY: as above.
+        if opened.window.is_some() && unsafe { watch(env) }.is_err() {
             // SAFETY: as above.
-            unsafe { watch(env)? };
+            unsafe { crate::clear_exception(env) };
+            uxdroid_bridge::report!(
+                "uxdroid: the display's connection is not watched; input is read only when a frame is drawn"
+            );
         }
         *target = Some(opened);
     }
@@ -1121,9 +1127,11 @@ fn present(target: &mut Target, window_layer: &Arc<Layer>) -> Result<(), Failure
     if damage.is_empty() {
         return Ok(());
     }
-    window
-        .present(damage)
-        .map_err(|error| Failure::Message(format!("cannot present a frame: {error}")))?;
+    if let Err(error) = window.present(damage) {
+        // The composer already counts this damage as shown: the next frame redraws everything.
+        *composer = Composer::default();
+        return Err(Failure::Message(format!("cannot present a frame: {error}")));
+    }
     PRESENTED.fetch_add(1, Ordering::Relaxed);
     // The round trip may have read input, which the Looper will not see as readable.
     route();
