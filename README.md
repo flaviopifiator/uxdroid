@@ -99,11 +99,12 @@ docker compose run --rm -T dev bash /work/runtime/framework/control_smoke.sh
 # control socket, again after stop, once per profile, and with a socket passed at once.
 docker compose run --rm -T dev bash /work/runtime/framework/service_smoke.sh
 # Composition through a scripted compositor: an app's own layer changed by one atomic transaction,
-# damage-only redraws, a dialog and a popup as subsurfaces, frame callbacks pacing an animation, a
-# resize and a close.
+# damage-only redraws, a dialog and a popup as subsurfaces (the dialog's translucent, with alpha),
+# frame callbacks pacing an animation, a resize and a close.
 docker compose run --rm -T dev bash /work/runtime/framework/compose_smoke.sh
-# What the F-Droid corpus needed, checked with an app of ours: its own application uid, storage and
-# the system services the corpus asks for.
+# What the F-Droid corpus needed, checked with an app of ours: its own application uid, storage, the
+# system services the corpus asks for, startActivityForResult results, broadcasts to registered and
+# manifest receivers (alarms included), network callbacks, GLES 3.1 and 3.2, and a PC's features.
 docker compose run --rm -T dev bash /work/runtime/framework/compat_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
