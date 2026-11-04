@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 
 use uxdroid_bridge::guest::{Cpu, Engine, Supervisor, set_engine_loader};
 
-const ABI_VERSION: u32 = 3;
+const ABI_VERSION: u32 = 4;
 const LIBRARY: &str = "libuxdroid_dynarmic.so";
 /// Dynarmic's `HaltReason` bits that `uxd_cpu_run` returns.
 const HALT_CACHE_INVALIDATION: u32 = 0x0000_0002;
@@ -108,7 +108,7 @@ struct Api {
     watch: unsafe extern "C" fn(u64),
     retire_cache: unsafe extern "C" fn(),
     translated: unsafe extern "C" fn(*mut u64, usize) -> usize,
-    pretranslate: unsafe extern "C" fn(*const u64, usize) -> usize,
+    pretranslate: unsafe extern "C" fn(*const u64, usize, *const u64, usize) -> usize,
 }
 
 fn library_path() -> PathBuf {
@@ -290,8 +290,25 @@ impl Engine for Dynarmic {
     }
 
     unsafe fn pretranslate(&self, locations: &[u64]) -> usize {
-        // SAFETY: the slice is valid for its length; the caller keeps the code readable.
-        unsafe { (self.api.pretranslate)(locations.as_ptr(), locations.len()) }
+        // Decoding stays inside the code the profile's caller allows; without bounds the shim
+        // translates nothing, since a block could run on into unmapped memory.
+        let Some(bounds) = uxdroid_bridge::guest::profile::code_bounds() else {
+            return 0;
+        };
+        let pairs: Vec<u64> = bounds
+            .iter()
+            .flat_map(|&(start, end)| [start, end])
+            .collect();
+        // SAFETY: both slices are valid for their lengths; the caller keeps the code inside the
+        // bounds mapped and readable.
+        unsafe {
+            (self.api.pretranslate)(
+                locations.as_ptr(),
+                locations.len(),
+                pairs.as_ptr(),
+                bounds.len(),
+            )
+        }
     }
 
     fn identity(&self) -> u64 {
@@ -465,7 +482,7 @@ mod tests {
     unsafe extern "C" fn translated(_: *mut u64, _: usize) -> usize {
         0
     }
-    unsafe extern "C" fn pretranslate(_: *const u64, _: usize) -> usize {
+    unsafe extern "C" fn pretranslate(_: *const u64, _: usize, _: *const u64, _: usize) -> usize {
         0
     }
     fn supervisor(_: &dyn Cpu, _: u32) -> bool {

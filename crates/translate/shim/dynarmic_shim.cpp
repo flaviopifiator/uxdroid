@@ -52,7 +52,7 @@
 
 namespace {
 
-constexpr std::uint32_t ABI_VERSION = 3;
+constexpr std::uint32_t ABI_VERSION = 4;
 // Address space a code cache reserves; only the pages code is written to take memory.
 constexpr std::size_t DEFAULT_CODE_CACHE_MIB = 128;
 // Dynarmic keeps a 2 MiB constant pool and 1 MiB of headroom inside each emitter's part.
@@ -109,6 +109,26 @@ Dynarmic::ExclusiveMonitor& monitor() {
 
 thread_local uxd_cpu* running = nullptr;
 
+// While this thread translates ahead (uxd_pretranslate): the code it may read, as start and end
+// pairs. Decoding stops at the first instruction outside them, so a location near a range's end
+// cannot make Dynarmic read into the unmapped gap after it. Null otherwise.
+thread_local const std::uint64_t* pretranslate_ranges = nullptr;
+thread_local std::size_t pretranslate_range_count = 0;
+
+bool may_read_code(std::uint64_t vaddr) {
+    if (pretranslate_ranges == nullptr) {
+        return true;
+    }
+    for (std::size_t i = 0; i < pretranslate_range_count; ++i) {
+        const std::uint64_t start = pretranslate_ranges[2 * i];
+        const std::uint64_t end = pretranslate_ranges[2 * i + 1];
+        if (vaddr >= start && end >= 4 && vaddr <= end - 4) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::atomic<std::uint64_t> watched_address{0};
 std::atomic<std::uint64_t> watched_translations{0};
 
@@ -134,6 +154,10 @@ bool exchange(std::uint64_t vaddr, T value, T expected) {
 // all, and the rest goes to the CPU running on this thread.
 struct Callbacks final : Dynarmic::A64::UserCallbacks {
     std::optional<std::uint32_t> MemoryReadCode(std::uint64_t vaddr) override {
+        // Dynarmic ends the block there with a NoExecuteFault, as for code it may not read.
+        if (!may_read_code(vaddr)) {
+            return std::nullopt;
+        }
         if (vaddr == watched_address.load(std::memory_order_relaxed)) {
             watched_translations.fetch_add(1, std::memory_order_relaxed);
         }
@@ -453,23 +477,29 @@ __attribute__((visibility("default"))) std::size_t uxd_translated(std::uint64_t*
 }
 
 // Translates the block at each location descriptor ahead of any CPU needing it, into the current
-// cache, on the calling thread, which need not run guest code. The code at each must be readable.
-// Returns how many it went through before the cache filled.
-__attribute__((visibility("default"))) std::size_t uxd_pretranslate(const std::uint64_t* locations, std::size_t count) noexcept {
-    if (!shared().sharing) {
+// cache, on the calling thread, which must not be running guest code. Only code inside `ranges`,
+// `range_count` pairs of start and end addresses that must be readable, is decoded: a block that
+// reaches a range's end stops there. Returns how many locations it went through before the cache
+// filled or translation failed.
+__attribute__((visibility("default"))) std::size_t uxd_pretranslate(const std::uint64_t* locations, std::size_t count,
+                                                                   const std::uint64_t* ranges, std::size_t range_count) noexcept {
+    if (!shared().sharing || running != nullptr || ranges == nullptr || range_count == 0) {
         return 0;
     }
+    std::size_t done = 0;
+    pretranslate_ranges = ranges;
+    pretranslate_range_count = range_count;
     try {
         std::shared_ptr<Dynarmic::A64::CodeCache> cache = cache_for(nullptr);
-        for (std::size_t i = 0; i < count; ++i) {
-            if (!cache->Translate(locations[i])) {
-                return i;
-            }
+        while (done < count && cache->Translate(locations[done])) {
+            ++done;
         }
-        return count;
     } catch (...) {
-        return 0;
+        // `done` still counts what was translated before the failure.
     }
+    pretranslate_ranges = nullptr;
+    pretranslate_range_count = 0;
+    return done;
 }
 
 // Makes the current cache take no more blocks and a new one current: each CPU moves to it at the

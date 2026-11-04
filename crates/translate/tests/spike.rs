@@ -281,6 +281,8 @@ fn code_translated_once_is_run_by_every_thread_until_its_cache_retires() {
     }
     let _counts = engine_counts();
     let entry = library().symbol("spike_shared_code").unwrap() as u64;
+    // A cache of its own: the profile cases may have translated this code already.
+    assert!(uxdroid_translate::retire_code_cache());
     assert!(uxdroid_translate::watch_translations(entry));
     let run: extern "C" fn(i32) -> i32 = function("spike_shared_code", "i32(i32)");
     let expected = shared_code(1000);
@@ -397,6 +399,85 @@ fn a_stale_profile_is_ignored() {
         "{refused}"
     );
     assert_eq!(uxdroid_translate::stats().unwrap().watched_translations, 0);
+}
+
+/// The virtual address range of the test library's executable code, from its file.
+fn spike_code_range() -> (u64, u64) {
+    use uxdroid_bridge::elf::{PF_X, PHDR_SIZE, PT_LOAD, parse_header, parse_program_headers};
+    let bytes = std::fs::read(LIBRARY_DIR.get().unwrap().join("libspike.so")).unwrap();
+    let table = parse_header(&bytes).unwrap();
+    let start = table.offset as usize;
+    let headers = parse_program_headers(&bytes[start..start + table.count * PHDR_SIZE]).unwrap();
+    let code = headers
+        .iter()
+        .find(|header| header.kind == PT_LOAD && header.flags & PF_X != 0)
+        .unwrap();
+    (code.vaddr, code.vaddr + code.filesz)
+}
+
+/// A saved profile with its blocks replaced by `entries`, each an offset and the engine's flags,
+/// all in the test library, which is the only library in its directory. The format is the one
+/// guest/profile.rs documents: magic, engine, libraries, then the count and 8-byte blocks.
+fn profile_with(entries: &[(u32, u8)]) -> Vec<u8> {
+    let dir = LIBRARY_DIR.get().unwrap();
+    profile::save(dir).unwrap();
+    let saved = std::fs::read(dir.join(profile::FILE)).unwrap();
+    let word = |at: usize| u32::from_le_bytes(saved[at..at + 4].try_into().unwrap()) as usize;
+    assert_eq!(word(16), 1, "one library in the test's directory");
+    let blocks = 20 + 4 + word(20) + 16;
+    let mut crafted = saved[..blocks].to_vec();
+    crafted.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for &(offset, flags) in entries {
+        crafted.extend_from_slice(&[0, 0, flags, 0]);
+        crafted.extend_from_slice(&offset.to_le_bytes());
+    }
+    crafted
+}
+
+#[test]
+fn profile_blocks_at_the_end_of_the_code_stop_at_its_end() {
+    if !engine_available() {
+        return;
+    }
+    let _counts = engine_counts();
+    library();
+    let (start, end) = spike_code_range();
+    let end = u32::try_from(end).unwrap();
+    // Starts in the last bytes of the code, aligned or not, whose decoding would run into the
+    // unmapped gap after it, and a block of the code's own start for comparison.
+    let crafted = profile_with(&[
+        (end - 3, 0),
+        (end - 1, 0),
+        (end - 4, 0),
+        (end - 8, 0),
+        (u32::try_from(start).unwrap(), 0),
+    ]);
+    std::fs::write(LIBRARY_DIR.get().unwrap().join(profile::FILE), crafted).unwrap();
+    assert!(uxdroid_translate::retire_code_cache());
+    // Unaligned starts are refused; the aligned ones translate up to the end of the code.
+    assert_eq!(profile::pretranslate(library()), Ok(3));
+    let add: extern "C" fn(i32, i32) -> i32 = function("spike_add", "i32(i32,i32)");
+    assert_eq!(add(2, 3), 5);
+}
+
+#[test]
+fn a_profile_larger_than_any_valid_one_is_refused_unread() {
+    if !engine_available() {
+        return;
+    }
+    let _counts = engine_counts();
+    library();
+    let path = LIBRARY_DIR.get().unwrap().join(profile::FILE);
+    // Sparse: the size is the point, not the bytes.
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(64 << 20).unwrap();
+    drop(file);
+    let refused = profile::pretranslate(library()).unwrap_err();
+    assert!(
+        refused.contains("larger than any translation profile"),
+        "{refused}"
+    );
+    std::fs::remove_file(&path).unwrap();
 }
 
 #[test]

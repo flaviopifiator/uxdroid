@@ -10,8 +10,11 @@
 //!
 //! A profile names, for each library, its size and modification time, and the engine's identity.
 //! A library whose file changed, or another engine, makes the profile stale, and it is not used:
-//! the next save replaces it. Whatever the file says, only offsets inside a library's executable
-//! segments are translated, so a damaged or crafted profile costs translation time, never safety.
+//! the next save replaces it. Whatever the file says, only 4-byte aligned offsets inside a library's
+//! executable segments are translated, and the engine decodes nothing outside those segments, so a
+//! block that would run past a segment's end stops there instead of reading the unmapped gap after
+//! it ([`code_bounds`]). A file larger than any valid profile is refused before it is read. A
+//! damaged or crafted profile costs translation time, never safety.
 //!
 //! In an installed app, `library_loaded` starts both halves: a thread that translates each new
 //! library's part of the profile as the library loads, and a thread that saves the profile 3, 10
@@ -40,6 +43,10 @@ const MAGIC: [u8; 8] = *b"UXDPROF1";
 const MAX_LIBRARIES: usize = 1024;
 const MAX_NAME: usize = 4096;
 const MAX_ENTRIES: usize = 1 << 22;
+/// The largest file `decode` can accept: header, the most libraries with the longest names, the
+/// entry count and the most entries. Anything larger is refused unread.
+const MAX_FILE: u64 =
+    (8 + 8 + 4 + MAX_LIBRARIES * (4 + MAX_NAME + 8 + 8) + 4 + MAX_ENTRIES * 8) as u64;
 /// When the profile is saved, counted from the first guest library's load.
 const SAVE_AFTER: [Duration; 3] = [
     Duration::from_secs(3),
@@ -274,7 +281,7 @@ pub fn pretranslate(library: &Library) -> Result<usize, String> {
     let directory = directory_of(library).ok_or("the library has no directory")?;
     let engine = super::engine()?;
     let path = directory.join(FILE);
-    let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let bytes = read_bounded(&path)?;
     let profile = Profile::decode(&bytes).map_err(|why| format!("{}: {why}", path.display()))?;
     if profile.engine != engine.identity() {
         return Err(format!("{}: made by another engine", path.display()));
@@ -301,8 +308,11 @@ pub fn pretranslate(library: &Library) -> Result<usize, String> {
         .filter(|entry| usize::from(entry.library) == index)
         .filter(|entry| {
             let offset = u64::from(entry.offset);
-            code.iter()
-                .any(|&(start, end)| (start..end).contains(&offset))
+            // A64 instructions are 4-byte aligned; any other start is not a block.
+            offset % 4 == 0
+                && code
+                    .iter()
+                    .any(|&(start, end)| (start..end).contains(&offset))
         })
         .map(|entry| {
             (bias.wrapping_add(u64::from(entry.offset)) & PC_MASK)
@@ -322,13 +332,24 @@ pub fn pretranslate(library: &Library) -> Result<usize, String> {
                 .collect()
         })
         .collect();
+    let bounds: Vec<(u64, u64)> = code
+        .iter()
+        .map(|&(start, end)| (bias.wrapping_add(start), bias.wrapping_add(end)))
+        .collect();
     let done = std::thread::scope(|scope| {
         let workers: Vec<_> = parts
             .iter()
             .map(|part| {
-                // SAFETY: each location is inside one of the library's executable segments, which
-                // stay mapped and readable for the life of the process.
-                scope.spawn(move || unsafe { engine.pretranslate(part) })
+                let bounds = bounds.clone();
+                scope.spawn(move || {
+                    CODE_BOUNDS.with(|cell| *cell.borrow_mut() = Some(bounds));
+                    // SAFETY: each location is inside one of the library's executable segments,
+                    // which stay mapped and readable for the life of the process, and
+                    // `code_bounds` keeps the engine's decoding inside them.
+                    let done = unsafe { engine.pretranslate(part) };
+                    CODE_BOUNDS.with(|cell| *cell.borrow_mut() = None);
+                    done
+                })
             })
             .collect();
         workers
@@ -342,6 +363,47 @@ pub fn pretranslate(library: &Library) -> Result<usize, String> {
         unsafe { libc::malloc_trim(0) };
     }
     Ok(done)
+}
+
+thread_local! {
+    static CODE_BOUNDS: std::cell::RefCell<Option<Vec<(u64, u64)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While [`pretranslate`] has the calling thread translate ahead: the addresses, start and end, of
+/// the library's executable code, which the engine must not decode past. An engine's
+/// `pretranslate` asks for them here and translates nothing without them. `Engine::pretranslate`
+/// keeps its signature; the bounds travel beside it, on the thread that does the work.
+pub fn code_bounds() -> Option<Vec<(u64, u64)>> {
+    CODE_BOUNDS.with(|cell| cell.borrow().clone())
+}
+
+/// The profile's bytes, refusing before reading a file larger than any valid profile.
+fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let size = file
+        .metadata()
+        .map_err(|error| format!("{}: {error}", path.display()))?
+        .len();
+    if size > MAX_FILE {
+        return Err(format!(
+            "{}: {size} bytes, larger than any translation profile ({MAX_FILE})",
+            path.display()
+        ));
+    }
+    // Bounded again while reading, in case the file grows after the size was read.
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(MAX_FILE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(format!(
+            "{}: larger than any translation profile ({MAX_FILE})",
+            path.display()
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Threads translating ahead at once: `UXDROID_PRETRANSLATE_THREADS`, 1 to 8, or 1. One measured
