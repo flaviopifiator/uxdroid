@@ -67,6 +67,29 @@ services:
       context: .
       dockerfile: docker/translation/Dockerfile
 
+  # `dev` building for an aarch64 Linux host, with what it builds run under QEMU user. Its own
+  # target directory, /cache/target-arm64-host. Build `dev` first: it is the base.
+  dev-arm64:
+    extends: dev
+    image: uxdroid-dev-arm64
+    build:
+      context: .
+      dockerfile: docker/arm64-host/Dockerfile
+    # QEMU user writes a core file into the working directory, the source tree, for every test
+    # that ends in abort on purpose.
+    ulimits:
+      core: 0
+
+  # `sandbox` for the aarch64 host build: no network, source and samples read-only.
+  sandbox-arm64:
+    extends: sandbox
+    image: uxdroid-dev-arm64
+    build:
+      context: .
+      dockerfile: docker/arm64-host/Dockerfile
+    ulimits:
+      core: 0
+
   # Compares loader performance against competitors. Offline, with real libraries read-only.
   bench:
     profiles: [bench]
