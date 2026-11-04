@@ -1,0 +1,61 @@
+diff --git a/src/dynarmic/backend/exception_handler_posix.cpp b/src/dynarmic/backend/exception_handler_posix.cpp
+index 2d6d6ea6..1f2ae805 100644
+--- a/src/dynarmic/backend/exception_handler_posix.cpp
++++ b/src/dynarmic/backend/exception_handler_posix.cpp
+@@ -86,20 +86,7 @@ void RegisterHandler() {
+ }
+ 
+ SigHandler::SigHandler() {
+-    const size_t signal_stack_size = std::max<size_t>(SIGSTKSZ, 2 * 1024 * 1024);
+-
+-    signal_stack_memory = std::malloc(signal_stack_size);
+-
+-    stack_t signal_stack;
+-    signal_stack.ss_sp = signal_stack_memory;
+-    signal_stack.ss_size = signal_stack_size;
+-    signal_stack.ss_flags = 0;
+-    if (sigaltstack(&signal_stack, nullptr) != 0) {
+-        fmt::print(stderr, "dynarmic: POSIX SigHandler: init failure at sigaltstack\n");
+-        supports_fast_mem = false;
+-        return;
+-    }
+-
++    // uxdroid: the thread's alternate signal stack belongs to its owner (ART sets one per thread).
+     struct sigaction sa;
+     sa.sa_handler = nullptr;
+     sa.sa_sigaction = &SigHandler::SigAction;
+@@ -186,7 +173,7 @@ void SigHandler::SigAction(int sig, siginfo_t* info, void* raw_context) {
+         }
+     }
+ 
+-    fmt::print(stderr, "Unhandled {} at rip {:#018x}\n", sig == SIGSEGV ? "SIGSEGV" : "SIGBUS", CTX_RIP);
++    // uxdroid: not ours, so chained silently; printing is not async-signal-safe.
+ 
+ #elif defined(MCL_ARCHITECTURE_ARM64)
+ 
+@@ -245,7 +232,7 @@ void SigHandler::SigAction(int sig, siginfo_t* info, void* raw_context) {
+         }
+     }
+ 
+-    fmt::print(stderr, "Unhandled {} at pc {:#018x}\n", sig == SIGSEGV ? "SIGSEGV" : "SIGBUS", CTX_PC);
++    // uxdroid: not ours, so chained silently; printing is not async-signal-safe.
+ 
+ #elif defined(MCL_ARCHITECTURE_RISCV)
+ 
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64.h b/src/dynarmic/backend/x64/a64_emit_x64.h
+index ed493155..eba2bb47 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64.h
++++ b/src/dynarmic/backend/x64/a64_emit_x64.h
+@@ -61,8 +61,10 @@ protected:
+         const void* code_ptr = nullptr;
+     };
+     static_assert(sizeof(FastDispatchEntry) == 0x10);
+-    static constexpr u64 fast_dispatch_table_mask = 0xFFFFF0;
+-    static constexpr size_t fast_dispatch_table_size = 0x100000;
++    // uxdroid: 65536 entries (1 MiB) instead of 2^20 (16 MiB), which every CPU writes in full when
++    // it is made; uxdroid makes one CPU per guest thread and nesting depth.
++    static constexpr u64 fast_dispatch_table_mask = 0xFFFF0;
++    static constexpr size_t fast_dispatch_table_size = 0x10000;
+     std::array<FastDispatchEntry, fast_dispatch_table_size> fast_dispatch_table;
+     void ClearFastDispatchTable();
+ 

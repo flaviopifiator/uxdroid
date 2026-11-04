@@ -1,0 +1,31 @@
+uxdroid
+
+Third-party code built into uxdroid's artifacts. Sources are downloaded at build time from the
+pinned commits and checksums in docker/translation/sources.txt; none is copied into this
+repository. Each license applies to its own project's code only.
+
+libuxdroid_dynarmic.so, the arm64-v8a translation engine (docker/translation), contains:
+
+- Dynarmic, https://github.com/azahar-emu/dynarmic, commit a46601580d55. 0BSD.
+  Copyright (C) 2017 merryhime. Built with docker/translation/dynarmic.patch applied, which
+  keeps the thread's alternate signal stack, chains foreign faults without printing, and shrinks
+  the fast dispatch table.
+- mcl, https://github.com/azahar-emu/mcl, commit 5fc4beaf3310. MIT.
+  Copyright (c) 2022 merryhime.
+- {fmt}, https://github.com/fmtlib/fmt, commit 7b273fbb541c. MIT.
+  Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors.
+- robin-map, https://github.com/Tessil/robin-map, commit 054ec5ad6744. MIT.
+  Copyright (c) 2017 Thibaut Goetghebuer-Planchon.
+- Xbyak, https://github.com/herumi/xbyak, commit 8c0098b69f95. BSD-3-Clause.
+  Copyright (c) 2007 MITSUNARI Shigeo. All rights reserved.
+- Zydis, https://github.com/zyantific/zydis, commit bffbb610cfea, and Zycore,
+  https://github.com/zyantific/zycore-c, commit 0b2432ced088. MIT.
+  Copyright (c) 2014-2024 Florian Bernd, Copyright (c) 2014-2024 Joel Höner.
+- Boost headers from Debian's libboost-dev 1.83. BSL-1.0.
+- The GNU C++ library, linked statically under the GCC Runtime Library Exception.
+
+The full license texts are in each project's source archive, in LICENSE, LICENSE.txt or COPYRIGHT.
+
+The translation benchmark (benches/translation) compiles zlib 1.3.2, https://zlib.net, under the
+zlib license, Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler, into test programs that
+are never shipped, and runs QEMU user (GPL-2.0) from Debian as a competitor, never shipped.

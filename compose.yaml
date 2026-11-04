@@ -58,6 +58,15 @@ services:
       - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1, target: /usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1, read_only: true, bind: {create_host_path: false}}
       - {type: bind, source: /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so, target: /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so, read_only: true, bind: {create_host_path: false}}
 
+  # `dev` plus the arm64 translation engine (Dynarmic, built from pinned sources), QEMU user and the
+  # compute kernel's zlib, for the translation tests and benchmark. Build `dev` first: it is the base.
+  translation:
+    extends: dev
+    image: uxdroid-translation
+    build:
+      context: .
+      dockerfile: docker/translation/Dockerfile
+
   # Compares loader performance against competitors. Offline, with real libraries read-only.
   bench:
     profiles: [bench]

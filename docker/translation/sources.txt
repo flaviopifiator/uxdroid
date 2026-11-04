@@ -1,0 +1,9 @@
+# Sources the translation image builds from: destination, URL, SHA-256. Each is pinned to a commit
+# or release; GitHub archives of a commit are the commit's tree.
+dynarmic https://github.com/azahar-emu/dynarmic/archive/a46601580d5512d324104f985b5f0209dc980ddc.tar.gz 73c7f7fbf573c542767a4146297e4954369485077ae3880395445af787de0915
+dynarmic/externals/fmt https://github.com/fmtlib/fmt/archive/7b273fbb541c7c9058800bc613f4291274b2d26e.tar.gz 4d5465ace5ee6aed8183b0954f9f22fffa5ca7dd550fbd5763a54e58ab958bca
+dynarmic/externals/mcl https://github.com/azahar-emu/mcl/archive/5fc4beaf331037649b10625736b41365defb4f50.tar.gz 36a2200e7940838112c9967388685a5178c2e9a110233193b914f54b2e2f51fd
+dynarmic/externals/robin-map https://github.com/Tessil/robin-map/archive/054ec5ad67440fcd65e0497e5a27ef31f53fcc7f.tar.gz a73d3a6b98b7961244981bd89a42fcb4aef63a89d1ec135bbc90d3621b355d27
+dynarmic/externals/xbyak https://github.com/herumi/xbyak/archive/8c0098b69f95d02dea47efcdd42ab5aa2d03c72d.tar.gz 4df36b1b40e12db01f7d6f6161fb00d0618e43104e72bec0aa87996472ffa80a
+dynarmic/externals/zycore https://github.com/zyantific/zycore-c/archive/0b2432ced0884fd152b471d97ecf0258ff4d859f.tar.gz 698e4623e661db312eb9da327519f53f0a9dd7fbbfacf02159687bca62369467
+dynarmic/externals/zydis https://github.com/zyantific/zydis/archive/bffbb610cfea643b98e87658b9058382f7522807.tar.gz 0c884f6b9fa6699dd3db580a00753d893b1a9e3e4970300da276d0e24238e23b
