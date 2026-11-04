@@ -125,6 +125,30 @@ public class CompatApplication extends Application {
                 + " GL " + (android.opengl.GLES20.glGetString(android.opengl.GLES20.GL_VERSION) != null)
                 + " pixel " + String.format("%02x%02x%02x%02x", pixel.get(0), pixel.get(1), pixel.get(2), pixel.get(3))
                 + " shader " + compiled[0] + " refused " + refused);
+        // GLES31 and GLES32, on the same context: a program pipeline and a texture's border color.
+        int[] pipelines = new int[1];
+        android.opengl.GLES31.glGenProgramPipelines(1, pipelines, 0);
+        android.opengl.GLES31.glBindProgramPipeline(pipelines[0]);
+        String pipelineLog = android.opengl.GLES31.glGetProgramPipelineInfoLog(pipelines[0]);
+        int[] texture = new int[1];
+        android.opengl.GLES20.glGenTextures(1, texture, 0);
+        android.opengl.GLES20.glBindTexture(android.opengl.GLES20.GL_TEXTURE_2D, texture[0]);
+        android.opengl.GLES32.glTexParameterIiv(android.opengl.GLES20.GL_TEXTURE_2D,
+                android.opengl.GLES32.GL_TEXTURE_BORDER_COLOR, new int[] {1, 2, 3, 4}, 0);
+        int[] border = new int[4];
+        android.opengl.GLES32.glGetTexParameterIiv(android.opengl.GLES20.GL_TEXTURE_2D,
+                android.opengl.GLES32.GL_TEXTURE_BORDER_COLOR, border, 0);
+        String shortBorder;
+        try {
+            android.opengl.GLES32.glGetTexParameterIiv(android.opengl.GLES20.GL_TEXTURE_2D,
+                    android.opengl.GLES32.GL_TEXTURE_BORDER_COLOR, new int[2], 0);
+            shortBorder = "accepted";
+        } catch (IllegalArgumentException e) {
+            shortBorder = "refused";
+        }
+        System.out.println("graphics31 pipeline " + android.opengl.GLES31.glIsProgramPipeline(pipelines[0])
+                + " log " + (pipelineLog != null) + " border " + java.util.Arrays.toString(border)
+                + " short border " + shortBorder);
         egl.eglMakeCurrent(display, javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE,
                 javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE, javax.microedition.khronos.egl.EGL10.EGL_NO_CONTEXT);
         egl.eglDestroySurface(display, surface);
