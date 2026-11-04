@@ -1,0 +1,29 @@
+diff --git a/Android.bp b/Android.bp
+index 9630f12..07833a7 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -98,6 +98,11 @@ rust_defaults {
+         glibc: {
+             enabled: false,
+         },
++        // uxdroid: the linux_glibc arm64 host-cross target builds its sysroot from source, as
++        // linux_musl's cross targets do: the prebuilt has no std for aarch64-unknown-linux-gnu.
++        linux_glibc_arm64: {
++            enabled: true,
++        },
+         darwin_x86_64: {
+             enabled: false,
+         },
+@@ -364,6 +369,12 @@ rust_toolchain_library {
+                 "libpanic_unwind.rust_sysroot",
+             ],
+         },
++        linux_glibc_arm64: {
++            rlibs: [
++                "libpanic_abort.rust_sysroot",
++                "libpanic_unwind.rust_sysroot",
++            ],
++        },
+         android: {
+             rlibs: ["libpanic_abort.rust_sysroot"],
+         },

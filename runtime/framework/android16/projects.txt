@@ -18,14 +18,23 @@ toolchain/pgo-profiles
 prebuilts/go/linux-x86
 prebuilts/build-tools
 prebuilts/jdk/jdk21
-prebuilts/clang/host/linux-x86 /Android.bp /BUILD.bazel /go.mod /soong /clang-r547379
+# Only the finalized flag lists, which the build machine's aconfig embeds.
+prebuilts/sdk /Android.bp /*/finalized-flags.txt
+prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8
+# Rust, for the build machine's own tools (aconfig, cxxbridge) and the arm64 host libraries that
+# have Rust inside, whose std Soong builds from the prebuilt's rust-src.
+prebuilts/rust /Android.bp /bootstrap/ /soong/ /linux-x86/1.83.0/
+external/rust/android-crates-io
+external/rust/cxx
+prebuilts/clang/host/linux-x86 /Android.bp /BUILD.bazel /go.mod /soong /clang-r547379 /clang-r530567
 
 # libandroid_runtime and what its host variant links.
 frameworks/base /* !tests/ !integration-tests/ !robotests/ !multivalentTests/ !/packages/ !/services/ !/tools/ !/cmds/ !/libs/WindowManager/ !/ravenwood/
 frameworks/native
 frameworks/minikin
 frameworks/proto_logging
-hardware/interfaces /Android.bp /graphics/Android.bp /graphics/common/ /common/
+system/hardware/interfaces /Android.bp /media/
+hardware/interfaces /Android.bp /graphics/Android.bp /graphics/common/ /graphics/composer/ /drm/ /common/
 libnativehelper
 system/core
 system/libbase
@@ -35,6 +44,8 @@ system/libhidl
 system/libhwbinder
 system/libfmq
 system/libprocinfo
+system/libsysprop
+system/libvintf
 system/tools/aidl
 system/tools/hidl
 system/tools/xsdc
@@ -72,3 +83,13 @@ external/googletest
 external/lz4
 external/zstd
 external/jsoncpp
+external/eigen
+external/flatbuffers
+external/tensorflow
+external/modp_b64
+external/compiler-rt
+kernel/configs
+hardware/libhardware
+bionic /libc/kernel/ /libc/include/ /linker/Android.bp /libc/Android.bp
+frameworks/av /media/ndk/include/
+libcore /*.bp Android.bp /luni/src/main/native/ /ojluni/src/main/native/ /dalvik/src/main/native/ /libart/src/main/native/

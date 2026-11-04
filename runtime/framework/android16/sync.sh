@@ -40,7 +40,11 @@ PY
         git -C "$path" sparse-checkout set --no-cone $sparse
         set +f
     fi
-    git -C "$path" fetch -q --depth 1 aosp "refs/tags/$TAG" || git -C "$path" fetch -q --depth 1 aosp "refs/tags/$TAG"
+    # A sparse project downloads only the files it checks out.
+    filter=()
+    [ -n "$sparse" ] && filter=(--filter=blob:none)
+    git -C "$path" fetch -q --depth 1 "${filter[@]}" aosp "refs/tags/$TAG" \
+        || git -C "$path" fetch -q --depth 1 "${filter[@]}" aosp "refs/tags/$TAG"
     git -C "$path" checkout -q FETCH_HEAD
     touch "$path/.uxdroid-synced"
     echo "synced $path ($(du -sh "$path" | cut -f1))"

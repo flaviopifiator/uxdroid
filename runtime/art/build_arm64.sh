@@ -19,7 +19,8 @@ cp prebuilts/gcc/linux-x86/host/aarch64-linux-glibc2.31-10/sysroot/usr/lib/aarch
 
 MIN_FREE_KIB=$((60 * 1024 * 1024))
 JOBS="${JOBS:-6}"
-# What the arm64 runtime ships, as runtime/art/package.sh copies for x86_64, and the build machine's
+# What the arm64 runtime ships, as runtime/art/package.sh copies for x86_64, but ICU and Conscrypt,
+# which come from the Android 16 tree (runtime/framework/android16/build.sh, which runs first), and the build machine's
 # dex2oat and oatdump for the boot image.
 ARM64=out-arm64/host/linux-arm64
 DEFAULT_TARGETS="$ARM64/bin/dalvikvm64 $ARM64/bin/dex2oat64"

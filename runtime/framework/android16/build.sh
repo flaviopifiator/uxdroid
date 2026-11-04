@@ -24,11 +24,17 @@ apply prebuilts/clang/host/linux-x86 "$PATCHES/clang-0001-linux-glibc-arm64-runt
 for patch in /work/runtime/framework/android16/patches/soong-*.patch; do
     apply build/soong "$patch"
 done
+for patch in /work/runtime/framework/android16/patches/icu-*.patch; do
+    apply external/icu "$patch"
+done
+for patch in /work/runtime/framework/android16/patches/rust-*.patch; do
+    apply prebuilts/rust "$patch"
+done
 # Only C and C++ is built here, and the framework's Java needs the SDK prebuilts and modules this tree
 # leaves out, which Soong cannot analyze: its Java, app and API stub modules are removed from every
-# blueprint file of frameworks/base, and build/make's system images with them, starting from the
-# file at the tag each time.
-for project in frameworks/base build/make; do
+# blueprint file of frameworks/base, with build/make's system images and prebuilts/sdk's API
+# modules, starting from the file at the tag each time.
+for project in frameworks/base build/make prebuilts/sdk; do
     git -C "$project" ls-files -- '*.bp' | while read -r bp; do
         [ -e "$project/$bp" ] || continue
         git -C "$project" show "HEAD:$bp" > "$project/$bp.tag"
@@ -78,4 +84,15 @@ build/soong/soong_ui.bash --make-mode --soong-only -j"$JOBS" $TARGETS
 status=$?
 
 kill "$guard" 2>/dev/null
+
+# The master-art tree links ART's libjavacore, libopenjdk and libsqlite against ICU's prebuilts, which
+# exist for x86 hosts only: the arm64 ones are this build's, beside them, where the patch
+# runtime/art/patches/runtime-0002-icu-linux-glibc-arm64.patch names them.
+if [ -d /aosp/prebuilts/runtime/mainline/i18n ] && [ -e "$ARM64/lib64/libicu_jni.so" ]; then
+    I18N=/aosp/prebuilts/runtime/mainline/i18n
+    mkdir -p "$I18N/sdk/linux_glibc/arm64/lib" "$I18N/test-exports/linux_glibc/arm64/lib"
+    cp "$ARM64/lib64/libicu.so" "$I18N/sdk/linux_glibc/arm64/lib/"
+    cp "$ARM64/lib64/libicuuc-host.so" "$ARM64/lib64/libicui18n-host.so" "$ARM64/lib64/libicu_jni.so" \
+        "$I18N/test-exports/linux_glibc/arm64/lib/"
+fi
 exit "$status"
