@@ -226,6 +226,13 @@ fn table() -> &'static HashMap<&'static str, Target> {
             "__sF",
             Target::Function(std::ptr::from_ref(&LEGACY_STREAMS).cast()),
         );
+        // On LP64 bionic, off64_t is off_t, so the 64 names are the same functions.
+        table.insert("fseeko64", Target::Function(stdio::fseeko as *const ()));
+        table.insert("ftello64", Target::Function(stdio::ftello as *const ()));
+        table.insert(
+            "_ctype_",
+            Target::Function(std::ptr::from_ref(&CTYPE).cast()),
+        );
         for &(name, target) in ALIASES {
             table.insert(name, Target::Alias(target));
         }
@@ -285,6 +292,18 @@ functions! {
     "_setjmp" => uxdroid_underscore_setjmp,
     "__system_property_find" => system_property_find,
     "__system_property_get" => system_property_get,
+    "__system_property_read" => system_property_read,
+    "__system_property_read_callback" => system_property_read_callback,
+    "__umask_chk" => umask_chk,
+    "__write_chk" => write_chk,
+    "__loader_android_dlopen_ext" => loader::linker::android_dlopen_ext,
+    "__loader_dl_iterate_phdr" => loader::dl_iterate_phdr,
+    "__loader_dladdr" => loader::dladdr,
+    "__loader_dlclose" => loader::dlclose,
+    "__loader_dlerror" => loader::dlerror,
+    "__loader_dlopen" => loader::linker::dlopen,
+    "__loader_dlsym" => loader::linker::dlsym,
+    "__loader_dlvsym" => loader::linker::dlvsym,
     "android_dlopen_ext" => loader::android_dlopen_ext,
     "android_set_abort_message" => set_abort_message,
     "asprintf" => uxdroid_asprintf,
@@ -302,6 +321,8 @@ functions! {
     "fprintf" => uxdroid_fprintf,
     "freeaddrinfo" => freeaddrinfo,
     "fscanf" => uxdroid_fscanf,
+    "funopen" => funopen,
+    "funopen64" => funopen,
     "fwprintf" => uxdroid_fwprintf,
     "fwscanf" => uxdroid_fwscanf,
     "gai_strerror" => gai_strerror,
@@ -316,6 +337,7 @@ functions! {
     "pselect" => pselect,
     "pthread_atfork" => pthread_atfork,
     "pthread_exit" => pthread_exit,
+    "pthread_gettid_np" => pthread_gettid_np,
     "pthread_sigmask" => pthread_sigmask,
     "pthread_sigmask64" => pthread_sigmask,
     "setbuf" => setbuf,
@@ -1261,6 +1283,125 @@ stream_functions! {
     vfwscanf(; format: *const i32, args: *mut c_void) -> c_int;
 }
 
+// --- funopen ---
+
+type FunRead = unsafe extern "C" fn(*mut c_void, *mut c_char, c_int) -> c_int;
+type FunWrite = unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int;
+/// bionic's `fpos_t` and `fpos64_t` are both `off64_t` on LP64.
+type FunSeek = unsafe extern "C" fn(*mut c_void, i64, c_int) -> i64;
+type FunClose = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+/// glibc's `cookie_io_functions_t`.
+#[repr(C)]
+struct CookieFunctions {
+    read: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, usize) -> isize>,
+    write: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> isize>,
+    seek: Option<unsafe extern "C" fn(*mut c_void, *mut i64, c_int) -> c_int>,
+    close: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+}
+
+unsafe extern "C" {
+    fn fopencookie(
+        cookie: *mut c_void,
+        mode: *const c_char,
+        functions: CookieFunctions,
+    ) -> *mut c_void;
+}
+
+/// The BSD callbacks behind one glibc cookie stream.
+struct FunCookie {
+    cookie: *mut c_void,
+    read: Option<FunRead>,
+    write: Option<FunWrite>,
+    seek: Option<FunSeek>,
+    close: Option<FunClose>,
+}
+
+/// BSD's custom streams, which glibc offers as `fopencookie` with other callback types. Libraries
+/// such as Meta's Superpack decompressor read their archives through them.
+unsafe extern "C" fn funopen(
+    cookie: *const c_void,
+    read: Option<FunRead>,
+    write: Option<FunWrite>,
+    seek: Option<FunSeek>,
+    close: Option<FunClose>,
+) -> *mut c_void {
+    let mode = match (read.is_some(), write.is_some()) {
+        (true, true) => c"r+",
+        (true, false) => c"r",
+        (false, true) => c"w",
+        (false, false) => {
+            // SAFETY: errno is this thread's.
+            unsafe { *libc::__errno_location() = libc::EINVAL };
+            return std::ptr::null_mut();
+        }
+    };
+    let state = Box::into_raw(Box::new(FunCookie {
+        cookie: cookie.cast_mut(),
+        read,
+        write,
+        seek,
+        close,
+    }));
+    let functions = CookieFunctions {
+        read: read.map(|_| fun_read as _),
+        write: write.map(|_| fun_write as _),
+        seek: seek.map(|_| fun_seek as _),
+        close: Some(fun_close),
+    };
+    // SAFETY: the mode is a valid C string, and `state` lives until `fun_close` frees it.
+    let file = unsafe { fopencookie(state.cast(), mode.as_ptr(), functions) };
+    if file.is_null() {
+        // SAFETY: glibc did not keep `state`.
+        drop(unsafe { Box::from_raw(state) });
+    }
+    file
+}
+
+/// BSD callbacks take an `int` count, so a larger request is served in part, as a short read is.
+fn fun_count(size: usize) -> c_int {
+    size.min(c_int::MAX as usize) as c_int
+}
+
+unsafe extern "C" fn fun_read(state: *mut c_void, buffer: *mut c_char, size: usize) -> isize {
+    // SAFETY: glibc passes back the state `funopen` gave it, which is live until close.
+    let state = unsafe { &*state.cast::<FunCookie>() };
+    // SAFETY: only set for a stream opened with a read callback, given the caller's buffer.
+    unsafe { state.read.expect("read callback")(state.cookie, buffer, fun_count(size)) as isize }
+}
+
+unsafe extern "C" fn fun_write(state: *mut c_void, buffer: *const c_char, size: usize) -> isize {
+    // SAFETY: as in `fun_read`.
+    let state = unsafe { &*state.cast::<FunCookie>() };
+    // SAFETY: only set for a stream opened with a write callback, given the caller's buffer.
+    let written =
+        unsafe { state.write.expect("write callback")(state.cookie, buffer, fun_count(size)) };
+    // glibc reads a write of 0 as an error, as BSD reads -1.
+    written.max(0) as isize
+}
+
+unsafe extern "C" fn fun_seek(state: *mut c_void, offset: *mut i64, whence: c_int) -> c_int {
+    // SAFETY: as in `fun_read`; glibc gives a valid offset to update.
+    unsafe {
+        let state = &*state.cast::<FunCookie>();
+        let position = state.seek.expect("seek callback")(state.cookie, *offset, whence);
+        if position < 0 {
+            return -1;
+        }
+        *offset = position;
+    }
+    0
+}
+
+unsafe extern "C" fn fun_close(state: *mut c_void) -> c_int {
+    // SAFETY: glibc calls close once, last, so the state is freed here.
+    let state = unsafe { Box::from_raw(state.cast::<FunCookie>()) };
+    // SAFETY: the callback is the library's own, given its cookie.
+    state
+        .close
+        .map_or(0, |close| unsafe { close(state.cookie) })
+}
+
 /// # Safety
 /// Strings must be null or valid C strings.
 pub(crate) unsafe fn lossy<'a>(text: *const c_char) -> std::borrow::Cow<'a, str> {
@@ -1320,7 +1461,133 @@ extern "C" fn system_property_find(_name: *const c_char) -> *const c_void {
     std::ptr::null()
 }
 
+/// No property is ever found, so no caller holds a real one; an empty name and value are safe.
+unsafe extern "C" fn system_property_read(
+    _property: *const c_void,
+    name: *mut c_char,
+    value: *mut c_char,
+) -> c_int {
+    // SAFETY: bionic's contract gives each non-null buffer room for at least its terminator.
+    unsafe {
+        if !name.is_null() {
+            *name = 0;
+        }
+        if !value.is_null() {
+            *value = 0;
+        }
+    }
+    0
+}
+
+extern "C" fn system_property_read_callback(
+    _property: *const c_void,
+    _callback: *const c_void,
+    _cookie: *mut c_void,
+) {
+}
+
+// --- BSD ctype ---
+
+const CTYPE_U: u8 = 0x01;
+const CTYPE_L: u8 = 0x02;
+const CTYPE_N: u8 = 0x04;
+const CTYPE_S: u8 = 0x08;
+const CTYPE_P: u8 = 0x10;
+const CTYPE_C: u8 = 0x20;
+const CTYPE_X: u8 = 0x40;
+const CTYPE_B: u8 = 0x80;
+
+/// bionic's `_C_ctype_`, from OpenBSD: one entry for EOF, then the class bits of each byte in the
+/// C locale. Old NDK headers expand `isalpha` and friends to `(_ctype_ + 1)[c]`.
+const fn bsd_ctype() -> [u8; 257] {
+    let mut table = [0u8; 257];
+    let mut c = 0;
+    while c < 128 {
+        let byte = c as u8;
+        table[1 + c] = match byte {
+            b'\t'..=b'\r' => CTYPE_C | CTYPE_S,
+            0..=31 | 127 => CTYPE_C,
+            b' ' => CTYPE_S | CTYPE_B,
+            b'0'..=b'9' => CTYPE_N,
+            b'A'..=b'F' => CTYPE_U | CTYPE_X,
+            b'G'..=b'Z' => CTYPE_U,
+            b'a'..=b'f' => CTYPE_L | CTYPE_X,
+            b'g'..=b'z' => CTYPE_L,
+            _ => CTYPE_P,
+        };
+        c += 1;
+    }
+    table
+}
+
+static BSD_CTYPE: [u8; 257] = bsd_ctype();
+
+/// The data symbol `_ctype_`: a `const char*`, not the table itself.
+#[repr(transparent)]
+struct CtypePointer(*const u8);
+// SAFETY: it points at an immutable static.
+unsafe impl Sync for CtypePointer {}
+
+static CTYPE: CtypePointer = CtypePointer(BSD_CTYPE.as_ptr());
+
+// --- Threads ---
+
+/// bionic's `pthread_gettid_np`. glibc 2.42 has it; older glibc keeps the thread ID at one offset
+/// in every thread's descriptor, found once by looking for this thread's own ID in its own.
+unsafe extern "C" fn pthread_gettid_np(thread: libc::pthread_t) -> libc::pid_t {
+    type Host = unsafe extern "C" fn(libc::pthread_t) -> libc::pid_t;
+    static HOST: OnceLock<Option<Host>> = OnceLock::new();
+    static OFFSET: OnceLock<Option<usize>> = OnceLock::new();
+    let host = HOST.get_or_init(|| {
+        // SAFETY: a glibc function of this name has bionic's signature.
+        host_symbol(c"pthread_gettid_np").map(|address| unsafe { std::mem::transmute(address) })
+    });
+    if let Some(host) = host {
+        // SAFETY: the caller passes a live thread.
+        return unsafe { host(thread) };
+    }
+    // SAFETY: pthread_self and gettid have no preconditions.
+    let (this, tid) = unsafe { (libc::pthread_self(), libc::gettid()) };
+    if thread == this {
+        return tid;
+    }
+    let offset = OFFSET.get_or_init(|| {
+        (0..1024).step_by(4).find(|&offset| {
+            // SAFETY: glibc's descriptor of this thread is larger than 1 KiB and readable.
+            unsafe { ((this as usize + offset) as *const libc::pid_t).read() == tid }
+        })
+    });
+    match offset {
+        // SAFETY: the caller passes a live thread, whose descriptor has the same layout.
+        Some(offset) => unsafe { ((thread as usize + offset) as *const libc::pid_t).read() },
+        None => -1,
+    }
+}
+
 // --- Fortify ---
+
+unsafe extern "C" fn write_chk(
+    fd: c_int,
+    buffer: *const c_void,
+    count: usize,
+    object_size: usize,
+) -> isize {
+    if count > object_size {
+        fortify_failure("write");
+    }
+    // SAFETY: the check proves the write stays inside the caller's object.
+    unsafe { libc::write(fd, buffer, count) }
+}
+
+extern "C" fn umask_chk(mode: libc::mode_t) -> libc::mode_t {
+    if mode & !0o777 != 0 {
+        die(format_args!(
+            "uxdroid: umask: called with invalid mask {mode:o}\n"
+        ));
+    }
+    // SAFETY: umask accepts any mask.
+    unsafe { libc::umask(mode) }
+}
 
 unsafe extern "C" fn strlen_chk(text: *const c_char, object_size: usize) -> usize {
     // SAFETY: the compiler passes the object's size, so reading that far is in bounds.
@@ -2277,4 +2544,278 @@ unsafe extern "C" fn gai_strerror(code: c_int) -> *const c_char {
         .map_or(code, |(_, glibc)| *glibc);
     // SAFETY: gai_strerror accepts any integer.
     unsafe { libc::gai_strerror(glibc) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Read = unsafe extern "C" fn(*mut c_void, *mut c_char, c_int) -> c_int;
+    type Write = unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int;
+    type Seek = unsafe extern "C" fn(*mut c_void, i64, c_int) -> i64;
+    type Close = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type Funopen = unsafe extern "C" fn(
+        *const c_void,
+        Option<Read>,
+        Option<Write>,
+        Option<Seek>,
+        Option<Close>,
+    ) -> *mut c_void;
+
+    /// A stream over a byte vector, as a library would write with funopen.
+    struct Memory {
+        bytes: Vec<u8>,
+        position: usize,
+        closed: bool,
+    }
+
+    unsafe extern "C" fn read(cookie: *mut c_void, buffer: *mut c_char, size: c_int) -> c_int {
+        // SAFETY: the test passes a live Memory and the stream gives `size` writable bytes.
+        let memory = unsafe { &mut *cookie.cast::<Memory>() };
+        let count = (size as usize).min(memory.bytes.len() - memory.position);
+        let source = &memory.bytes[memory.position..memory.position + count];
+        // SAFETY: as above.
+        unsafe { std::ptr::copy_nonoverlapping(source.as_ptr(), buffer.cast(), count) };
+        memory.position += count;
+        count as c_int
+    }
+
+    unsafe extern "C" fn write(cookie: *mut c_void, buffer: *const c_char, size: c_int) -> c_int {
+        // SAFETY: as in `read`.
+        let memory = unsafe { &mut *cookie.cast::<Memory>() };
+        // SAFETY: the stream gives `size` readable bytes.
+        let source = unsafe { std::slice::from_raw_parts(buffer.cast::<u8>(), size as usize) };
+        memory.bytes.truncate(memory.position);
+        memory.bytes.extend_from_slice(source);
+        memory.position += source.len();
+        size
+    }
+
+    unsafe extern "C" fn seek(cookie: *mut c_void, offset: i64, whence: c_int) -> i64 {
+        // SAFETY: as in `read`.
+        let memory = unsafe { &mut *cookie.cast::<Memory>() };
+        let base = match whence {
+            libc::SEEK_SET => 0,
+            libc::SEEK_CUR => memory.position as i64,
+            _ => memory.bytes.len() as i64,
+        };
+        memory.position = (base + offset) as usize;
+        memory.position as i64
+    }
+
+    unsafe extern "C" fn close(cookie: *mut c_void) -> c_int {
+        // SAFETY: as in `read`.
+        unsafe { (*cookie.cast::<Memory>()).closed = true };
+        7
+    }
+
+    fn funopen() -> Funopen {
+        let address = resolve(c"funopen", false).expect("funopen resolves");
+        // SAFETY: bionic's funopen has this signature.
+        unsafe { std::mem::transmute::<usize, Funopen>(address) }
+    }
+
+    #[test]
+    fn funopen_streams_read_seek_write_and_close_through_the_callbacks() {
+        let mut memory = Memory {
+            bytes: b"superpack".to_vec(),
+            position: 0,
+            closed: false,
+        };
+        let cookie = std::ptr::from_mut(&mut memory).cast::<c_void>();
+        // SAFETY: the callbacks match bionic's, and the cookie outlives the stream.
+        let file = unsafe { funopen()(cookie, Some(read), Some(write), Some(seek), Some(close)) };
+        assert!(!file.is_null());
+        let mut text = [0u8; 5];
+        // SAFETY: `file` is the stream just opened; the buffer has 5 bytes.
+        unsafe {
+            assert_eq!(stdio::fread(text.as_mut_ptr().cast(), 1, 5, file), 5);
+            assert_eq!(&text, b"super");
+            assert_eq!(stdio::fseeko(file, -2, libc::SEEK_END), 0);
+            assert_eq!(stdio::ftello(file), 7);
+            assert_eq!(stdio::fwrite(b"ce".as_ptr().cast(), 1, 2, file), 2);
+            assert_eq!(stdio::fclose(file), 7);
+        }
+        assert_eq!(memory.bytes, b"superpace");
+        assert!(memory.closed);
+    }
+
+    #[test]
+    fn funopen_without_callbacks_is_einval() {
+        // SAFETY: no callback is given, so the cookie is never used.
+        let file = unsafe { funopen()(std::ptr::null(), None, None, None, None) };
+        assert!(file.is_null());
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EINVAL)
+        );
+    }
+
+    #[test]
+    fn a_read_only_funopen_stream_refuses_writes() {
+        let mut memory = Memory {
+            bytes: b"abc".to_vec(),
+            position: 0,
+            closed: false,
+        };
+        let cookie = std::ptr::from_mut(&mut memory).cast::<c_void>();
+        // SAFETY: as above.
+        let file = unsafe { funopen()(cookie, Some(read), None, None, None) };
+        assert!(!file.is_null());
+        // SAFETY: `file` is the stream just opened.
+        unsafe {
+            assert_eq!(stdio::fwrite(b"x".as_ptr().cast(), 1, 1, file), 0);
+            assert_eq!(stdio::fgetc(file), c_int::from(b'a'));
+            assert_eq!(stdio::fseeko(file, 0, libc::SEEK_SET), -1);
+            assert_eq!(stdio::fclose(file), 0);
+        }
+        assert_eq!(memory.bytes, b"abc");
+    }
+
+    fn function<T>(name: &CStr) -> T {
+        let address = resolve(name, false).unwrap_or_else(|| panic!("{name:?} resolves"));
+        assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<usize>());
+        // SAFETY: the caller names the bionic signature of `name`.
+        unsafe { std::mem::transmute_copy(&address) }
+    }
+
+    #[test]
+    fn ctype_is_a_pointer_to_bionic_s_table_one_past_eof() {
+        let address = resolve(c"_ctype_", true).expect("_ctype_ resolves as data");
+        // SAFETY: bionic's `_ctype_` is a `const char*` to 257 entries, the first for EOF.
+        let table = unsafe { std::slice::from_raw_parts(*(address as *const *const u8), 257) };
+        let class = |c: u8| table[1 + c as usize];
+        assert_eq!(table[0], 0);
+        assert_eq!(class(b'A'), 0x01 | 0x40);
+        assert_eq!(class(b'z'), 0x02);
+        assert_eq!(class(b'f'), 0x02 | 0x40);
+        assert_eq!(class(b'7'), 0x04);
+        assert_eq!(class(b'\t'), 0x08 | 0x20);
+        assert_eq!(class(b' '), 0x08 | 0x80);
+        assert_eq!(class(b'~'), 0x10);
+        assert_eq!(class(0x7f), 0x20);
+        assert_eq!(class(0xe9), 0);
+    }
+
+    #[test]
+    fn write_chk_writes_what_fits_its_object() {
+        let write_chk: unsafe extern "C" fn(c_int, *const c_void, usize, usize) -> isize =
+            function(c"__write_chk");
+        let mut fds = [0; 2];
+        // SAFETY: `fds` has room for both ends.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let mut back = [0u8; 4];
+        // SAFETY: both descriptors are the pipe just made, and the buffers are as long as given.
+        unsafe {
+            assert_eq!(write_chk(fds[1], b"dump".as_ptr().cast(), 4, 4), 4);
+            assert_eq!(libc::read(fds[0], back.as_mut_ptr().cast(), 4), 4);
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        assert_eq!(&back, b"dump");
+    }
+
+    #[test]
+    fn umask_chk_sets_a_valid_mask() {
+        let umask_chk: unsafe extern "C" fn(libc::mode_t) -> libc::mode_t =
+            function(c"__umask_chk");
+        // SAFETY: both masks are valid.
+        unsafe {
+            let old = umask_chk(0o027);
+            assert_eq!(umask_chk(old), 0o027);
+        }
+    }
+
+    #[test]
+    fn pthread_gettid_np_names_any_thread() {
+        let gettid_np: unsafe extern "C" fn(libc::pthread_t) -> libc::pid_t =
+            function(c"pthread_gettid_np");
+        // SAFETY: pthread_self is always valid.
+        assert_eq!(unsafe { gettid_np(libc::pthread_self()) }, unsafe {
+            libc::gettid()
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            // SAFETY: gettid has no preconditions.
+            sender
+                .send((unsafe { libc::pthread_self() }, unsafe { libc::gettid() }))
+                .unwrap();
+            wait.recv().unwrap();
+        });
+        let (handle, tid) = receiver.recv().unwrap();
+        // SAFETY: the thread is alive until released.
+        assert_eq!(unsafe { gettid_np(handle) }, tid);
+        release.send(()).unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn system_properties_that_are_never_found_read_as_empty() {
+        let read: unsafe extern "C" fn(*const c_void, *mut c_char, *mut c_char) -> c_int =
+            function(c"__system_property_read");
+        let mut name = [1 as c_char; 32];
+        let mut value = [1 as c_char; 92];
+        // SAFETY: the buffers have the sizes bionic documents.
+        assert_eq!(
+            unsafe { read(std::ptr::null(), name.as_mut_ptr(), value.as_mut_ptr()) },
+            0
+        );
+        assert_eq!((name[0], value[0]), (0, 0));
+        let _: unsafe extern "C" fn(*const c_void, *const c_void, *mut c_void) =
+            function(c"__system_property_read_callback");
+    }
+    #[test]
+    fn functions_with_one_abi_in_both_libcs_bind_to_glibc() {
+        // What Instagram 454 calls that glibc defines with bionic's ABI.
+        for name in [
+            c"aligned_alloc",
+            c"alarm",
+            c"eventfd_read",
+            c"eventfd_write",
+            c"execle",
+            c"feclearexcept",
+            c"fetestexcept",
+            c"getpriority",
+            c"ldiv",
+            c"pthread_getcpuclockid",
+            c"readahead",
+            c"sysinfo",
+            c"tgkill",
+            c"timer_create",
+            c"timer_delete",
+            c"timer_settime",
+            c"__libc_current_sigrtmin",
+            c"__libc_current_sigrtmax",
+        ] {
+            assert_eq!(resolve(name, false), host_symbol(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn the_64_bit_stream_names_are_the_stream_functions() {
+        assert_eq!(resolve(c"fseeko64", false), resolve(c"fseeko", false));
+        assert_eq!(resolve(c"ftello64", false), resolve(c"ftello", false));
+    }
+    #[test]
+    fn the_linker_s_own_entry_points_reach_the_loader() {
+        // Meta's crash reporter asks libdl.so for these by name.
+        for name in [
+            c"__loader_android_dlopen_ext",
+            c"__loader_dl_iterate_phdr",
+            c"__loader_dladdr",
+            c"__loader_dlclose",
+            c"__loader_dlerror",
+            c"__loader_dlopen",
+            c"__loader_dlsym",
+            c"__loader_dlvsym",
+        ] {
+            assert!(resolve(name, false).is_some(), "{name:?}");
+        }
+        let dlsym: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_void) -> *mut c_void =
+            function(c"__loader_dlsym");
+        // SAFETY: RTLD_DEFAULT and a C string; the caller address is only a hint.
+        let found = unsafe { dlsym(std::ptr::null_mut(), c"strlen".as_ptr(), std::ptr::null()) };
+        assert_eq!(Some(found as usize), resolve(c"strlen", false));
+    }
 }

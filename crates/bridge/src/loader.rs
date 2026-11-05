@@ -1105,6 +1105,59 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
     }
 }
 
+/// The linker's own entry points, which bionic's libdl.so forwards to with the caller's address, the
+/// namespace hint: libraries such as Meta's crash reporter look them up there by name. This loader
+/// has one namespace, so the hint is not needed.
+pub(crate) mod linker {
+    use std::ffi::{c_char, c_int, c_void};
+
+    /// # Safety
+    /// As `dlopen`.
+    pub unsafe extern "C" fn dlopen(
+        name: *const c_char,
+        flags: c_int,
+        _caller: *const c_void,
+    ) -> *mut c_void {
+        // SAFETY: the same contract.
+        unsafe { super::dlopen(name, flags) }
+    }
+
+    /// # Safety
+    /// As `android_dlopen_ext`.
+    pub unsafe extern "C" fn android_dlopen_ext(
+        name: *const c_char,
+        flags: c_int,
+        info: *const c_void,
+        _caller: *const c_void,
+    ) -> *mut c_void {
+        // SAFETY: the same contract.
+        unsafe { super::android_dlopen_ext(name, flags, info) }
+    }
+
+    /// # Safety
+    /// As `dlsym`.
+    pub unsafe extern "C" fn dlsym(
+        handle: *mut c_void,
+        name: *const c_char,
+        _caller: *const c_void,
+    ) -> *mut c_void {
+        // SAFETY: the same contract.
+        unsafe { super::dlsym(handle, name) }
+    }
+
+    /// # Safety
+    /// As `dlsym`. Libraries here carry no symbol versions, so every version is the one symbol.
+    pub unsafe extern "C" fn dlvsym(
+        handle: *mut c_void,
+        name: *const c_char,
+        _version: *const c_char,
+        _caller: *const c_void,
+    ) -> *mut c_void {
+        // SAFETY: the same contract.
+        unsafe { super::dlsym(handle, name) }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 /// `dlsym` for guest code: an address guest code can call, its own code or a service stub,
 /// searched among guest libraries and the signature tables only, never host libraries.

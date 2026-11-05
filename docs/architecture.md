@@ -60,6 +60,8 @@ One way around this rule remains: ART calls glibc's `dlopen` first, so a library
 
 App code names files of Android's system partition by absolute path, such as Skia reading `/system/etc/fonts.xml`. The functions that take a path, such as `open`, `fopen`, `stat` and `opendir`, are shims that move `/system` to the runtime root `ANDROID_ROOT` names, as the framework's rewritten paths do; every other path reaches glibc unchanged. A segment whose file cannot be mapped executable, because its mount is `noexec` like the sandbox's `/tmp`, is read into anonymous memory instead, which costs its sharing between processes.
 
+bionic's own symbols that glibc lacks have shims: BSD's `funopen` streams over glibc's `fopencookie`, the `_ctype_` table old headers index, `pthread_gettid_np`, the linker's `__loader_dlopen` family that Meta's libraries look up in `libdl.so`, and the fortified `__write_chk` and `__umask_chk`.
+
 Not translated yet: static initializers with non-zero bionic values, such as `PTHREAD_RECURSIVE_MUTEX_INITIALIZER`. Libraries using ELF TLS, which means a minimum SDK of 29 or higher with `thread_local`, are rejected.
 
 ### ART is built for the host, not borrowed from a device
