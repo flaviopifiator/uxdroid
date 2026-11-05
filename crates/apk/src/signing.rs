@@ -680,7 +680,15 @@ fn sections(text: &[u8]) -> Result<Vec<Section<'_>>, Error> {
     Ok(sections)
 }
 
-fn verify_jar(path: &Path, file: &mut File) -> Result<Signature, Error> {
+/// Verifies the JAR signature (v1) of a signed JAR held in memory, such as an F-Droid repository's
+/// `entry.jar`, with the rules APKs get: every entry outside `META-INF/` must be signed by every
+/// signer, and the signature file must not claim a stronger scheme. Returns each signer's
+/// certificate; which of them to trust is the caller's choice.
+pub fn verify_jar_signature(jar: &[u8]) -> Result<Signature, Error> {
+    verify_jar(Path::new("<memory>"), &mut io::Cursor::new(jar))
+}
+
+fn verify_jar<R: Read + Seek>(path: &Path, file: &mut R) -> Result<Signature, Error> {
     file.seek(SeekFrom::Start(0))
         .map_err(|source| Error::Unreadable(path.to_path_buf(), source))?;
     let mut archive = ZipArchive::new(BufReader::new(&mut *file))

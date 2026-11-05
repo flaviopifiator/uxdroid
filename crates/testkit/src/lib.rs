@@ -6,6 +6,8 @@ use std::path::Path;
 
 use zip::write::SimpleFileOptions;
 
+pub mod fdroid;
+
 pub const ATTR_NAME: u32 = 0x0101_0003;
 pub const ATTR_TARGET_ACTIVITY: u32 = 0x0101_0202;
 pub const ATTR_VERSION_CODE: u32 = 0x0101_021b;
@@ -192,13 +194,18 @@ impl Axml {
 
 /// A typical manifest: a plain activity followed by the launcher one.
 pub fn sample_manifest() -> Axml {
+    app_manifest("com.example.app", 42, "1.2.3")
+}
+
+/// The manifest of [`sample_manifest`] with another package and version.
+pub fn app_manifest(package: &'static str, version_code: u32, version_name: &'static str) -> Axml {
     Axml::new()
         .start(
             "manifest",
             &[
-                plain("package", Value::Str("com.example.app")),
-                android("versionCode", ATTR_VERSION_CODE, Value::Int(42)),
-                android("versionName", ATTR_VERSION_NAME, Value::Str("1.2.3")),
+                plain("package", Value::Str(package)),
+                android("versionCode", ATTR_VERSION_CODE, Value::Int(version_code)),
+                android("versionName", ATTR_VERSION_NAME, Value::Str(version_name)),
             ],
         )
         .start(

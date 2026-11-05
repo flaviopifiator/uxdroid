@@ -15,7 +15,7 @@ use zip::ZipArchive;
 use zip::result::ZipError;
 
 pub use manifest::{Manifest, parse_manifest};
-pub use signing::{PLATFORM_SDK, Scheme, Signature, verify_signature};
+pub use signing::{PLATFORM_SDK, Scheme, Signature, verify_jar_signature, verify_signature};
 pub use splits::{Host, Kind, Part, Plan, bundle_entries, extract_bundled, plan_splits};
 
 pub(crate) const MANIFEST_ENTRY: &str = "AndroidManifest.xml";
