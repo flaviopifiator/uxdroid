@@ -91,6 +91,7 @@ public final class Launcher {
         });
         Services.register("activity", IActivityManager.class, new ActivityManager(app, once, intent, givenIntent == null));
         Services.register("activity_task", IActivityTaskManager.class, new ActivityTaskManager());
+        Packages.start(root, app);
         Services.register("package", IPackageManager.class, new PackageManager(app));
         Services.register("display", android.hardware.display.IDisplayManager.class, new DisplayService());
         Services.register("user", android.os.IUserManager.class, new UserManager());
@@ -169,11 +170,17 @@ public final class Launcher {
                 | android.content.pm.PackageManager.GET_PERMISSIONS
                 | android.content.pm.PackageManager.GET_CONFIGURATIONS;
 
+        /** Flags whose answer the record holds: the components, each with its meta-data. */
+        private static final long COMPONENTS = android.content.pm.PackageManager.GET_ACTIVITIES
+                | android.content.pm.PackageManager.GET_RECEIVERS | android.content.pm.PackageManager.GET_SERVICES
+                | android.content.pm.PackageManager.GET_PROVIDERS;
+
         private final File apk;
         private PackageParser.Package parsed;
         private final Record.Contents record;
-        private android.content.pm.ProviderInfo[] providers;
+        private Components components;
         final ApplicationInfo application;
+        /** The Activity to launch, or null for an app known only to the package manager, not started. */
         final ActivityInfo activity;
 
         private App(File apk, PackageParser.Package parsed, Record.Contents record, ApplicationInfo application,
@@ -192,7 +199,33 @@ public final class Launcher {
                 return null;
             }
             place(record.application, apk, true);
-            return new App(apk, null, record, record.application, record.activity);
+            return new App(apk, null, record, record.application,
+                    Components.withFlags(record.activity, 0, record.application));
+        }
+
+        /**
+         * Another app installed over the same data directory, known to the package manager but not
+         * started: from its record when it is valid for {@code root}, else from the framework's parse.
+         */
+        static App installed(String root, File apk) throws PackageParser.PackageParserException {
+            File file = new File(apk.getParentFile(), Record.FILE);
+            String identity = Record.identity(root, apk);
+            if (file.isFile() && Record.matches(file, identity)) {
+                try {
+                    Record.Contents record = Record.read(file, identity);
+                    place(record.application, apk, false);
+                    return new App(apk, null, record, record.application, null);
+                } catch (java.io.IOException | ReflectiveOperationException | RuntimeException e) {
+                    System.err.println("uxdroid: the install record " + file + " is not used, the APK is parsed instead: "
+                            + e.getMessage());
+                }
+            }
+            PackageParser.Package parsed = parsePackage(apk);
+            return new App(apk, parsed, null, applicationInfo(parsed, apk, false), null);
+        }
+
+        String packageName() {
+            return application.packageName;
         }
 
         static App parse(File apk, String activityName) throws PackageParser.PackageParserException {
@@ -223,11 +256,27 @@ public final class Launcher {
         }
 
         /** The app's declared providers, from its record or its parse; see {@link Providers}. */
-        synchronized android.content.pm.ProviderInfo[] providers() {
-            if (providers == null) {
-                providers = record != null ? record.providers : providers(parsed(), application);
-            }
-            return providers;
+        android.content.pm.ProviderInfo[] providers() {
+            return components().providers;
+        }
+
+        /** Every declared component with its filters, from the record or the framework's parse. */
+        synchronized Components components() {
+            if (components == null) components = record != null ? record.components : Components.of(parsed(), application);
+            return components;
+        }
+
+        /** The application's meta-data from the manifest, or null. */
+        android.os.Bundle metaData() {
+            return record != null ? record.metaData : parsed().mAppMetaData;
+        }
+
+        /** What PackageManager.getApplicationInfo answers: a copy, with meta-data only for GET_META_DATA. */
+        ApplicationInfo applicationInfo(long flags) {
+            ApplicationInfo info = new ApplicationInfo(application);
+            android.os.Bundle metaData = (flags & android.content.pm.PackageManager.GET_META_DATA) != 0 ? metaData() : null;
+            info.metaData = metaData == null ? null : new android.os.Bundle(metaData);
+            return info;
         }
 
         /**
@@ -266,13 +315,17 @@ public final class Launcher {
             return application;
         }
 
-        /** The named Activity, or the launcher Activity; null if there is none. */
+        /**
+         * The named Activity, or the launcher Activity: the first one the manifest leaves enabled, as a
+         * home screen shows only those, such as F-Droid's real screen rather than its disabled disguise.
+         * Null if there is none.
+         */
         static ActivityInfo activity(PackageParser.Package parsed, ApplicationInfo application, String activityName) {
             for (PackageParser.Activity candidate : parsed.activities) {
                 boolean chosen = activityName != null
                         ? candidate.className.equals(className(parsed.packageName, activityName))
-                        : candidate.intents.stream().anyMatch(filter -> filter.hasAction(Intent.ACTION_MAIN)
-                                && filter.hasCategory(Intent.CATEGORY_LAUNCHER));
+                        : candidate.info.enabled && candidate.intents.stream().anyMatch(filter -> filter.hasAction(
+                                Intent.ACTION_MAIN) && filter.hasCategory(Intent.CATEGORY_LAUNCHER));
                 if (chosen) {
                     ActivityInfo activity = PackageParser.generateActivityInfo(candidate, 0,
                             FrameworkPackageUserState.DEFAULT, 0);
@@ -313,11 +366,45 @@ public final class Launcher {
             if (application.processName == null) application.processName = application.packageName;
         }
 
-        /** What PackageManager.getPackageInfo answers; parses the APK only when the record holds too little. */
+        /**
+         * What PackageManager.getPackageInfo answers, with this app's ApplicationInfo; parses the APK only
+         * when the record holds too little. Components come from the record, enabled ones unless
+         * MATCH_DISABLED_COMPONENTS, as the framework's own generatePackageInfo lists them.
+         */
         android.content.pm.PackageInfo packageInfo(long flags, int userId) {
-            if (record != null && (flags & BEYOND_RECORD) == 0) return record.packageInfo();
-            return PackageParser.generatePackageInfo(parsed(), new int[0], (int) flags, 0, 0,
-                    java.util.Collections.emptySet(), FrameworkPackageUserState.DEFAULT, userId);
+            ApplicationInfo placed = applicationInfo(flags);
+            android.content.pm.PackageInfo info;
+            if (record != null && (flags & BEYOND_RECORD & ~COMPONENTS) == 0) {
+                info = record.packageInfo();
+                Components declared = components();
+                if ((flags & android.content.pm.PackageManager.GET_ACTIVITIES) != 0) {
+                    info.activities = array(Components.listed(declared.activities, this, flags, placed), ActivityInfo.class);
+                }
+                if ((flags & android.content.pm.PackageManager.GET_RECEIVERS) != 0) {
+                    info.receivers = array(Components.listed(declared.receivers, this, flags, placed), ActivityInfo.class);
+                }
+                if ((flags & android.content.pm.PackageManager.GET_SERVICES) != 0) {
+                    info.services = array(Components.listed(declared.services, this, flags, placed),
+                            android.content.pm.ServiceInfo.class);
+                }
+                if ((flags & android.content.pm.PackageManager.GET_PROVIDERS) != 0) {
+                    info.providers = array(Components.listed(declared.providers, this, flags, placed),
+                            android.content.pm.ProviderInfo.class);
+                }
+            } else {
+                info = PackageParser.generatePackageInfo(parsed(), new int[0], (int) flags, 0, 0,
+                        java.util.Collections.emptySet(), FrameworkPackageUserState.DEFAULT, userId);
+                for (android.content.pm.ComponentInfo[] kind : new android.content.pm.ComponentInfo[][] {
+                        info.activities, info.receivers, info.services, info.providers}) {
+                    if (kind != null) for (android.content.pm.ComponentInfo component : kind) component.applicationInfo = placed;
+                }
+            }
+            info.applicationInfo = placed;
+            return info;
+        }
+
+        private static <T> T[] array(java.util.List<T> list, Class<T> type) {
+            return list == null ? null : list.toArray((T[]) java.lang.reflect.Array.newInstance(type, list.size()));
         }
 
         /** The framework's parse of the APK, made the first time something needs more than the record. */
@@ -577,7 +664,31 @@ public final class Launcher {
                 android.app.ProfilerInfo profilerInfo, Bundle options) throws RemoteException {
             ActivityStack stack = ActivityStack.current;
             if (stack == null) return android.app.ActivityManager.START_INTENT_NOT_RESOLVED;
-            return stack.startFromAnyThread(intent, ActivityStack.Result.of(resultTo, resultWho, requestCode));
+            int started = stack.startFromAnyThread(intent, ActivityStack.Result.of(resultTo, resultWho, requestCode));
+            if (started == android.app.ActivityManager.START_INTENT_NOT_RESOLVED
+                    || started == android.app.ActivityManager.START_CLASS_NOT_FOUND) {
+                Packages.refuseOtherApp(intent, resolvedType);
+            }
+            return started;
+        }
+
+        /**
+         * Context.startActivities, as TaskStackBuilder and Navigation's deep links start a back stack:
+         * each intent is started in order through the task, so the last is on top. Android makes only
+         * the top one at once and the others when the user goes back; here each is made as it starts.
+         * The first that fails stops the rest, with its code.
+         */
+        public int startActivities(IApplicationThread caller, String callingPackage, String callingFeatureId,
+                Intent[] intents, String[] resolvedTypes, IBinder resultTo, Bundle options, int userId)
+                throws RemoteException {
+            int started = android.app.ActivityManager.START_SUCCESS;
+            for (int i = 0; i < intents.length; i++) {
+                started = startActivity(caller, callingPackage, callingFeatureId, intents[i],
+                        resolvedTypes == null ? null : resolvedTypes[i], i == 0 ? resultTo : null, null, -1, 0, null,
+                        options);
+                if (started < 0) return started;
+            }
+            return started;
         }
     }
 
@@ -589,7 +700,10 @@ public final class Launcher {
         }
     }
 
-    /** The handler of IPackageManager: knows the one installed app. */
+    /**
+     * The handler of IPackageManager: knows every app installed over the data directory, through
+     * {@link Packages}, so one app can look another up, resolve intents across apps and list them.
+     */
     public static final class PackageManager {
         private final App app;
         private final android.content.pm.IPackageInstaller installer = StoreServices.packageInstaller();
@@ -605,7 +719,8 @@ public final class Launcher {
 
         /** As androidx-startup reads its initializers from its provider's meta-data. */
         public android.content.pm.ProviderInfo getProviderInfo(ComponentName component, long flags, int userId) {
-            return Providers.info(app, component, flags);
+            if (component.getPackageName().equals(app.packageName())) return Providers.info(app, component, flags);
+            return (android.content.pm.ProviderInfo) Packages.info(Packages.Kind.PROVIDER, component, flags);
         }
 
         public android.content.pm.ProviderInfo resolveContentProvider(String authority, long flags, int userId) {
@@ -613,33 +728,165 @@ public final class Launcher {
         }
 
         public ApplicationInfo getApplicationInfo(String packageName, long flags, int userId) {
-            return packageName.equals(app.application.packageName) ? app.application : null;
+            return Packages.application(packageName, flags);
         }
 
         public ActivityInfo getActivityInfo(ComponentName component, long flags, int userId) {
-            if (component.equals(app.component())) return app.activity;
-            // Activities started since, which the APK was parsed for; others are not looked up.
-            return ActivityStack.current != null ? ActivityStack.current.info(component) : null;
+            return (ActivityInfo) Packages.info(Packages.Kind.ACTIVITY, component, flags);
+        }
+
+        public ActivityInfo getReceiverInfo(ComponentName component, long flags, int userId) {
+            return (ActivityInfo) Packages.info(Packages.Kind.RECEIVER, component, flags);
+        }
+
+        public android.content.pm.ServiceInfo getServiceInfo(ComponentName component, long flags, int userId) {
+            return (android.content.pm.ServiceInfo) Packages.info(Packages.Kind.SERVICE, component, flags);
         }
 
         public android.content.pm.PackageInfo getPackageInfo(String packageName, long flags, int userId) {
-            if (!packageName.equals(app.application.packageName)) return null;
-            android.content.pm.PackageInfo info = app.packageInfo(flags, userId);
-            info.applicationInfo = app.application;
-            if (info.activities != null) {
-                for (ActivityInfo activity : info.activities) activity.applicationInfo = app.application;
+            App installed = Packages.get(packageName);
+            return installed == null ? null : installed.packageInfo(flags, userId);
+        }
+
+        public android.content.pm.PackageInfo getPackageInfoVersioned(android.content.pm.VersionedPackage versioned,
+                long flags, int userId) {
+            return getPackageInfo(versioned.getPackageName(), flags, userId);
+        }
+
+        public android.content.pm.ParceledListSlice<android.content.pm.PackageInfo> getInstalledPackages(long flags,
+                int userId) {
+            java.util.List<android.content.pm.PackageInfo> list = new java.util.ArrayList<>();
+            for (App installed : Packages.all()) list.add(installed.packageInfo(flags, userId));
+            return new android.content.pm.ParceledListSlice<>(list);
+        }
+
+        public android.content.pm.ParceledListSlice<ApplicationInfo> getInstalledApplications(long flags, int userId) {
+            java.util.List<ApplicationInfo> list = new java.util.ArrayList<>();
+            for (App installed : Packages.all()) list.add(installed.applicationInfo(flags));
+            return new android.content.pm.ParceledListSlice<>(list);
+        }
+
+        public java.util.List<String> getAllPackages() {
+            java.util.List<String> names = new java.util.ArrayList<>();
+            for (App installed : Packages.all()) names.add(installed.packageName());
+            return names;
+        }
+
+        public boolean isPackageAvailable(String packageName, int userId) {
+            return Packages.get(packageName) != null;
+        }
+
+        public int getPackageUid(String packageName, long flags, int userId) {
+            App installed = Packages.get(packageName);
+            return installed == null ? android.os.Process.INVALID_UID : installed.application.uid;
+        }
+
+        public int getTargetSdkVersion(String packageName) {
+            App installed = Packages.get(packageName);
+            return installed == null ? -1 : installed.application.targetSdkVersion;
+        }
+
+        public android.content.pm.ParceledListSlice<android.content.pm.ResolveInfo> queryIntentActivities(
+                Intent intent, String resolvedType, long flags, int userId) {
+            return new android.content.pm.ParceledListSlice<>(
+                    Packages.query(Packages.Kind.ACTIVITY, intent, resolvedType, flags));
+        }
+
+        public android.content.pm.ResolveInfo resolveIntent(Intent intent, String resolvedType, long flags, int userId) {
+            return Packages.resolve(Packages.Kind.ACTIVITY, intent, resolvedType, flags);
+        }
+
+        public android.content.pm.ParceledListSlice<android.content.pm.ResolveInfo> queryIntentReceivers(
+                Intent intent, String resolvedType, long flags, int userId) {
+            return new android.content.pm.ParceledListSlice<>(
+                    Packages.query(Packages.Kind.RECEIVER, intent, resolvedType, flags));
+        }
+
+        public android.content.pm.ParceledListSlice<android.content.pm.ResolveInfo> queryIntentServices(
+                Intent intent, String resolvedType, long flags, int userId) {
+            return new android.content.pm.ParceledListSlice<>(
+                    Packages.query(Packages.Kind.SERVICE, intent, resolvedType, flags));
+        }
+
+        public android.content.pm.ResolveInfo resolveService(Intent intent, String resolvedType, long flags, int userId) {
+            return Packages.resolve(Packages.Kind.SERVICE, intent, resolvedType, flags);
+        }
+
+        public android.content.pm.ParceledListSlice<android.content.pm.ResolveInfo> queryIntentContentProviders(
+                Intent intent, String resolvedType, long flags, int userId) {
+            return new android.content.pm.ParceledListSlice<>(
+                    Packages.query(Packages.Kind.PROVIDER, intent, resolvedType, flags));
+        }
+
+        /** The state set for a component of any installed app; Android refuses an unknown package. */
+        public int getComponentEnabledSetting(ComponentName component, int userId) {
+            if (Packages.get(component.getPackageName()) == null) {
+                throw new IllegalArgumentException("Unknown component: " + component);
             }
-            return info;
+            return EnabledSettings.get(component.getPackageName(), component.getClassName());
+        }
+
+        /**
+         * Changes a component of the app itself and keeps it across starts; another app's components are
+         * the system's to change. The app is not restarted, whatever the flags, as with DONT_KILL_APP.
+         */
+        public void setComponentEnabledSetting(ComponentName component, int newState, int flags, int userId,
+                String callingPackage) {
+            if (!component.getPackageName().equals(app.packageName())) {
+                throw new SecurityException("Attempt to change component state; pid=" + android.os.Process.myPid()
+                        + ", uid=" + app.application.uid + ", component=" + component);
+            }
+            Components declared = app.components();
+            String name = component.getClassName();
+            if (Components.find(declared.activities, name) == null && Components.find(declared.receivers, name) == null
+                    && Components.find(declared.services, name) == null
+                    && Components.find(declared.providers, name) == null) {
+                throw new IllegalArgumentException("Component class " + name + " does not exist in "
+                        + component.getPackageName());
+            }
+            EnabledSettings.set(component.getPackageName(), name, newState);
+        }
+
+        public void setComponentEnabledSettings(
+                java.util.List<android.content.pm.PackageManager.ComponentEnabledSetting> settings, int userId,
+                String callingPackage) {
+            for (android.content.pm.PackageManager.ComponentEnabledSetting setting : settings) {
+                setComponentEnabledSetting(setting.getComponentName(), setting.getEnabledState(),
+                        setting.getEnabledFlags(), userId, callingPackage);
+            }
+        }
+
+        /** No app is turned off as a whole here. */
+        public int getApplicationEnabledSetting(String packageName, int userId) {
+            if (Packages.get(packageName) == null) throw new IllegalArgumentException("Unknown package: " + packageName);
+            return android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
+        }
+
+        /**
+         * Whether the app may ask to install others: when its manifest requests REQUEST_INSTALL_PACKAGES,
+         * since a requested permission counts as granted here. Android answers only for the caller.
+         */
+        public boolean canRequestPackageInstalls(String packageName, int userId) {
+            if (!packageName.equals(app.packageName())) {
+                throw new SecurityException("Caller uid " + app.application.uid + " does not own package " + packageName);
+            }
+            return Permissions.requested(android.Manifest.permission.REQUEST_INSTALL_PACKAGES);
         }
 
         /** Installed from a file, as adb would: no installer, initiator or origin. */
         public android.content.pm.InstallSourceInfo getInstallSourceInfo(String packageName, int userId) {
-            if (!packageName.equals(app.application.packageName)) return null;
+            if (Packages.get(packageName) == null) return null;
             return new android.content.pm.InstallSourceInfo(null, null, null, null);
         }
 
         public String[] getPackagesForUid(int uid) {
-            return uid == app.application.uid ? new String[] {app.application.packageName} : null;
+            App installed = Packages.byUid(uid);
+            return installed == null ? null : new String[] {installed.packageName()};
+        }
+
+        public String getNameForUid(int uid) {
+            App installed = Packages.byUid(uid);
+            return installed == null ? null : installed.packageName();
         }
 
         public boolean hasSystemFeature(String name, int version) {

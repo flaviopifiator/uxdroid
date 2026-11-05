@@ -76,8 +76,9 @@ final class Providers {
         return null;
     }
 
+    /** Its manifest's state, or the one the app set since; see {@link EnabledSettings}. */
     private static boolean enabled(Launcher.App app, ProviderInfo info) {
-        return info.enabled && app.application.enabled;
+        return EnabledSettings.enabled(app, info);
     }
 
     private static boolean inAppProcess(Launcher.App app, ProviderInfo info) {

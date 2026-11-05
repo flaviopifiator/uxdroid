@@ -26,7 +26,7 @@ final class Record {
     private Record() {}
 
     static final String FILE = "package.record";
-    private static final String MAGIC = "uxdroid package record 2";
+    private static final String MAGIC = "uxdroid package record 3";
     /** Files of the runtime a record depends on: the classes it holds and the natives its library lists. */
     private static final String[] RUNTIME_FILES = {
         "framework/framework.jar", "framework/uxdroid-system.jar", "framework/natives.txt",
@@ -36,16 +36,19 @@ final class Record {
     static final class Contents {
         final android.content.pm.ApplicationInfo application;
         final android.content.pm.ActivityInfo activity;
-        /** Every provider the manifest declares, with its meta-data and URI permission patterns. */
-        final android.content.pm.ProviderInfo[] providers;
+        /** The application's meta-data, which getApplicationInfo gives with GET_META_DATA; null if none. */
+        final Bundle metaData;
+        /** Every component the manifest declares, with its meta-data and intent filters. */
+        final Components components;
         /** PackageManager.getPackageInfo with flags 0, decoded again for each caller. */
         final byte[] packageInfo;
 
         Contents(android.content.pm.ApplicationInfo application, android.content.pm.ActivityInfo activity,
-                android.content.pm.ProviderInfo[] providers, byte[] packageInfo) {
+                Bundle metaData, Components components, byte[] packageInfo) {
             this.application = application;
             this.activity = activity;
-            this.providers = providers;
+            this.metaData = metaData;
+            this.components = components;
             this.packageInfo = packageInfo;
         }
 
@@ -78,11 +81,12 @@ final class Record {
     }
 
     /**
-     * Writes a record. Providers whose applicationInfo is {@code application} hold a reference to it,
-     * so a read gives them back the very ApplicationInfo the launcher places.
+     * Writes a record. Components whose applicationInfo is {@code application} hold a reference to it,
+     * so a read gives them back the very ApplicationInfo the launcher places; the launcher activity is
+     * one of the components, so it is the same object as its entry there.
      */
     static void write(File file, String identity, android.content.pm.ApplicationInfo application,
-            android.content.pm.ActivityInfo activity, android.content.pm.ProviderInfo[] providers,
+            android.content.pm.ActivityInfo activity, Bundle metaData, Components components,
             android.content.pm.PackageInfo packageInfo) throws IOException, ReflectiveOperationException {
         Writer info = new Writer();
         info.value(packageInfo);
@@ -91,7 +95,15 @@ final class Record {
         out.data.writeUTF(identity);
         out.value(application);
         out.value(activity);
-        out.value(providers);
+        out.value(metaData);
+        out.value(components.activities);
+        out.value(components.activityFilters);
+        out.value(components.receivers);
+        out.value(components.receiverFilters);
+        out.value(components.services);
+        out.value(components.serviceFilters);
+        out.value(components.providers);
+        out.value(components.providerFilters);
         out.bytes(info.toByteArray());
         java.nio.file.Files.write(file.toPath(), out.toByteArray());
     }
@@ -113,12 +125,18 @@ final class Record {
         if (!identity.equals(in.data.readUTF())) throw new IOException("the runtime or the APK changed since install");
         android.content.pm.ApplicationInfo application = (android.content.pm.ApplicationInfo) in.value();
         android.content.pm.ActivityInfo activity = (android.content.pm.ActivityInfo) in.value();
-        android.content.pm.ProviderInfo[] providers = (android.content.pm.ProviderInfo[]) in.value();
-        return new Contents(application, activity, providers, in.bytes());
+        Bundle metaData = (Bundle) in.value();
+        Components components = new Components((android.content.pm.ActivityInfo[]) in.value(),
+                (android.content.IntentFilter[][]) in.value(), (android.content.pm.ActivityInfo[]) in.value(),
+                (android.content.IntentFilter[][]) in.value(), (android.content.pm.ServiceInfo[]) in.value(),
+                (android.content.IntentFilter[][]) in.value(), (android.content.pm.ProviderInfo[]) in.value(),
+                (android.content.IntentFilter[][]) in.value());
+        return new Contents(application, activity, metaData, components, in.bytes());
     }
 
     private static final byte NULL = 0, REFERENCE = 1, OBJECT = 2, STRING = 3, ARRAY = 4, BUNDLE = 5, LIST = 6,
-            BOOLEAN = 7, BYTE = 8, CHAR = 9, SHORT = 10, INT = 11, LONG = 12, FLOAT = 13, DOUBLE = 14, UUID = 15;
+            BOOLEAN = 7, BYTE = 8, CHAR = 9, SHORT = 10, INT = 11, LONG = 12, FLOAT = 13, DOUBLE = 14, UUID = 15,
+            SET = 16;
 
     /** Instance fields of a class and its superclasses, in a fixed order. */
     private static List<Field> fields(Class<?> type) {
@@ -223,6 +241,12 @@ final class Record {
                     data.writeByte(LIST);
                     data.writeInt(list.size());
                     for (Object element : list) value(element);
+                } else if (type == android.util.ArraySet.class) {
+                    // An IntentFilter's actions: its elements, since its own arrays hold Objects.
+                    android.util.ArraySet<?> set = (android.util.ArraySet<?>) value;
+                    data.writeByte(SET);
+                    data.writeInt(set.size());
+                    for (Object element : set) value(element);
                 } else if (type.getName().startsWith("android.")) {
                     data.writeByte(OBJECT);
                     string(type.getName());
@@ -296,6 +320,12 @@ final class Record {
                     seen.add(list);
                     for (int i = data.readInt(); i > 0; i--) list.add(value());
                     return list;
+                }
+                case SET: {
+                    android.util.ArraySet<Object> set = new android.util.ArraySet<>();
+                    seen.add(set);
+                    for (int i = data.readInt(); i > 0; i--) set.add(value());
+                    return set;
                 }
                 case OBJECT: {
                     Class<?> type = Class.forName(string());

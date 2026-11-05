@@ -99,15 +99,6 @@ final class ActivityStack {
         return entries.isEmpty() ? null : entries.get(entries.size() - 1).token;
     }
 
-    ActivityInfo info(ComponentName component) {
-        for (Entry entry : entries) {
-            if (entry.info.packageName.equals(component.getPackageName()) && entry.info.name.equals(component.getClassName())) {
-                return entry.info;
-            }
-        }
-        return null;
-    }
-
     /** The intent's activity: the one it names, else the one whose filter takes it, else the launcher's. */
     ActivityInfo resolve(Intent intent, String named) throws Refusal {
         String packageName = app.application.packageName;
@@ -184,7 +175,7 @@ final class ActivityStack {
      * The app's own startActivity, which Instrumentation turns into an ActivityManager result code: an
      * intent for one of the app's activities starts as {@link #start} does, with FLAG_ACTIVITY_CLEAR_TASK
      * first finishing the task; one for another app's activity, or that none of the app's takes, has no
-     * activity here, since no other app is installed, and fails with ActivityNotFoundException.
+     * activity in this task and fails with ActivityNotFoundException; see {@link Packages#refuseOtherApp}.
      * With {@code check}, only the manifest is
      * read, so any thread may ask, and an intent the app takes answers START_SUCCESS without starting.
      */

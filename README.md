@@ -193,7 +193,7 @@ With the framework's runtime, found as for `uxdroid run` through `UXDROID_RUNTIM
 |------|-----------------------------------------------|
 | `base.apk` | A copy of the APK, which the launcher is given: `Launcher <runtime> <libuxdroid_system.so> <data>/app/<package>/base.apk` |
 | `oat/x86_64/base.odex`, `base.vdex` | The DEX compiled by `dex2oat` with the `verify` filter, against the boot image and the framework's class loader, which ART maps instead of verifying the code at each start. A split with code gets `split_<name>.odex`, compiled after the base and the splits before it in the same class loader |
-| `package.record` | The framework's own `PackageParser` result: `ApplicationInfo`, the launcher `ActivityInfo` and `PackageInfo`, read back instead of parsing the manifest |
+| `package.record` | The framework's own `PackageParser` result: `ApplicationInfo` and its meta-data, the launcher `ActivityInfo`, every activity, receiver, service and provider with its meta-data and intent filters, and `PackageInfo`, read back instead of parsing the manifest, also by every other app's PackageManager that looks this one up |
 | `defaults.so` | The default bodies of every framework native, bound by ART by name on first call, instead of a stub per native made at each start |
 
 The report then has a second line:

@@ -18,11 +18,15 @@ APK="$RUNTIME/samples/framework/compat.apk"
 [ -r "$APK" ] || fail "no $APK: run runtime/framework/build_system.sh"
 UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$APK" --data "$ANDROID_DATA" >"$WORK/install" 2>&1 \
     || { cat "$WORK/install"; fail "install"; }
+# A second app over the same data directory, which the compat app's PackageManager must know.
+PEER="$RUNTIME/samples/framework/peer.apk"
+UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$PEER" --data "$ANDROID_DATA" >"$WORK/install-peer" 2>&1 \
+    || { cat "$WORK/install-peer"; fail "install of the peer app"; }
 timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher --once \
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|graphics32|features|textservices|pending|activity|no activity|launched|result|broadcast|provider|stores) " "$WORK/out"
+grep -E "^(identity|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|graphics32|features|textservices|pending|activity|no activity|launched|result|broadcast|provider|stores|packages) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -105,6 +109,7 @@ grep -q "STDERR: .*STDERR: " "$WORK/out" && fail "the log loops through the app'
 # takes fails with ActivityNotFoundException, as on Android.
 expect "^activity created com\.example\.compat\.SecondActivity by class$" "an activity the app started by class was not made"
 expect "^activity created com\.example\.compat\.SecondActivity by action$" "an activity the app started by action was not made"
+expect "^activity created com\.example\.compat\.SecondActivity by activities$" "an activity the app started with startActivities was not made"
 expect "^no activity takes No Activity found to handle Intent$" "an intent no activity takes did not fail as on Android"
 # A PendingIntent is the same for the same request, and sending one for an activity starts it.
 expect "^pending broadcast true same true creator com\.example\.compat absent true$" "PendingIntents are not made as on Android"
@@ -151,5 +156,43 @@ expect "^stores domains allowed true hosts \{links\.example\.com=0\}$" \
 expect "^stores domains of another package not found$" "domain verification answered for another package"
 expect "^stores jobs pending 0 job null$" "JobScheduler does not list its pending jobs"
 expect "^stores accounts 0 google 0 authenticators 0$" "AccountManager does not list its accounts"
+# 12. The PackageManager knows every app installed over the data directory, as an app store asks it:
+# the app's own meta-data with GET_META_DATA only (Sentry stops without it), the other app's package,
+# meta-data, uid, launcher, exported activities, services and providers by intent and by name, and its
+# own default activity. An app turns its own components off, not another's, and that lasts.
+expect "^packages meta-data auto-init false without flag null$" \
+    "getApplicationInfo with GET_META_DATA did not give the app's meta-data, or gave it without the flag"
+expect "^packages installed com\.example\.compat,com\.example\.peer applications 2$" \
+    "getInstalledPackages does not list both installed apps"
+expect "^packages peer version 1\.3 3 meta-data peer$" "another app's package or meta-data is not known"
+expect "^packages uid peer application true named com\.example\.peer$" "another app's uid is not its own"
+expect "^packages missing not found$" "a package nobody installed was found"
+expect "^packages launch peer com\.example\.peer\.PeerActivity own com\.example\.compat\.CompatActivity$" \
+    "getLaunchIntentForPackage does not find the launcher activities"
+expect "^packages view peer handlers com\.example\.peer\.ViewerActivity resolved com\.example\.peer\.ViewerActivity https none$" \
+    "an intent another app takes is not resolved to its exported activity alone"
+expect "^packages service com\.example\.peer\.PeerService meta-data bound$" "another app's service is not found"
+expect "^packages providers com\.example\.peer\.PeerProvider$" "another app's provider is not found by its intent"
+expect "^packages activity com\.example\.peer\.ViewerActivity exported true application com\.example\.peer$" \
+    "another app's activity is not found by name"
+expect "^packages toggled before 0 found 1 after 2 found 0$" "a component the app turned off is still offered"
+expect "^packages toggled another app refused$" "an app changed another app's component"
+expect "^packages can request installs true$" "an app that asks to install others may not"
+expect "^packages start other app refused uxdroid cannot start com\.example\.peer/\.ViewerActivity from com\.example\.compat: it is another app" \
+    "starting another app's activity did not fail naming it"
+[ "$(cat "$ANDROID_DATA/system/components/com.example.compat" 2>/dev/null)" = "2 com.example.compat.ToggledActivity" ] \
+    || fail "the component setting was not kept in system/components"
 expect "^launched com\.example\.compat/\.CompatActivity " "the activity was not launched"
-echo "ok: the app has its own identity, storage and the system services the corpus asks for"
+# The other app, started next, sees what the first one set and declared; the first one's install
+# record is gone, so its APK is parsed instead.
+rm "$ANDROID_DATA/app/com.example.compat/package.record"
+timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher --once \
+    "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.peer/base.apk" >"$WORK/out" 2>&1 \
+    || fail "the peer app: exit $?"
+grep -E "^peer " "$WORK/out"
+expect "^peer sees compat toggled 2 found 0$" "a component setting did not last into another app's start"
+expect "^peer resolves compat launcher com\.example\.compat\.CompatActivity auto-init false$" \
+    "an app without its install record is not known from its APK"
+expect "^peer own launcher com\.example\.peer\.PeerActivity$" "an app does not find its own launcher activity"
+expect "^launched com\.example\.peer/\.PeerActivity " "the peer app was not launched"
+echo "ok: the app has its own identity, storage and the system services the corpus asks for, and knows the other installed app"

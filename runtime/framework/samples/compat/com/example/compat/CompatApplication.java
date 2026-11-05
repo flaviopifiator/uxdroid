@@ -26,6 +26,7 @@ public class CompatApplication extends Application {
         broadcasts();
         providers();
         stores();
+        PackageQueries.print(this);
     }
 
     /** The app's own providers answer through ContentResolver; a disabled one has no authority. */
