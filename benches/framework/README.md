@@ -153,7 +153,7 @@ Against milestone 3's own platform, to a first frame:
 - Warm, the framework's sample APK takes 7.1 times as long (123.8 against 17.5 ms), and cold 4.3 times (728 against 170 ms).
 - It uses 4.6 times the peak RSS (146.8 against 31.6 MiB) and 3.9 times the private dirty memory (19.5 against 5.0 MiB). Most of its RSS is clean, shared file pages of the framework; private dirty, the memory that no other process can share, is 19.5 MiB.
 - The two apps are not the same: milestone 3's sample paints one color and a text with our platform, while the framework's sample goes through `ActivityThread`, `ViewRootImpl` and a decor view. This shows the price of AOSP's framework, not of equal work.
-- Against the spike (L2 in `odd/tasks/real-framework.md`, a similar `TextView` program, not the same one): private dirty fell from 28 to 10.9 MiB, RSS from 137 to 116 MiB, warm time from 205 to 82 ms and cold time from 0.9 s to 0.67 s.
+- Against the spike (an earlier prototype with a similar `TextView` program, not the same one): private dirty fell from 28 to 10.9 MiB, RSS from 137 to 116 MiB, warm time from 205 to 82 ms and cold time from 0.9 s to 0.67 s.
 
 RustDesk, a real Flutter app, reaches its first frame in 250 ms warm and under 1 s cold, with 87.5 MiB private dirty; most of that is the Dart VM, Flutter's engine and the software-composed frame buffers, which this benchmark does not break down.
 
