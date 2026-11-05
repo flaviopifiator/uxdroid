@@ -1368,6 +1368,25 @@ fn a_repository_over_plain_http_is_refused_unless_it_is_on_this_machine() {
         ],
     );
     assert_eq!(lookalike.status.code(), Some(1));
+    // A user name before `@` must not make another host look like this machine.
+    for url in [
+        "http://127.0.0.1@example.org/repo",
+        "http://localhost:80@example.org/repo",
+        "https://user@example.org/repo",
+    ] {
+        let output = uxdroid(
+            &data,
+            &[
+                "sources",
+                "add",
+                "userinfo",
+                url,
+                "--fingerprint",
+                &fingerprint,
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "{url}");
+    }
 }
 
 #[test]

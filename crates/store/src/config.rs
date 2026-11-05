@@ -105,7 +105,11 @@ pub fn normalize_url(url: &str) -> Result<String, Error> {
             .filter(|rest| loopback(rest.split('/').next().unwrap_or_default()))
     });
     let valid = rest.is_some_and(|rest| {
-        !rest.is_empty() && !rest.starts_with('/') && !rest.contains(['?', '#', '\\'])
+        // No user name before the host: `localhost:80@example.org` names example.org.
+        !rest.is_empty()
+            && !rest.starts_with('/')
+            && !rest.contains(['?', '#', '\\'])
+            && !rest.split('/').next().unwrap_or_default().contains('@')
     }) && url.len() <= MAX_URL
         && url.bytes().all(|byte| byte.is_ascii_graphic());
     if valid {
