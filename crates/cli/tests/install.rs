@@ -1705,6 +1705,41 @@ fn an_update_by_a_rotated_key_installs_when_its_lineage_trusts_the_installed_sig
 }
 
 #[test]
+fn an_update_signed_by_the_installed_key_and_another_is_refused() {
+    let dir = scratch("added-signer");
+    let data = dir.join("data");
+    let old = dir.join("old.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib(ABI, "libold.so")
+        .write_signed(&old, &Key::test());
+    assert_eq!(install(&old, &data).status.code(), Some(0));
+    let signer = data.join("app/.com.example.app.signer");
+    let before = std::fs::read_to_string(&signer).unwrap();
+
+    // Android compares signer sets exactly: a second signer makes another app.
+    let new = dir.join("two.apk");
+    let bytes = Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib(ABI, "libnew.so")
+        .signed_by_all(&[&Key::test(), &Key::other()]);
+    std::fs::write(&new, bytes).unwrap();
+    let output = install(&new, &data);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        text(&output.stderr).contains("is installed signed by a different certificate"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&signer).unwrap(), before);
+    assert_eq!(
+        listing(&data.join("data/com.example.app/lib")),
+        ["libold.so"]
+    );
+}
+
+#[test]
 fn an_update_by_a_rotated_key_is_refused_when_its_lineage_withholds_the_installed_data() {
     let dir = scratch("rotated-no-data");
     let data = dir.join("data");

@@ -784,8 +784,10 @@ pub(crate) fn install(apks: &[&Path], data: &Path, origin: &Origin) -> Result<Re
         Ok(installed) => {
             let installed: Vec<&str> = installed.lines().collect();
             // As Android, an update by a rotated key is the same app when its proof of rotation
-            // names the installed signer and lets the new key keep that app's data.
-            let rotated = matches!(&installed[..], [one] if base.signature.descends_from(one, INSTALLED_DATA));
+            // names the installed signer and lets the new key keep that app's data. Rotation is
+            // for one signer only: signer sets otherwise compare exactly.
+            let rotated = fingerprints.len() == 1
+                && matches!(&installed[..], [one] if base.signature.descends_from(one, INSTALLED_DATA));
             if installed != fingerprints && !rotated {
                 return Err(format!(
                     "{} is installed signed by a different certificate, so this update is refused: installed {}, update {}",

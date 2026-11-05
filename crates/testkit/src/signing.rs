@@ -198,8 +198,27 @@ pub(crate) fn sign_v2(zip: &[u8], key: &Key) -> Vec<u8> {
 /// As [`sign_v2`], with the signature labelled `algorithm` whatever the key, to forge one.
 pub(crate) fn sign_v2_as(zip: &[u8], key: &Key, algorithm: u32) -> Vec<u8> {
     let (_, _, digest) = layout(zip);
+    insert_block(
+        zip,
+        BLOCK_V2,
+        &sequence(&[v2_signer(&digest, key, algorithm)]),
+    )
+}
+
+/// The archive signed with v2 by every key in `keys`, one signer each, as apksigner signs an APK
+/// with several signers.
+pub(crate) fn sign_v2_by_all(zip: &[u8], keys: &[&Key]) -> Vec<u8> {
+    let (_, _, digest) = layout(zip);
+    let signers: Vec<Vec<u8>> = keys
+        .iter()
+        .map(|key| v2_signer(&digest, key, ECDSA_SHA256))
+        .collect();
+    insert_block(zip, BLOCK_V2, &sequence(&signers))
+}
+
+fn v2_signer(digest: &[u8], key: &Key, algorithm: u32) -> Vec<u8> {
     let mut algorithm_digest = algorithm.to_le_bytes().to_vec();
-    algorithm_digest.extend(prefixed(&digest));
+    algorithm_digest.extend(prefixed(digest));
     let signed_data = [
         sequence(&[algorithm_digest]),
         sequence(std::slice::from_ref(&key.certificate)),
@@ -208,13 +227,12 @@ pub(crate) fn sign_v2_as(zip: &[u8], key: &Key, algorithm: u32) -> Vec<u8> {
     .concat();
     let mut signature = algorithm.to_le_bytes().to_vec();
     signature.extend(prefixed(&key.sign(&signed_data)));
-    let signer = [
+    [
         prefixed(&signed_data),
         sequence(&[signature]),
         prefixed(&key.public_key),
     ]
-    .concat();
-    insert_block(zip, BLOCK_V2, &sequence(&[signer]))
+    .concat()
 }
 
 /// One past signer of a rotated key: its key, the capabilities it keeps, and, to forge a lineage,

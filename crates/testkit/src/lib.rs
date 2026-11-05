@@ -336,6 +336,11 @@ impl Apk {
         signing::sign_v2_as(&self.bytes(), key, algorithm)
     }
 
+    /// The archive signed with v2 by every key in `keys`, one signer each.
+    pub fn signed_by_all(&self, keys: &[&Key]) -> Vec<u8> {
+        signing::sign_v2_by_all(&self.bytes(), keys)
+    }
+
     pub fn write_signed(&self, path: &Path, key: &Key) {
         std::fs::write(path, self.signed_bytes(key)).unwrap();
     }
