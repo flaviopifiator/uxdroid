@@ -1668,6 +1668,7 @@ fn rotated_update(dir: &Path, old: &Key, new: &Key, flags: u32) -> PathBuf {
         key: old,
         flags,
         forged_by: None,
+        algorithm: None,
     }];
     let bytes = Apk::new()
         .manifest(&sample_manifest())

@@ -330,6 +330,12 @@ impl Apk {
         signing::sign_v3(&self.bytes(), key, past, last, block)
     }
 
+    /// The archive signed with v2 by `key`, its signature labelled with the algorithm ID
+    /// `algorithm` whatever the key is, as a forger would.
+    pub fn signed_bytes_as(&self, key: &Key, algorithm: u32) -> Vec<u8> {
+        signing::sign_v2_as(&self.bytes(), key, algorithm)
+    }
+
     pub fn write_signed(&self, path: &Path, key: &Key) {
         std::fs::write(path, self.signed_bytes(key)).unwrap();
     }

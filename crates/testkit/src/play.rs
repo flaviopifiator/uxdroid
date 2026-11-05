@@ -111,6 +111,8 @@ pub struct PlayApp {
     /// What the delivery states of each file instead of the truth, by its name.
     pub stated_sha256: BTreeMap<String, Vec<u8>>,
     pub stated_size: BTreeMap<String, u64>,
+    /// The files, by name, whose delivery states no hash at all.
+    pub unhashed: Vec<String>,
     /// The address the delivery gives each file, instead of the fake's own, by its name.
     pub urls: BTreeMap<String, String>,
 }
@@ -139,6 +141,7 @@ impl PlayApp {
             delivery_status: 1,
             stated_sha256: BTreeMap::new(),
             stated_size: BTreeMap::new(),
+            unhashed: Vec::new(),
             urls: BTreeMap::new(),
         }
     }
@@ -597,18 +600,20 @@ fn serve(stream: TcpStream, state: &Mutex<State>, port: u16, repo: Option<&Path>
             let mut data = Proto::new()
                 .uint(1, size("base", base))
                 .string(3, &url("base"))
-                .message(5, Proto::new().string(1, "a").string(2, "42"))
-                .string(19, &base64url(&sha256("base", base)))
-                .uint(29, app.version_code);
+                .message(5, Proto::new().string(1, "a").string(2, "42"));
+            if !app.unhashed.iter().any(|name| name == "base") {
+                data = data.string(19, &base64url(&sha256("base", base)));
+            }
+            data = data.uint(29, app.version_code);
             for (name, apk) in &app.files[1..] {
-                data = data.message(
-                    15,
-                    Proto::new()
-                        .string(1, name)
-                        .uint(2, size(name, apk))
-                        .string(5, &url(name))
-                        .string(9, &base64url(&sha256(name, apk))),
-                );
+                let mut split = Proto::new()
+                    .string(1, name)
+                    .uint(2, size(name, apk))
+                    .string(5, &url(name));
+                if !app.unhashed.contains(name) {
+                    split = split.string(9, &base64url(&sha256(name, apk)));
+                }
+                data = data.message(15, split);
             }
             let answer = wrapper(Proto::new().message(
                 21,

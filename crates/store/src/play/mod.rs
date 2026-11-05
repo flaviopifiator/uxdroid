@@ -342,6 +342,9 @@ impl<'a> Play<'a> {
             }
         }
         for file in &files {
+            if file.sha256.is_none() && file.sha1.is_none() {
+                return Err(refuse(format!("states no hash for {}", file.name)));
+            }
             if file.size == 0 || file.size > MAX_APK_BYTES {
                 return Err(refuse(format!(
                     "gives {} a size of {} bytes",

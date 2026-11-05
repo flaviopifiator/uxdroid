@@ -634,7 +634,8 @@ fn check_origin(base: &Part, origin: &Origin) -> Result<(), String> {
         expected.sort();
         expected.dedup();
         let actual = base.signature.fingerprints();
-        // A source may name the certificate a rotated key started from, as Google Play does.
+        // A source may name the certificate a rotated key started from, as Google Play does, as
+        // long as the proof of rotation has not revoked it.
         let rotated = matches!(&expected[..], [one] if base.signature.descends_from(one, 0));
         if actual != expected && !rotated {
             return Err(format!(

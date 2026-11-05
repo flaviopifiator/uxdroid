@@ -94,13 +94,14 @@ impl Signature {
     }
 
     /// Whether the certificate with SHA-256 `fingerprint` signs this, or signed an earlier key it
-    /// rotated from with every capability in `needed`.
+    /// rotated from with every capability in `needed`. A past certificate whose capabilities were
+    /// all removed is revoked, as apksigner's lineage records a revocation, and matches nothing.
     pub fn descends_from(&self, fingerprint: &str, needed: u32) -> bool {
         self.fingerprints().iter().any(|own| own == fingerprint)
             || self
                 .past_fingerprints()
                 .iter()
-                .any(|(past, flags)| past == fingerprint && flags & needed == needed)
+                .any(|(past, flags)| past == fingerprint && *flags != 0 && flags & needed == needed)
     }
 }
 
@@ -493,6 +494,11 @@ fn past_signers(lineage: &[u8], signer: &[u8]) -> Result<Vec<(Vec<u8>, u32)>, Er
             })?;
             let key = der::certificate(key)
                 .map_err(|reason| refused(&format!("has a malformed certificate: {reason}")))?;
+            if !algorithm.fits(key.public_key) {
+                return Err(refused(
+                    "names a signature algorithm that does not fit the key it rotated from",
+                ));
+            }
             algorithm
                 .verify(key.public_key, signed, signature)
                 .map_err(|_| refused("is not signed by the key it rotated from"))?;
@@ -637,27 +643,59 @@ struct Algorithm {
     hash: Hash,
     /// For RSA keys; EC keys ignore it.
     padding: Padding,
+    /// The kind of key the ID says signs with it: a signature labelled for one kind of key and
+    /// made by another is refused, as Android refuses it.
+    key: KeyKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyKind {
+    Rsa,
+    Ec,
+}
+
+/// The kind of the DER `SubjectPublicKeyInfo` `public_key`, among those this verifier supports.
+fn key_kind(public_key: &[u8]) -> Option<KeyKind> {
+    if rsa::RsaPublicKey::from_public_key_der(public_key).is_ok() {
+        Some(KeyKind::Rsa)
+    } else if p256::PublicKey::from_public_key_der(public_key).is_ok()
+        || p384::PublicKey::from_public_key_der(public_key).is_ok()
+    {
+        Some(KeyKind::Ec)
+    } else {
+        None
+    }
 }
 
 impl Algorithm {
     /// The signature algorithm IDs of APK Signature Scheme v2 and v3. DSA and the verity variants,
     /// which sign a Merkle tree root, are not supported.
     fn from_id(id: u32) -> Option<Self> {
-        let (hash, padding) = match id {
-            0x0101 => (Hash::Sha256, Padding::Pss),
-            0x0102 => (Hash::Sha512, Padding::Pss),
-            0x0103 | 0x0201 => (Hash::Sha256, Padding::Pkcs1),
-            0x0104 | 0x0202 => (Hash::Sha512, Padding::Pkcs1),
+        let (hash, padding, key) = match id {
+            0x0101 => (Hash::Sha256, Padding::Pss, KeyKind::Rsa),
+            0x0102 => (Hash::Sha512, Padding::Pss, KeyKind::Rsa),
+            0x0103 => (Hash::Sha256, Padding::Pkcs1, KeyKind::Rsa),
+            0x0104 => (Hash::Sha512, Padding::Pkcs1, KeyKind::Rsa),
+            0x0201 => (Hash::Sha256, Padding::Pkcs1, KeyKind::Ec),
+            0x0202 => (Hash::Sha512, Padding::Pkcs1, KeyKind::Ec),
             _ => return None,
         };
-        Some(Self { hash, padding })
+        Some(Self { hash, padding, key })
     }
 
     fn rank(self) -> (Hash, bool) {
         (self.hash, self.padding == Padding::Pss)
     }
 
+    /// Whether `public_key` is of the kind this algorithm signs with.
+    fn fits(self, public_key: &[u8]) -> bool {
+        key_kind(public_key) == Some(self.key)
+    }
+
     fn verify(self, public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), Error> {
+        if !self.fits(public_key) {
+            return Err(bad("a signer's signature algorithm does not fit its key"));
+        }
         verify_with_key(public_key, self.hash, self.padding, message, signature)
     }
 }

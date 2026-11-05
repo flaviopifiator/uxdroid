@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use uxdroid_testkit::fdroid::{self, App, Version, sha256_hex};
-use uxdroid_testkit::{Apk, Key, app_manifest, dex};
+use uxdroid_testkit::{Apk, BLOCK_V31, INSTALLED_DATA, Key, Past, app_manifest, dex};
 
 /// The ABI this host runs apps with, and two it does not.
 const ABI: &str = if cfg!(target_arch = "aarch64") {
@@ -1458,5 +1458,45 @@ fn uxdroid_command() -> Command {
             command
         }
         None => Command::new(env!("CARGO_BIN_EXE_uxdroid")),
+    }
+}
+
+#[test]
+fn an_index_may_name_the_certificate_a_rotated_key_started_from_unless_it_was_revoked() {
+    for (flags, installs) in [(INSTALLED_DATA, true), (0, false)] {
+        let dir = scratch(&format!("rotated-index-{flags}"));
+        let (old, new) = (Key::test(), Key::other());
+        let past = [Past {
+            key: &old,
+            flags,
+            forged_by: None,
+            algorithm: None,
+        }];
+        let notes = "com.example.notes";
+        let bytes = Apk::new()
+            .manifest(&app_manifest(notes, 1, "1.0"))
+            .file("classes.dex", &dex(1, 1))
+            .signed_rotated(&past, &new, BLOCK_V31);
+        // The index names the original certificate, as a repository that kept it would.
+        let version = Version::new(notes, 1, "1.0", bytes, &old);
+        let fixture = repository(
+            &dir,
+            &[App::new(notes, "Notes", "Write markdown", UPDATED).version(version)],
+        );
+        let output = uxdroid(&fixture.data, &["install", notes]);
+        if installs {
+            ok(&output);
+        } else {
+            assert_eq!(output.status.code(), Some(1));
+            assert!(
+                text(&output.stderr).contains(&format!(
+                    "is signed by {}, and its index says {}, so it is refused",
+                    new.fingerprint(),
+                    old.fingerprint()
+                )),
+                "{}",
+                text(&output.stderr)
+            );
+        }
     }
 }

@@ -10,6 +10,17 @@ use uxdroid_testkit::fdroid::{self, Version};
 use uxdroid_testkit::play::{AAS_TOKEN, Answer, FakePlay, OAUTH_TOKEN, PlayApp, Proto};
 use uxdroid_testkit::{Apk, BLOCK_V31, Key, Past, app_manifest, dex, split_manifest};
 
+/// The ABI this host runs apps with, which Play's ABI split is for.
+const ABI: &str = if cfg!(target_arch = "aarch64") {
+    "arm64-v8a"
+} else {
+    "x86_64"
+};
+const ABI_SPLIT: &str = if cfg!(target_arch = "aarch64") {
+    "config.arm64_v8a"
+} else {
+    "config.x86_64"
+};
 const FIRST: u64 = 1_793_000_000_000;
 const UPDATED: u64 = 1_793_273_970_519; // 2026-10-29
 const CHAT: &str = "com.example.chat";
@@ -26,8 +37,17 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// The built `uxdroid`, started through `UXDROID_TEST_RUNNER` when that is set, as the aarch64
+/// build is under QEMU user.
 fn command(data: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_uxdroid"));
+    let mut command = match std::env::var_os("UXDROID_TEST_RUNNER") {
+        Some(runner) => {
+            let mut command = Command::new(runner);
+            command.arg(env!("CARGO_BIN_EXE_uxdroid"));
+            command
+        }
+        None => Command::new(env!("CARGO_BIN_EXE_uxdroid")),
+    };
     command
         .args(args)
         .arg("--data")
@@ -106,7 +126,7 @@ fn split(package: &'static str, code: u32, name: &'static str) -> Apk {
     Apk::new().manifest(&split_manifest(package, code, name, None, false))
 }
 
-/// Chat on the fake Play: a base and the splits Play serves an x86_64 device at 160 dpi.
+/// Chat on the fake Play: a base and the splits Play serves this host's ABI at 160 dpi.
 fn chat(code: u32, name: &'static str, key: &Key) -> PlayApp {
     PlayApp::new(
         CHAT,
@@ -117,9 +137,9 @@ fn chat(code: u32, name: &'static str, key: &Key) -> PlayApp {
         &key.fingerprint(),
     )
     .split(
-        "config.x86_64",
-        split(CHAT, code, "config.x86_64")
-            .native_lib("x86_64", "libchat.so")
+        ABI_SPLIT,
+        split(CHAT, code, ABI_SPLIT)
+            .native_lib(ABI, "libchat.so")
             .signed_bytes(key),
     )
     .split(
@@ -130,10 +150,16 @@ fn chat(code: u32, name: &'static str, key: &Key) -> PlayApp {
 
 /// Chat as an app whose key rotated from `old` to `new` signs it, as Signal's did: Play names `old`.
 fn rotated_chat(old: &Key, new: &Key) -> PlayApp {
+    rotated_chat_with(old, uxdroid_testkit::INSTALLED_DATA, new)
+}
+
+/// As [`rotated_chat`], with `old` keeping only the capabilities `flags`.
+fn rotated_chat_with(old: &Key, flags: u32, new: &Key) -> PlayApp {
     let past = [Past {
         key: old,
-        flags: uxdroid_testkit::INSTALLED_DATA,
+        flags,
         forged_by: None,
+        algorithm: None,
     }];
     let signed = |apk: Apk| apk.signed_rotated(&past, new, BLOCK_V31);
     PlayApp::new(
@@ -149,8 +175,8 @@ fn rotated_chat(old: &Key, new: &Key) -> PlayApp {
         &old.fingerprint(),
     )
     .split(
-        "config.x86_64",
-        signed(split(CHAT, 5, "config.x86_64").native_lib("x86_64", "libchat.so")),
+        ABI_SPLIT,
+        signed(split(CHAT, 5, ABI_SPLIT).native_lib(ABI, "libchat.so")),
     )
 }
 
@@ -323,7 +349,7 @@ fn search_merges_the_sources_and_names_each() {
     let state = fixture.play.state();
     let checkin = String::from_utf8_lossy(&state.checkins[0]).into_owned();
     assert!(
-        checkin.contains("x86_64") && checkin.contains("r\u{2}en"),
+        checkin.contains(ABI) && checkin.contains("r\u{2}en"),
         "{checkin:?}"
     );
     let search = state
@@ -378,12 +404,12 @@ fn an_app_only_on_play_installs_from_it_with_its_splits_updates_and_goes() {
         .sum();
     assert!(
         stdout.starts_with(&format!(
-            "downloaded com.example.chat 5.0 (5) from play: 3 APKs (base, config.x86_64, config.mdpi), {size} bytes\ninstalled com.example.chat: 1 native libraries for x86_64"
+            "downloaded com.example.chat 5.0 (5) from play: 3 APKs (base, {ABI_SPLIT}, config.mdpi), {size} bytes\ninstalled com.example.chat: 1 native libraries for {ABI}"
         )),
         "{stdout}"
     );
     assert!(
-        stdout.contains("config.mdpi (density), config.x86_64 (abi)"),
+        stdout.contains("config.mdpi (density)") && stdout.contains(&format!("{ABI_SPLIT} (abi)")),
         "{stdout}"
     );
     assert_eq!(
@@ -396,6 +422,7 @@ fn an_app_only_on_play_installs_from_it_with_its_splits_updates_and_goes() {
         .map(|request| request.path.split('?').next().unwrap())
         .filter(|path| !path.starts_with("/repo/"))
         .collect();
+    let split_path = format!("/download/com.example.chat/{ABI_SPLIT}");
     assert_eq!(
         paths,
         [
@@ -406,7 +433,7 @@ fn an_app_only_on_play_installs_from_it_with_its_splits_updates_and_goes() {
             "/fdfe/purchase",
             "/fdfe/delivery",
             "/download/com.example.chat/base",
-            "/download/com.example.chat/config.x86_64",
+            split_path.as_str(),
             "/download/com.example.chat/config.mdpi"
         ]
     );
@@ -482,6 +509,16 @@ fn an_app_signed_by_another_certificate_than_play_names_is_refused() {
         &["install", CHAT, "--from", "play"],
     ));
     assert!(error.contains("from play is signed by"), "{error}");
+    // So is one whose proof of rotation revoked the certificate Play names, every capability
+    // removed.
+    fixture
+        .play
+        .add(rotated_chat_with(&Key::test(), 0, &Key::other()));
+    let error = refused(&uxdroid(
+        &fixture.data,
+        &["install", CHAT, "--from", "play"],
+    ));
+    assert!(error.contains("from play is signed by"), "{error}");
     assert!(installed(&fixture.data, CHAT).is_none());
 }
 
@@ -527,9 +564,9 @@ fn files_play_delivers_must_match_what_it_states_and_come_from_it() {
             "host",
             Box::new(|app, _| {
                 app.urls
-                    .insert("config.x86_64".into(), "https://example.org/x.apk".into());
+                    .insert("config.mdpi".into(), "https://example.org/x.apk".into());
             }),
-            "Google Play's delivery of com.example.chat gives config.x86_64 the address https://example.org/x.apk, which is not Google Play's, so it is refused",
+            "Google Play's delivery of com.example.chat gives config.mdpi the address https://example.org/x.apk, which is not Google Play's, so it is refused",
         ),
         (
             "scheme",
@@ -555,9 +592,14 @@ fn files_play_delivers_must_match_what_it_states_and_come_from_it() {
             "Google Play's delivery of com.example.chat names a split ../../evil, which is not a valid or a new split name, so it is refused",
         ),
         (
+            "no-hash",
+            Box::new(|app, _| app.unhashed.push("config.mdpi".into())),
+            "Google Play's delivery of com.example.chat states no hash for config.mdpi, so it is refused",
+        ),
+        (
             "unavailable",
             Box::new(|app, _| app.delivery_status = 2),
-            "Google Play does not deliver com.example.chat 5 to this device (x86_64, SDK 36) (status 2)",
+            "Google Play does not deliver com.example.chat 5 to this device ({ABI}, SDK 36) (status 2)",
         ),
         (
             "paid",
@@ -569,6 +611,8 @@ fn files_play_delivers_must_match_what_it_states_and_come_from_it() {
         ),
     ];
     for (name, change, expected) in cases {
+        let expected = expected.replace("{ABI}", ABI);
+        let expected = expected.as_str();
         let fixture = fixture(&format!("hostile-{name}"));
         enable_play(&fixture);
         let mut app = chat(5, "5.0", &key);

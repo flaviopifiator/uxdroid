@@ -192,8 +192,13 @@ fn layout(zip: &[u8]) -> (usize, usize, Vec<u8>) {
 
 /// Inserts an APK Signing Block with one v2 signer before the central directory.
 pub(crate) fn sign_v2(zip: &[u8], key: &Key) -> Vec<u8> {
+    sign_v2_as(zip, key, ECDSA_SHA256)
+}
+
+/// As [`sign_v2`], with the signature labelled `algorithm` whatever the key, to forge one.
+pub(crate) fn sign_v2_as(zip: &[u8], key: &Key, algorithm: u32) -> Vec<u8> {
     let (_, _, digest) = layout(zip);
-    let mut algorithm_digest = ECDSA_SHA256.to_le_bytes().to_vec();
+    let mut algorithm_digest = algorithm.to_le_bytes().to_vec();
     algorithm_digest.extend(prefixed(&digest));
     let signed_data = [
         sequence(&[algorithm_digest]),
@@ -201,7 +206,7 @@ pub(crate) fn sign_v2(zip: &[u8], key: &Key) -> Vec<u8> {
         sequence(&[]),
     ]
     .concat();
-    let mut signature = ECDSA_SHA256.to_le_bytes().to_vec();
+    let mut signature = algorithm.to_le_bytes().to_vec();
     signature.extend(prefixed(&key.sign(&signed_data)));
     let signer = [
         prefixed(&signed_data),
@@ -218,6 +223,9 @@ pub struct Past<'a> {
     pub key: &'a Key,
     pub flags: u32,
     pub forged_by: Option<&'a Key>,
+    /// The algorithm ID it signs its successor's node with, ECDSA with SHA-256 by default; another
+    /// one labels that ECDSA signature falsely.
+    pub algorithm: Option<u32>,
 }
 
 /// A proof-of-rotation lineage, as apksigner writes it: version 1, then a node per certificate from
@@ -231,7 +239,8 @@ fn lineage(past: &[Past], current: &Key) -> Vec<u8> {
         .collect();
     for (index, (key, flags)) in certificates.iter().enumerate() {
         // The algorithm that signs this node, by the key before it; none for the first.
-        let signed_with = if index == 0 { 0 } else { ECDSA_SHA256 };
+        let label = |index: usize| past[index].algorithm.unwrap_or(ECDSA_SHA256);
+        let signed_with = if index == 0 { 0 } else { label(index - 1) };
         let signed_data = [
             prefixed(&key.certificate),
             signed_with.to_le_bytes().to_vec(),
@@ -245,7 +254,7 @@ fn lineage(past: &[Past], current: &Key) -> Vec<u8> {
                 .sign(&signed_data),
         };
         let next = if index + 1 < certificates.len() {
-            ECDSA_SHA256
+            label(index)
         } else {
             0
         };

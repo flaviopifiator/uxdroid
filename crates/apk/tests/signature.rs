@@ -174,6 +174,7 @@ fn from(key: &Key, flags: u32) -> Past<'_> {
         key,
         flags,
         forged_by: None,
+        algorithm: None,
     }
 }
 
@@ -206,6 +207,7 @@ fn a_lineage_node_the_previous_key_did_not_sign_is_refused() {
         key: &old,
         flags: INSTALLED_DATA,
         forged_by: Some(&new),
+        algorithm: None,
     };
     assert_eq!(
         reason(verify("forged", &rotated(&[forged], &new, BLOCK_V31))),
@@ -234,4 +236,39 @@ fn damage_in_a_lineage_fails_without_panicking() {
         bad[at] ^= 0x41;
         let _ = verify("lineage-damage", &bad);
     }
+}
+
+#[test]
+fn a_lineage_node_whose_algorithm_does_not_fit_the_previous_key_is_refused() {
+    // The node is really ECDSA with SHA-256 by an EC key, labelled RSA PKCS#1 v1.5 with SHA-256
+    // (0x0103), or ECDSA with SHA-512 (0x0202), which would hash it differently.
+    let (old, new) = (Key::test(), Key::other());
+    for label in [0x0103, 0x0104, 0x0101] {
+        let mislabelled = Past {
+            key: &old,
+            flags: INSTALLED_DATA,
+            forged_by: None,
+            algorithm: Some(label),
+        };
+        assert_eq!(
+            reason(verify(
+                "mislabelled",
+                &rotated(&[mislabelled], &new, BLOCK_V3)
+            )),
+            "its key rotation proof names a signature algorithm that does not fit the key it rotated from",
+            "{label:#x}"
+        );
+    }
+}
+
+#[test]
+fn a_v2_signature_labelled_with_an_algorithm_its_key_cannot_make_is_refused() {
+    // The signature is ECDSA by an EC key, labelled as RSA's PKCS#1 v1.5 with SHA-256.
+    assert_eq!(
+        reason(verify(
+            "v2-rsa-label",
+            &app().signed_bytes_as(&Key::test(), 0x0103)
+        )),
+        "a signer's signature algorithm does not fit its key"
+    );
 }
