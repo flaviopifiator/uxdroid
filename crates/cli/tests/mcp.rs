@@ -321,16 +321,22 @@ fn tool_calls_reach_the_app_over_one_connection() {
         ]
     );
     // status asks over a connection of its own, as uxdroid app status does.
-    assert_eq!(app.ended.load(Ordering::SeqCst), 1);
+    assert_eq!(ended_after_wait(&app.ended, 1), 1);
     assert!(mcp.finish().success());
+    assert_eq!(ended_after_wait(&app.ended, 2), 2);
+    server.shutdown();
+}
+
+/// The fake app counts a closed connection on its own thread, after the reply was read, so wait
+/// up to a second for the count to reach `expected` and return what it is.
+fn ended_after_wait(ended: &AtomicUsize, expected: usize) -> usize {
     for _ in 0..100 {
-        if app.ended.load(Ordering::SeqCst) == 2 {
+        if ended.load(Ordering::SeqCst) >= expected {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert_eq!(app.ended.load(Ordering::SeqCst), 2);
-    server.shutdown();
+    ended.load(Ordering::SeqCst)
 }
 
 #[test]
