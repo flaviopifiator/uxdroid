@@ -7,6 +7,7 @@ use std::path::Path;
 use zip::write::SimpleFileOptions;
 
 pub mod fdroid;
+pub mod play;
 
 pub const ATTR_NAME: u32 = 0x0101_0003;
 pub const ATTR_TARGET_ACTIVITY: u32 = 0x0101_0202;
