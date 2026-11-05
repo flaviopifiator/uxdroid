@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="uxdroid">
+  <rect width="64" height="64" rx="16" fill="#2ed3a3"/>
+  <path d="M18 22 L30 32 L18 42" fill="none" stroke="#0d1714" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M34 44 H48" stroke="#0d1714" stroke-width="7" stroke-linecap="round"/>
+</svg>

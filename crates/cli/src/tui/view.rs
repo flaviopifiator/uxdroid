@@ -74,7 +74,28 @@ pub(crate) fn draw(frame: &mut Frame, state: &State) {
     }
 }
 
+/// From this width the top line names the program before the views.
+const BRAND: u16 = 60;
+
 fn draw_tabs(frame: &mut Frame, state: &State, area: Rect) {
+    let area = if area.width >= BRAND {
+        let name = ">_ uxdroid ";
+        let [brand, rest] =
+            Layout::horizontal([Constraint::Length(name.len() as u16), Constraint::Min(0)])
+                .areas(area);
+        let (red, green, blue) = crate::logo::ACCENT;
+        frame.render_widget(
+            Paragraph::new(name).style(
+                Style::default()
+                    .fg(Color::Rgb(red, green, blue))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            brand,
+        );
+        rest
+    } else {
+        area
+    };
     let selected = VIEWS
         .iter()
         .position(|(view, _)| *view == state.view)

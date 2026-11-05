@@ -506,7 +506,11 @@ fn answer(server: &mut Server, line: &[u8]) -> Option<Value> {
             Some(data),
         ));
     }
-    let info = json!({"name": "uxdroid", "version": env!("CARGO_PKG_VERSION")});
+    let info = json!({
+        "name": "uxdroid",
+        "version": env!("CARGO_PKG_VERSION"),
+        "icons": [{"src": crate::logo::icon_data_uri(), "mimeType": "image/svg+xml", "sizes": ["any"]}],
+    });
     let result = match method {
         "initialize" => {
             let asked = params.get("protocolVersion").and_then(Value::as_str);

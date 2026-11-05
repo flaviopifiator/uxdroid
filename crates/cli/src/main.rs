@@ -50,6 +50,9 @@ fn main() -> ExitCode {
         Some((command, rest)) if command == "app" => app_command(rest),
         Some((command, rest)) if command == "service" => service_command(rest),
         Some((command, rest)) if command == "mcp" => mcp_command(rest),
+        Some((command, [])) if ["--help", "-h", "help"].iter().any(|flag| command == *flag) => {
+            help()
+        }
         _ => fail(USAGE, EXIT_USAGE),
     }
 }
@@ -57,6 +60,7 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 mod app;
 mod install;
+mod logo;
 #[cfg(target_os = "linux")]
 mod mcp;
 mod runtime;
@@ -64,6 +68,14 @@ mod runtime;
 mod service;
 mod store;
 mod tui;
+
+/// The mark and every command, on stdout: asked for, so not an error.
+fn help() -> ExitCode {
+    use std::io::IsTerminal;
+    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    print!("{}\n{USAGE}\n", logo::banner(color));
+    ExitCode::SUCCESS
+}
 
 #[cfg(target_os = "linux")]
 fn mcp_command(args: &[OsString]) -> ExitCode {

@@ -201,6 +201,34 @@ fn line_with<'a>(screen: &'a str, text: &str) -> &'a str {
 }
 
 #[test]
+fn the_top_line_names_the_program_before_the_views_when_there_is_room() {
+    let dir = scratch("brand");
+    let data = repository(&dir);
+    let mut ui = Ui::new(&dir, &data, 80, 24);
+    let screen = ui.screen();
+    let top = screen.lines().next().unwrap();
+    assert!(top.starts_with(">_ uxdroid  1 Search"), "{top}");
+    let buffer = ui.terminal.backend().buffer();
+    assert_eq!(
+        buffer[(0, 0)].fg,
+        ratatui::style::Color::Rgb(0x2e, 0xd3, 0xa3)
+    );
+
+    // A narrow terminal keeps the room for the views.
+    let mut ui = Ui::new(&dir, &data, 50, 12);
+    let screen = ui.screen();
+    assert!(
+        screen
+            .lines()
+            .next()
+            .unwrap()
+            .trim_start()
+            .starts_with("1 Search"),
+        "{screen}"
+    );
+}
+
+#[test]
 fn typing_searches_the_cached_index_as_the_user_types() {
     let dir = scratch("search");
     let data = repository(&dir);

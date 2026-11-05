@@ -1,3 +1,5 @@
+<img src="docs/logo/icon.svg" alt="" width="96">
+
 # uxdroid
 
 **Run Android apps on Linux as native processes.** No emulator, no virtual machine, no container and no Android system image: each app is an ordinary Linux process with its own Wayland window, its sound on your audio server and its input from your seat.
@@ -75,6 +77,7 @@ uxdroid update                              # every app, from the source it came
 uxdroid remove net.gsantner.markor
 uxdroid sources add izzy https://apt.izzysoft.de/fdroid/repo --fingerprint <sha256>
 uxdroid tui                                 # the same, as a terminal UI
+uxdroid --help                              # every command, under the logo
 ```
 
 F-Droid's official repository is enabled by default and pinned to its signing certificate. An index is trusted only through its signed entry, and an APK only when its hash, package, version and signer match the index and its own signature verifies.
