@@ -1,0 +1,3 @@
+reading /samples/org.example.bad_3.apk
+
+error: /samples/org.example.bad_3.apk: its signature does not verify: its key rotation proof uses a signature algorithm this verifier does not support

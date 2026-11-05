@@ -1,0 +1,3 @@
+{"accessibility":true,"nodes":4,"snapshot":3,"truncated":false,"windows":[{"bounds":[0,0,400,700],"index":0,"root":{"bounds":[0,0,400,700],"class":"android.widget.FrameLayout","id":1,"visible":true,"children":[
+ {"bounds":[0,24,400,141],"class":"android.widget.TextView","clickable":true,"enabled":true,"id":2,"text":"Main View","visible":true},
+ {"bounds":[400,24,400,141],"class":"android.widget.TextView","clickable":true,"id":3,"text":"Off screen"}]}}]}

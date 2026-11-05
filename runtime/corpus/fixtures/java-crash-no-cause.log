@@ -1,0 +1,3 @@
+uxdroid: first frame posted on org.example.app/org.example.Main 400x700, 154 ms after the framework started
+Exception in thread "main" java.lang.NullPointerException: Attempt to invoke virtual method 'int android.view.View.getId()' on a null object reference
+	at org.example.Main.onCreate(Main.java:20)

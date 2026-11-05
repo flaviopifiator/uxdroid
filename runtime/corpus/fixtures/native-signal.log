@@ -1,0 +1,2 @@
+Caused by: android.system.ErrnoException: android_getaddrinfo failed: EAGAIN (Resource temporarily unavailable)
+11-05 17:42:39.077  1707  1712 F libc    : Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x7f3a00001000 in tid 1712 (RenderThread), pid 1707 (org.example.game)

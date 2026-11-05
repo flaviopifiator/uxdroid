@@ -1,0 +1,9 @@
+package	version	abi	installed	first_frame_ms	alive	flat	tap_changed	blocker
+org.a	1	none	yes	150	yes	no	yes	-
+org.b	2	x86_64	yes	-	no	-	-	Caused by: java.security.KeyStoreException: AndroidKeyStore not found
+org.c	3	arm64-v8a	yes	-	no	-	-	Caused by: java.security.KeyStoreException: AndroidKeyStore not found
+org.d	4	none	yes	-	no	-	-	Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x7f3a00001000 in tid 1712 (RenderThread), pid 1707 (org.d)
+org.e	5	none	yes	-	no	-	-	Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x10 in tid 99 (main), pid 99 (org.e)
+org.f	6	none	yes	-	no	-	-	Caused by: java.security.KeyStoreException: AndroidKeyStore not found
+org.g	7	none	no	-	-	-	-	error: /samples/org.g_7.apk: its signature does not verify
+org.h	8	none	yes	140	yes	yes	-	flat screen (no error logged)

@@ -1,0 +1,3 @@
+uxdroid: default bodies of /tmp/tmp.X/data/app/org.example/defaults.so not used, made now instead: its file system does not allow running code
+	Suppressed: java.lang.UnsatisfiedLinkError: libmegazord.so: unresolved symbols: __get_h_errno
+libmegazord.so: unresolved symbols: __get_h_errno

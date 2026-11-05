@@ -1,0 +1,5 @@
+{"snapshot": 1, "windows": [{"root": {"id": 1, "class": "android.widget.FrameLayout", "bounds": [0, 0, 400, 700], "visible": true,
+  "children": [
+    {"id": 2, "class": "android.widget.LinearLayout", "bounds": [0, 100, 400, 200], "visible": true, "clickable": true,
+     "children": [{"id": 3, "class": "android.widget.TextView", "text": "Row", "bounds": [10, 110, 390, 190], "visible": true}]}
+  ]}}]}
