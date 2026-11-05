@@ -1,0 +1,12 @@
+[package]
+name = "uxdroid-apk"
+description = "Reads APK files and plans how to execute them"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zip = { version = "9.2.2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+uxdroid-testkit = { path = "../testkit" }

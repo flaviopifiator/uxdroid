@@ -1,0 +1,9 @@
+[package]
+name = "uxdroid-testkit"
+description = "Builds synthetic APK fixtures for tests"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zip = { version = "9.2.2", default-features = false, features = ["deflate"] }

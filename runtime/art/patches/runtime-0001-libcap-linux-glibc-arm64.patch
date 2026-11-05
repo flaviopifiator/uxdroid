@@ -1,0 +1,16 @@
+diff --git a/mainline/platform/sdk/Android.bp b/mainline/platform/sdk/Android.bp
+index b1147d2..810e6a9 100644
+--- a/mainline/platform/sdk/Android.bp
++++ b/mainline/platform/sdk/Android.bp
+@@ -291,6 +291,11 @@ cc_prebuilt_library_static {
+             enabled: true,
+             srcs: ["linux_glibc/x86_64/lib/libcap.a"],
+         },
++        // uxdroid: Debian 11's arm64 libcap.a, from the arm64 host sysroot (runtime/art/build_arm64.sh).
++        linux_glibc_arm64: {
++            enabled: true,
++            srcs: ["linux_glibc/arm64/lib/libcap.a"],
++        },
+         linux_glibc_x86: {
+             enabled: true,
+             srcs: ["linux_glibc/x86/lib/libcap.a"],

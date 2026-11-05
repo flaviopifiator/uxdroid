@@ -1,0 +1,85 @@
+diff --git a/rust/config/Android.bp b/rust/config/Android.bp
+index 25f7580..af0819b 100644
+--- a/rust/config/Android.bp
++++ b/rust/config/Android.bp
+@@ -20,6 +20,7 @@ bootstrap_go_package {
+         "darwin_host.go",
+         "x86_linux_bionic_host.go",
+         "x86_linux_host.go",
++        "arm64_linux_glibc_host.go",
+         "x86_device.go",
+         "x86_64_device.go",
+         "arm64_linux_host.go",
+diff --git a/r16-b/rust/config/arm64_linux_glibc_host.go b/rust/config/arm64_linux_glibc_host.go
+new file mode 100644
+index 0000000..4f1a8a0
+--- /dev/null
++++ b/rust/config/arm64_linux_glibc_host.go
+@@ -0,0 +1,52 @@
++// Copyright 2026 The uxdroid authors. Licensed under the Apache License, Version 2.0.
++
++package config
++
++import (
++	"android/soong/android"
++)
++
++// uxdroid: Rust for the linux_glibc arm64 host-cross target, linked by clang against the aarch64
++// sysroot of runtime/art/sysroot_arm64.sh (cc/config/arm64_linux_glibc_host.go). Its std is built
++// from the prebuilt's rust-src, as for linux_musl's cross targets (prebuilts/rust patch).
++func init() {
++	registerToolchainFactory(android.Linux, android.Arm64, linuxGlibcArm64ToolchainFactory)
++}
++
++type toolchainLinuxGlibcArm64 struct {
++	toolchain64Bit
++}
++
++func (toolchainLinuxGlibcArm64) Supported() bool {
++	return true
++}
++
++func (toolchainLinuxGlibcArm64) Bionic() bool {
++	return false
++}
++
++func (t *toolchainLinuxGlibcArm64) Name() string {
++	return "arm64"
++}
++
++func (t *toolchainLinuxGlibcArm64) RustTriple() string {
++	return "aarch64-unknown-linux-gnu"
++}
++
++func (toolchainLinuxGlibcArm64) LibclangRuntimeLibraryArch() string {
++	return "aarch64"
++}
++
++func (t *toolchainLinuxGlibcArm64) ToolchainLinkFlags() string {
++	return "--target=aarch64-linux-gnu ${cc_config.LinuxGlibcArm64Lldflags} ${config.LinuxToolchainLinkFlags}"
++}
++
++func (t *toolchainLinuxGlibcArm64) ToolchainRustFlags() string {
++	return "${config.LinuxToolchainRustFlags}"
++}
++
++var toolchainLinuxGlibcArm64Singleton Toolchain = &toolchainLinuxGlibcArm64{}
++
++func linuxGlibcArm64ToolchainFactory(arch android.Arch) Toolchain {
++	return toolchainLinuxGlibcArm64Singleton
++}
+diff --git a/rust/rust.go b/rust/rust.go
+index 54b5d92..6510f96 100644
+--- a/rust/rust.go
++++ b/rust/rust.go
+@@ -369,6 +369,10 @@ func (mod *Module) Object() bool {
+ 	return false
+ }
+ 
++// LinuxGlibcArm64HostCross marks Rust modules as built for uxdroid's linux_glibc arm64 host-cross
++// target (android/arch.go).
++func (mod *Module) LinuxGlibcArm64HostCross() {}
++
+ func (mod *Module) Toc() android.OptionalPath {
+ 	if mod.compiler != nil {
+ 		if lib, ok := mod.compiler.(libraryInterface); ok {

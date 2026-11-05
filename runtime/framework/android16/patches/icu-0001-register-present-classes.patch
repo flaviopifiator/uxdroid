@@ -1,0 +1,32 @@
+diff --git a/android_icu4j/libcore_bridge/src/native/Register.cpp b/android_icu4j/libcore_bridge/src/native/Register.cpp
+index 0a4bc4c..319a224 100644
+--- a/android_icu4j/libcore_bridge/src/native/Register.cpp
++++ b/android_icu4j/libcore_bridge/src/native/Register.cpp
+@@ -47,17 +47,25 @@ jint JNI_OnLoad(JavaVM* vm, void*) {
+ 
+ 
+ #define REGISTER(FN) extern void FN(JNIEnv*); FN(env)
++// uxdroid: classes Android 16 added, registered only when the boot class path has them. The arm64
++// host runtime pairs this library with the ICU 68 core-icu4j.jar of ART's i18n module, as x86_64
++// does, which has neither.
++#define REGISTER_IF_PRESENT(CLASS, FN) \
++    if (jclass c = env->FindClass(CLASS)) { env->DeleteLocalRef(c); REGISTER(FN); } \
++    else { env->ExceptionClear(); }
+     REGISTER(register_com_android_icu_text_TimeZoneNamesNative);
+     REGISTER(register_com_android_i18n_timezone_internal_Memory);
+-    REGISTER(register_com_android_i18n_util_ATrace);
++    REGISTER_IF_PRESENT("com/android/i18n/util/ATrace", register_com_android_i18n_util_ATrace);
+     REGISTER(register_com_android_i18n_util_Log);
+     REGISTER(register_com_android_icu_util_CaseMapperNative);
+     REGISTER(register_com_android_icu_util_Icu4cMetadata);
+     REGISTER(register_com_android_icu_util_LocaleNative);
+-    REGISTER(register_com_android_icu_util_UResourceBundleNative);
++    REGISTER_IF_PRESENT("com/android/icu/util/UResourceBundleNative",
++                        register_com_android_icu_util_UResourceBundleNative);
+     REGISTER(register_com_android_icu_util_regex_PatternNative);
+     REGISTER(register_com_android_icu_util_regex_MatcherNative);
+     REGISTER(register_com_android_icu_util_charset_NativeConverter);
++#undef REGISTER_IF_PRESENT
+ #undef REGISTER
+ 
+     JniConstants::Initialize(env);

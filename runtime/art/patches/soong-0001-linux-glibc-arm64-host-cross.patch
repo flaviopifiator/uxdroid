@@ -1,0 +1,161 @@
+diff --git a/android/arch.go b/android/arch.go
+index d6b2971..4da4edf 100644
+--- a/android/arch.go
++++ b/android/arch.go
+@@ -313,7 +313,8 @@ var (
+ 	// NoOsType is a placeholder for when no OS is needed.
+ 	NoOsType OsType
+ 	// Linux is the OS for the Linux kernel plus the glibc runtime.
+-	Linux = newOsType("linux_glibc", Host, false, X86, X86_64)
++	// uxdroid: Arm64 is a host-cross target only, from an x86_64 build machine (cc/config/arm64_linux_glibc_host.go).
++	Linux = newOsType("linux_glibc", Host, false, X86, X86_64, Arm64)
+ 	// LinuxMusl is the OS for the Linux kernel plus the musl runtime.
+ 	LinuxMusl = newOsType("linux_musl", Host, false, X86, X86_64, Arm64, Arm)
+ 	// Darwin is the OS for MacOS/Darwin host machines.
+@@ -615,6 +616,16 @@ func (a *archTransitionMutator) Split(ctx BaseModuleContext) []string {
+ 		})
+ 	}
+ 
++	// uxdroid: the linux_glibc arm64 host-cross target builds C and C++ code and the sources
++	// generated for it only (LinuxGlibcArm64HostCross in cc and genrule).
++	if os == Linux {
++		if _, ok := module.(interface{ LinuxGlibcArm64HostCross() }); !ok {
++			osTargets = slices.DeleteFunc(slices.Clone(osTargets), func(t Target) bool {
++				return t.HostCross && t.Arch.ArchType == Arm64
++			})
++		}
++	}
++
+ 	// only the primary arch in the ramdisk / vendor_ramdisk / recovery partition
+ 	if os == Android && (module.InstallInRecovery() || module.InstallInRamdisk() || module.InstallInVendorRamdisk() || module.InstallInDebugRamdisk()) {
+ 		osTargets = []Target{osTargets[0]}
+diff --git a/cc/cc.go b/cc/cc.go
+index dc9b831..10c2ed9 100644
+--- a/cc/cc.go
++++ b/cc/cc.go
+@@ -1215,6 +1215,10 @@ func (c *Module) RequiredModuleNames(ctx android.ConfigurableEvaluatorContext) [
+ 	return android.FirstUniqueStrings(required)
+ }
+ 
++// LinuxGlibcArm64HostCross marks C and C++ modules as built for uxdroid's linux_glibc arm64
++// host-cross target (android/arch.go).
++func (c *Module) LinuxGlibcArm64HostCross() {}
++
+ func (c *Module) Toc() android.OptionalPath {
+ 	if c.linker != nil {
+ 		if library, ok := c.linker.(libraryInterface); ok {
+diff --git a/cc/config/Android.bp b/cc/config/Android.bp
+index f514db6..9560a7c 100644
+--- a/cc/config/Android.bp
++++ b/cc/config/Android.bp
+@@ -31,6 +31,7 @@ bootstrap_go_package {
+         "x86_windows_host.go",
+ 
+         "arm64_linux_host.go",
++        "arm64_linux_glibc_host.go",
+     ],
+     testSrcs: [
+         "tidy_test.go",
+diff --git a/b/cc/config/arm64_linux_glibc_host.go b/cc/config/arm64_linux_glibc_host.go
+new file mode 100644
+index 0000000..ef85063
+--- /dev/null
++++ b/cc/config/arm64_linux_glibc_host.go
+@@ -0,0 +1,82 @@
++// Copyright 2026 The uxdroid authors. Licensed under the Apache License, Version 2.0.
++
++package config
++
++import (
++	"strings"
++
++	"android/soong/android"
++)
++
++// uxdroid: linux_glibc on arm64, built as a host-cross target from an x86_64 machine against the
++// aarch64 sysroot runtime/art/sysroot_arm64.sh makes from Debian 11's packages (glibc 2.31 and
++// GCC 10's crt files and libgcc). The flags are the x86_64 glibc host's, with that sysroot in
++// place of the x86_64 GCC prebuilt.
++var (
++	linuxGlibcArm64Cflags = []string{
++		"-Wa,--noexecstack",
++		"-fPIC",
++		"-fno-omit-frame-pointer",
++		"-U_FORTIFY_SOURCE",
++		"-D_FORTIFY_SOURCE=3",
++		"-fstack-protector",
++		"--gcc-toolchain=${LinuxGlibcArm64Root}/sysroot/usr",
++		"--sysroot ${LinuxGlibcArm64Root}/sysroot",
++		"-fstack-protector-strong",
++		"-march=armv8-a",
++	}
++
++	linuxGlibcArm64Ldflags = []string{
++		"-Wl,-z,noexecstack",
++		"-Wl,-z,relro",
++		"-Wl,-z,now",
++		"-Wl,--no-undefined-version",
++		"--gcc-toolchain=${LinuxGlibcArm64Root}/sysroot/usr",
++		"--sysroot ${LinuxGlibcArm64Root}/sysroot",
++		// No CPU is named for a host, so assume it needs the erratum's fix, as linux_bionic does.
++		"-Wl,--fix-cortex-a53-843419",
++	}
++
++	linuxGlibcArm64Lldflags = append(android.CopyOf(linuxGlibcArm64Ldflags),
++		"-Wl,--compress-debug-sections=zstd",
++	)
++)
++
++func init() {
++	pctx.SourcePathVariable("LinuxGlibcArm64Root",
++		"prebuilts/gcc/linux-x86/host/aarch64-linux-glibc2.31-10")
++	pctx.StaticVariable("LinuxGlibcArm64Cflags", strings.Join(linuxGlibcArm64Cflags, " "))
++	pctx.StaticVariable("LinuxGlibcArm64Ldflags", strings.Join(linuxGlibcArm64Ldflags, " "))
++	pctx.StaticVariable("LinuxGlibcArm64Lldflags", strings.Join(linuxGlibcArm64Lldflags, " "))
++}
++
++type toolchainLinuxGlibcArm64 struct {
++	toolchainLinuxArm64
++	toolchainGlibc
++}
++
++func (t *toolchainLinuxGlibcArm64) ClangTriple() string {
++	return "aarch64-linux-gnu"
++}
++
++func (t *toolchainLinuxGlibcArm64) Cflags() string {
++	return "${config.LinuxGlibcArm64Cflags}"
++}
++
++func (t *toolchainLinuxGlibcArm64) Ldflags() string {
++	return "${config.LinuxGlibcArm64Ldflags}"
++}
++
++func (t *toolchainLinuxGlibcArm64) Lldflags() string {
++	return "${config.LinuxGlibcArm64Lldflags}"
++}
++
++var toolchainLinuxGlibcArm64Singleton Toolchain = &toolchainLinuxGlibcArm64{}
++
++func linuxGlibcArm64ToolchainFactory(arch android.Arch) Toolchain {
++	return toolchainLinuxGlibcArm64Singleton
++}
++
++func init() {
++	registerToolchainFactory(android.Linux, android.Arm64, linuxGlibcArm64ToolchainFactory)
++}
+diff --git a/genrule/genrule.go b/genrule/genrule.go
+index a7c09e7..dcce925 100644
+--- a/genrule/genrule.go
++++ b/genrule/genrule.go
+@@ -233,6 +233,10 @@ type generateTask struct {
+ 	keepGendir bool
+ }
+ 
++// LinuxGlibcArm64HostCross marks generated sources as built for uxdroid's linux_glibc arm64
++// host-cross target (android/arch.go).
++func (g *Module) LinuxGlibcArm64HostCross() {}
++
+ func (g *Module) GeneratedSourceFiles() android.Paths {
+ 	return g.outputFiles
+ }

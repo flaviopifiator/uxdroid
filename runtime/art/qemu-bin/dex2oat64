@@ -1,0 +1,5 @@
+#!/bin/sh
+# Test only, for the arm64 package on an x86_64 machine: mounted over the package's bin/, it runs the
+# real program, mounted at /runtime-real, under qemu-aarch64, so programs that uxdroid itself starts
+# run too (qemu-user does not follow exec). An arm64 host needs none of this.
+exec qemu-aarch64 "/runtime-real/art-arm64-host/bin/$(basename "$0")" "$@"

@@ -1,0 +1,12 @@
+[package]
+name = "uxdroid-ndk"
+description = "The Android NDK system libraries app native code links against, implemented on the host"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+jni-sys = "0.4"
+libc = "0.2"
+uxdroid-audio = { path = "../audio" }
+uxdroid-bridge = { path = "../bridge" }

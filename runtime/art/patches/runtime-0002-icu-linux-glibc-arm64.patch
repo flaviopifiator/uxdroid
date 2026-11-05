@@ -1,0 +1,56 @@
+diff --git a/mainline/i18n/sdk/Android.bp b/mainline/i18n/sdk/Android.bp
+index 02bc9f2..cbf3df9 100755
+--- a/mainline/i18n/sdk/Android.bp
++++ b/mainline/i18n/sdk/Android.bp
+@@ -368,6 +368,11 @@ cc_prebuilt_library_shared {
+             enabled: true,
+             srcs: ["linux_glibc/x86_64/lib/libicu.so"],
+         },
++        // uxdroid: built for the arm64 host from android-16.0.0_r1 (runtime/art/build_arm64.sh).
++        linux_glibc_arm64: {
++            enabled: true,
++            srcs: ["linux_glibc/arm64/lib/libicu.so"],
++        },
+         linux_glibc_x86: {
+             enabled: true,
+             srcs: ["linux_glibc/x86/lib/libicu.so"],
+diff --git a/mainline/i18n/test-exports/Android.bp b/mainline/i18n/test-exports/Android.bp
+index e605ea3..2044812 100755
+--- a/mainline/i18n/test-exports/Android.bp
++++ b/mainline/i18n/test-exports/Android.bp
+@@ -110,6 +110,11 @@ cc_prebuilt_library_shared {
+             enabled: true,
+             srcs: ["linux_glibc/x86_64/lib/libicui18n-host.so"],
+         },
++        // uxdroid: built for the arm64 host from android-16.0.0_r1 (runtime/art/build_arm64.sh).
++        linux_glibc_arm64: {
++            enabled: true,
++            srcs: ["linux_glibc/arm64/lib/libicui18n-host.so"],
++        },
+         linux_glibc_x86: {
+             enabled: true,
+             srcs: ["linux_glibc/x86/lib/libicui18n-host.so"],
+@@ -179,6 +184,11 @@ cc_prebuilt_library_shared {
+             enabled: true,
+             srcs: ["linux_glibc/x86_64/lib/libicuuc-host.so"],
+         },
++        // uxdroid: built for the arm64 host from android-16.0.0_r1 (runtime/art/build_arm64.sh).
++        linux_glibc_arm64: {
++            enabled: true,
++            srcs: ["linux_glibc/arm64/lib/libicuuc-host.so"],
++        },
+         linux_glibc_x86: {
+             enabled: true,
+             srcs: ["linux_glibc/x86/lib/libicuuc-host.so"],
+@@ -240,6 +250,11 @@ cc_prebuilt_library_shared {
+             enabled: true,
+             srcs: ["linux_glibc/x86_64/lib/libicu_jni.so"],
+         },
++        // uxdroid: built for the arm64 host from android-16.0.0_r1 (runtime/art/build_arm64.sh).
++        linux_glibc_arm64: {
++            enabled: true,
++            srcs: ["linux_glibc/arm64/lib/libicu_jni.so"],
++        },
+         linux_glibc_x86: {
+             enabled: true,
+             srcs: ["linux_glibc/x86/lib/libicu_jni.so"],

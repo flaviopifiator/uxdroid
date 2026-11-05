@@ -1,0 +1,191 @@
+name: uxdroid
+
+services:
+  # Builds and tests. Has network access to fetch crates.
+  dev:
+    image: uxdroid-dev
+    build: .
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - .:/work
+      - cache:/cache
+      - art_runtime:/runtime:ro
+
+  # Handles untrusted APKs: no network, source and samples read-only.
+  sandbox:
+    extends: dev
+    network_mode: none
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - .:/work:ro
+      - cache:/cache:ro
+      - art_runtime:/runtime:ro
+      - ${UXDROID_SAMPLES:-./samples}:/samples:ro
+
+  # `dev` with the host's GPU, for the GPU rendering path. No vendor package is installed: the GPU
+  # nodes are passed in and the host driver's user-space libraries are mounted read-only, the same
+  # set a CDI spec would inject, so they always match the host's kernel driver. Mesa's llvmpipe
+  # stays in the image as the fallback. Paths are for the host's NVIDIA 595 driver; another host
+  # adjusts them or uses only /dev/dri with Mesa's own drivers. A missing file stops the start
+  # instead of being created on the host.
+  dev-gpu:
+    extends: dev
+    profiles: [gpu]
+    environment:
+      XDG_CACHE_HOME: /tmp/cache
+    group_add: ["${UXDROID_RENDER_GID:-990}"]
+    devices:
+      - /dev/dri/renderD128
+      - /dev/nvidia0
+      - /dev/nvidiactl
+      - /dev/nvidia-modeset
+      - /dev/nvidia-uvm
+    volumes:
+      - {type: bind, source: /usr/share/glvnd/egl_vendor.d/10_nvidia.json, target: /usr/share/glvnd/egl_vendor.d/10_nvidia.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json, target: /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0, target: /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2, target: /usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1, target: /usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-tls.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-tls.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.99.02, target: /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.99.02, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1, target: /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1, target: /usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so, target: /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so, read_only: true, bind: {create_host_path: false}}
+
+  # `dev` plus the arm64 translation engine (Dynarmic, built from pinned sources), QEMU user and the
+  # compute kernel's zlib, for the translation tests and benchmark. Build `dev` first: it is the base.
+  translation:
+    extends: dev
+    image: uxdroid-translation
+    build:
+      context: .
+      dockerfile: docker/translation/Dockerfile
+
+  # `dev` building for an aarch64 Linux host, with what it builds run under QEMU user. Its own
+  # target directory, /cache/target-arm64-host. Build `dev` first: it is the base.
+  dev-arm64:
+    extends: dev
+    image: uxdroid-dev-arm64
+    build:
+      context: .
+      dockerfile: docker/arm64-host/Dockerfile
+    # QEMU user writes a core file into the working directory, the source tree, for every test
+    # that ends in abort on purpose.
+    ulimits:
+      core: 0
+
+  # `sandbox` for the aarch64 host build: no network, source and samples read-only.
+  sandbox-arm64:
+    extends: sandbox
+    image: uxdroid-dev-arm64
+    build:
+      context: .
+      dockerfile: docker/arm64-host/Dockerfile
+    ulimits:
+      core: 0
+
+  # Compares loader performance against competitors. Offline, with real libraries read-only.
+  bench:
+    profiles: [bench]
+    build:
+      context: .
+      dockerfile: benches/loader/Dockerfile
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    tmpfs: ["/tmp:exec"]
+    volumes:
+      - .:/work:ro
+      - cache:/cache:ro
+      - ${UXDROID_SAMPLES:-./samples}:/samples:ro
+
+  # Downloads and builds ART. Network access only for the download; output stays in a volume.
+  art-builder:
+    profiles: [art]
+    build: runtime/art
+    user: "1000:1000"
+    # Running out of memory must kill the build, never freeze the machine (30 GiB RAM).
+    mem_limit: 22g
+    memswap_limit: 22g
+    cpus: 10
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - art_src:/aosp
+      - art_runtime:/runtime
+      - .:/work:ro
+
+  # Builds libandroid_runtime and ICU for the arm64 host from part of android-16.0.0_r1
+  # (runtime/framework/android16), next to the master-art tree, whose sysroot and libc++ it shares.
+  # Network access only for the download; output stays in volumes.
+  android16-builder:
+    profiles: [art]
+    build: runtime/art
+    user: "1000:1000"
+    mem_limit: 22g
+    memswap_limit: 22g
+    cpus: 10
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - android16_src:/a16
+      - art_src:/aosp
+      - art_runtime:/runtime
+      - .:/work:ro
+
+  # Runs packaged ART in a plain Ubuntu with no AOSP tree, no network and a read-only system.
+  art-runtime:
+    profiles: [art]
+    image: ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    read_only: true
+    tmpfs: ["/tmp:exec"]
+    volumes:
+      - art_runtime:/runtime:ro
+      - .:/work:ro
+
+  # Compares ART startup and compiled code speed against art_standalone. Offline.
+  art-bench:
+    profiles: [art]
+    build:
+      context: .
+      dockerfile: benches/art/Dockerfile
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    tmpfs: ["/tmp:exec"]
+    volumes:
+      - art_runtime:/runtime:ro
+      - art_competitor:/competitor
+      - .:/work:ro
+
+  # Builds the comparison target. Its license is undetermined, so it stays in a volume.
+  art-competitor-builder:
+    profiles: [art]
+    image: debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+    mem_limit: 22g
+    memswap_limit: 22g
+    cpus: 10
+    volumes:
+      - art_competitor:/competitor
+      - .:/work:ro
+
+volumes:
+  cache:
+  art_src:
+    name: uxdroid-art_art_src
+  art_runtime:
+    name: uxdroid-art_art_runtime
+  android16_src:
+    name: uxdroid-android16_src
+  art_competitor:
+    name: uxdroid-art_art_competitor

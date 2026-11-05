@@ -1,0 +1,17 @@
+Include <signal.h> where siginfo_t and sigaction are used.
+
+glibc 2.26 and later no longer declare them through <ucontext.h>, which the arm64 host build with
+glibc 2.31 shows.
+
+diff --git a/runtime/runtime_common.h b/runtime/runtime_common.h
+index 803b1aa..d331161 100644
+--- a/runtime/runtime_common.h
++++ b/runtime/runtime_common.h
+@@ -25,6 +25,7 @@
+ #define _XOPEN_SOURCE
+ #endif
+ 
++#include <signal.h>
+ #include <sys/utsname.h>
+ #include <ucontext.h>
+ 

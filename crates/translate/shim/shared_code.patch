@@ -1,0 +1,1523 @@
+uxdroid's change to Dynarmic (azahar-emu/dynarmic a46601580d55, 0BSD; its LICENSE.txt is untouched):
+one code cache that every guest CPU of the process shares, so a block is translated once, not once
+per guest thread and nesting level. Applied by CMakeLists.txt on top of
+docker/translation/dynarmic.patch.
+
+- interface/A64/a64.h, backend/x64/a64_interface.cpp: Jit::Impl is split into CodeCache (the code
+  buffer, the emitter and a lock held to look a block up and to emit and link it, never while
+  guest code is decoded into IR) and Jit (one CPU's state, which looks in its own fast dispatch
+  table before taking the lock when it enters guest code). A cache never clears or invalidates code; with no room
+  left it makes the Jit stop with the new HaltReason::CodeCacheFull (interface/halt_reason.h) and
+  its owner moves it to another cache with Jit::SetCodeCache. ClearCache and InvalidateCacheRange
+  stop the program instead. CodeCache::Translate translates a block ahead of any Jit, and
+  CodeCache::Locations lists what a cache translated, for profiles kept between runs. The block
+  lookup the dispatcher calls finds the running Jit through a
+  thread-local record that each Run saves and restores.
+- backend/x64/a64_jitstate.h: what code used to bake in per Jit is in its state, read through r15:
+  TPIDR_EL0 and TPIDRRO_EL0 pointers, the fast dispatch table (one per Jit, 1 MiB of lazily
+  touched zeros, mapped with mmap), and the exclusive reservation.
+- backend/x64/a64_emit_x64.{h,cpp}, emit_x64.{h,cpp}: links between blocks are retargeted with one
+  aligned 4- or 8-byte atomic store of a jump displacement or immediate, never rewritten in place,
+  so other threads may run the code being linked; the unlinked path is a stub after each location.
+- backend/x64/emit_x64.{h,cpp}: the blocks and the jumps waiting for them are one link table
+  shared by a cache's emitters, each writing into its own part of one region, under a lock taken
+  inside the emitter's; a block registered twice keeps its first copy. a64_emit_x64.cpp records
+  no guest ranges, since nothing invalidates by range.
+- backend/x64/block_of_code.{h,cpp}: a BlockOfCode can take its memory from a given allocator,
+  and the constant pool is not cleared, since fresh mappings are zero.
+- backend/x64/emit_x64_memory.cpp.inc: exclusive loads and stores keep the reservation in the
+  Jit's state and compare and swap against the value read (the global monitor is ignored, as
+  Unsafe_IgnoreGlobalMonitor does); the fastmem fault handler reads its table under a lock of its
+  own and never recompiles a block.
+
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64.cpp b/src/dynarmic/backend/x64/a64_emit_x64.cpp
+index cec7813..5389239 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64.cpp
++++ b/src/dynarmic/backend/x64/a64_emit_x64.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include "dynarmic/backend/x64/a64_emit_x64.h"
+ 
++#include <cstdint>
++
+ #include <fmt/format.h>
+ #include <fmt/ostream.h>
+ #include <mcl/assert.hpp>
+@@ -49,13 +51,12 @@ FP::FPCR A64EmitContext::FPCR(bool fpcr_controlled) const {
+     return fpcr_controlled ? Location().FPCR() : Location().FPCR().ASIMDStandardValue();
+ }
+ 
+-A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_interface)
+-        : EmitX64(code), conf(conf), jit_interface{jit_interface} {
++A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_interface, LinkTable* links)
++        : EmitX64(code, links), conf(conf), jit_interface{jit_interface} {
+     GenMemory128Accessors();
+     GenFastmemFallbacks();
+     GenTerminalHandlers();
+     code.PreludeComplete();
+-    ClearFastDispatchTable();
+ 
+     exception_handler.SetFastmemCallback([this](u64 rip_) {
+         return FastmemCallback(rip_);
+@@ -141,10 +142,10 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) {
+     const size_t size = static_cast<size_t>(code.getCurr() - entrypoint);
+ 
+     const A64::LocationDescriptor descriptor{block.Location()};
+-    const A64::LocationDescriptor end_location{block.EndLocation()};
+ 
+-    const auto range = boost::icl::discrete_interval<u64>::closed(descriptor.PC(), end_location.PC() - 1);
+-    block_ranges.AddRange(range, descriptor);
++    // uxdroid: no guest ranges are recorded, since a cache is never invalidated by range
++    // (Jit::InvalidateCacheRange stops the program). Recording them was a large part of the time
++    // spent emitting, which other threads wait for when they share the cache.
+ 
+     return RegisterBlock(descriptor, entrypoint, size);
+ }
+@@ -152,7 +153,6 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) {
+ void A64EmitX64::ClearCache() {
+     EmitX64::ClearCache();
+     block_ranges.ClearCache();
+-    ClearFastDispatchTable();
+     fastmem_patch_info.clear();
+ }
+ 
+@@ -160,12 +160,6 @@ void A64EmitX64::InvalidateCacheRanges(const boost::icl::interval_set<u64>& rang
+     InvalidateBasicBlocks(block_ranges.InvalidateRanges(ranges));
+ }
+ 
+-void A64EmitX64::ClearFastDispatchTable() {
+-    if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
+-        fast_dispatch_table.fill({});
+-    }
+-}
+-
+ void A64EmitX64::GenTerminalHandlers() {
+     // PC ends up in rbp, location_descriptor ends up in rbx
+     const auto calculate_location_descriptor = [this] {
+@@ -204,7 +198,8 @@ void A64EmitX64::GenTerminalHandlers() {
+         terminal_handler_fast_dispatch_hint = code.getCurr<const void*>();
+         calculate_location_descriptor();
+         code.L(rsb_cache_miss);
+-        code.mov(r12, reinterpret_cast<u64>(fast_dispatch_table.data()));
++        // uxdroid: the running Jit's own table.
++        code.mov(r12, qword[r15 + offsetof(A64JitState, fast_dispatch_table)]);
+         code.mov(rbp, rbx);
+         if (code.HasHostFeature(HostFeature::SSE42)) {
+             code.crc32(rbp, r12);
+@@ -220,17 +215,6 @@ void A64EmitX64::GenTerminalHandlers() {
+         code.mov(ptr[rbp + offsetof(FastDispatchEntry, code_ptr)], rax);
+         code.jmp(rax);
+         PerfMapRegister(terminal_handler_fast_dispatch_hint, code.getCurr(), "a64_terminal_handler_fast_dispatch_hint");
+-
+-        code.align();
+-        fast_dispatch_table_lookup = code.getCurr<FastDispatchEntry& (*)(u64)>();
+-        code.mov(code.ABI_PARAM2, reinterpret_cast<u64>(fast_dispatch_table.data()));
+-        if (code.HasHostFeature(HostFeature::SSE42)) {
+-            code.crc32(code.ABI_PARAM1, code.ABI_PARAM2);
+-        }
+-        code.and_(code.ABI_PARAM1.cvt32(), fast_dispatch_table_mask);
+-        code.lea(code.ABI_RETURN, code.ptr[code.ABI_PARAM2 + code.ABI_PARAM1]);
+-        code.ret();
+-        PerfMapRegister(fast_dispatch_table_lookup, code.getCurr(), "a64_fast_dispatch_table_lookup");
+     }
+ }
+ 
+@@ -558,23 +542,17 @@ void A64EmitX64::EmitA64GetDCZID(A64EmitContext& ctx, IR::Inst* inst) {
+ 
+ void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
+     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr();
+-    if (conf.tpidr_el0) {
+-        code.mov(result, u64(conf.tpidr_el0));
+-        code.mov(result, qword[result]);
+-    } else {
+-        code.xor_(result.cvt32(), result.cvt32());
+-    }
++    // uxdroid: through the running Jit's pointer, which never is null (Jit::Impl).
++    code.mov(result, qword[r15 + offsetof(A64JitState, tpidr_el0)]);
++    code.mov(result, qword[result]);
+     ctx.reg_alloc.DefineValue(inst, result);
+ }
+ 
+ void A64EmitX64::EmitA64GetTPIDRRO(A64EmitContext& ctx, IR::Inst* inst) {
+     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr();
+-    if (conf.tpidrro_el0) {
+-        code.mov(result, u64(conf.tpidrro_el0));
+-        code.mov(result, qword[result]);
+-    } else {
+-        code.xor_(result.cvt32(), result.cvt32());
+-    }
++    // uxdroid: as TPIDR_EL0.
++    code.mov(result, qword[r15 + offsetof(A64JitState, tpidrro_el0)]);
++    code.mov(result, qword[result]);
+     ctx.reg_alloc.DefineValue(inst, result);
+ }
+ 
+@@ -582,10 +560,9 @@ void A64EmitX64::EmitA64SetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
+     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+     const Xbyak::Reg64 value = ctx.reg_alloc.UseGpr(args[0]);
+     const Xbyak::Reg64 addr = ctx.reg_alloc.ScratchGpr();
+-    if (conf.tpidr_el0) {
+-        code.mov(addr, u64(conf.tpidr_el0));
+-        code.mov(qword[addr], value);
+-    }
++    // uxdroid: as GetTPIDR.
++    code.mov(addr, qword[r15 + offsetof(A64JitState, tpidr_el0)]);
++    code.mov(qword[addr], value);
+ }
+ 
+ std::string A64EmitX64::LocationDescriptorToFriendlyName(const IR::LocationDescriptor& ir_descriptor) const {
+@@ -620,8 +597,9 @@ void A64EmitX64::EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDesc
+     if (conf.enable_cycle_counting) {
+         code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 0);
+ 
++        std::lock_guard lock{links.mutex};
+         patch_information[terminal.next].jg.push_back(code.getCurr());
+-        if (const auto next_bb = GetBasicBlock(terminal.next)) {
++        if (const auto next_bb = GetBasicBlockLocked(terminal.next)) {
+             EmitPatchJg(terminal.next, next_bb->entrypoint);
+         } else {
+             EmitPatchJg(terminal.next);
+@@ -629,8 +607,9 @@ void A64EmitX64::EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDesc
+     } else {
+         code.cmp(dword[r15 + offsetof(A64JitState, halt_reason)], 0);
+ 
++        std::lock_guard lock{links.mutex};
+         patch_information[terminal.next].jz.push_back(code.getCurr());
+-        if (const auto next_bb = GetBasicBlock(terminal.next)) {
++        if (const auto next_bb = GetBasicBlockLocked(terminal.next)) {
+             EmitPatchJz(terminal.next, next_bb->entrypoint);
+         } else {
+             EmitPatchJz(terminal.next);
+@@ -650,8 +629,9 @@ void A64EmitX64::EmitTerminalImpl(IR::Term::LinkBlockFast terminal, IR::Location
+         return;
+     }
+ 
++    std::lock_guard lock{links.mutex};
+     patch_information[terminal.next].jmp.push_back(code.getCurr());
+-    if (auto next_bb = GetBasicBlock(terminal.next)) {
++    if (auto next_bb = GetBasicBlockLocked(terminal.next)) {
+         EmitPatchJmp(terminal.next, next_bb->entrypoint);
+     } else {
+         EmitPatchJmp(terminal.next);
+@@ -706,58 +686,120 @@ void A64EmitX64::EmitTerminalImpl(IR::Term::CheckHalt terminal, IR::LocationDesc
+     EmitTerminal(terminal.else_, initial_location, is_single_step);
+ }
+ 
++// uxdroid: patch locations that one aligned atomic store retargets, since other threads may be
++// running the code around them. A conditional location is
++//
++//     nops, so that the displacement below is 4-byte aligned
++//     0F 8x rel32          ; jg or jz to the target, or to the stub below when unlinked
++//     EB xx                ; not taken: on to the code after the location
++//     stub: mov rax, pc; mov [r15 + pc], rax; jmp return_from_run_code
++//
++// an unconditional one is `E9 rel32` with the same alignment and the stub right after it, and a
++// return stack buffer entry is `mov rcx, imm64` with the immediate 8-byte aligned. Only the
++// displacement or the immediate ever changes after emission, so a thread fetching it sees either
++// target in full: an aligned store of 4 or 8 bytes never splits across a cache line, and x86
++// keeps instruction fetch coherent with such a store (HotSpot patches calls the same way). The
++// target code is written before the store that publishes it, under the cache's lock.
++namespace {
++
++constexpr size_t JCC_LENGTH = 6;
++constexpr size_t SHORT_JMP_LENGTH = 2;
++constexpr size_t JMP_LENGTH = 5;
++
++size_t PaddingFor(CodePtr location, size_t offset, size_t alignment) {
++    const auto address = reinterpret_cast<std::uintptr_t>(location) + offset;
++    return (alignment - address % alignment) % alignment;
++}
++
++void StoreRel32(CodePtr instruction_end, CodePtr target) {
++    const auto from = reinterpret_cast<std::intptr_t>(instruction_end);
++    const auto to = reinterpret_cast<std::intptr_t>(target);
++    const std::intptr_t displacement = to - from;
++    ASSERT(displacement >= INT32_MIN && displacement <= INT32_MAX);
++    auto* field = reinterpret_cast<std::int32_t*>(reinterpret_cast<std::uintptr_t>(instruction_end) - 4);
++    ASSERT(reinterpret_cast<std::uintptr_t>(field) % 4 == 0);
++    __atomic_store_n(field, static_cast<std::int32_t>(displacement), __ATOMIC_RELEASE);
++}
++
++}  // namespace
++
++void A64EmitX64::EmitPatchJcc(u8 opcode, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    // The displacement starts 2 bytes into the instruction.
++    code.nop(PaddingFor(code.getCurr(), 2, 4));
++    const u8* site = code.getCurr<const u8*>();
++    Xbyak::Label after;
++    code.db(0x0F);
++    code.db(opcode);
++    code.dd(0);
++    code.jmp(after, Xbyak::CodeGenerator::T_SHORT);
++    ASSERT(code.getCurr<const u8*>() == site + JCC_LENGTH + SHORT_JMP_LENGTH);
++    code.mov(rax, A64::LocationDescriptor{target_desc}.PC());
++    code.mov(qword[r15 + offsetof(A64JitState, pc)], rax);
++    code.jmp(code.GetReturnFromRunCodeAddress());
++    code.L(after);
++    StoreRel32(site + JCC_LENGTH, target_code_ptr ? target_code_ptr : site + JCC_LENGTH + SHORT_JMP_LENGTH);
++}
++
+ void A64EmitX64::EmitPatchJg(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
+-    const CodePtr patch_location = code.getCurr();
+-    if (target_code_ptr) {
+-        code.jg(target_code_ptr);
+-    } else {
+-        code.mov(rax, A64::LocationDescriptor{target_desc}.PC());
+-        code.mov(qword[r15 + offsetof(A64JitState, pc)], rax);
+-        code.jg(code.GetReturnFromRunCodeAddress());
+-    }
+-    code.EnsurePatchLocationSize(patch_location, 23);
++    EmitPatchJcc(0x8F, target_desc, target_code_ptr);
+ }
+ 
+ void A64EmitX64::EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
+-    const CodePtr patch_location = code.getCurr();
+-    if (target_code_ptr) {
+-        code.jz(target_code_ptr);
+-    } else {
+-        code.mov(rax, A64::LocationDescriptor{target_desc}.PC());
+-        code.mov(qword[r15 + offsetof(A64JitState, pc)], rax);
+-        code.jz(code.GetReturnFromRunCodeAddress());
+-    }
+-    code.EnsurePatchLocationSize(patch_location, 23);
++    EmitPatchJcc(0x84, target_desc, target_code_ptr);
+ }
+ 
+ void A64EmitX64::EmitPatchJmp(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
+-    const CodePtr patch_location = code.getCurr();
+-    if (target_code_ptr) {
+-        code.jmp(target_code_ptr);
+-    } else {
+-        code.mov(rax, A64::LocationDescriptor{target_desc}.PC());
+-        code.mov(qword[r15 + offsetof(A64JitState, pc)], rax);
+-        code.jmp(code.GetReturnFromRunCodeAddress());
+-    }
+-    code.EnsurePatchLocationSize(patch_location, 22);
++    // The displacement starts 1 byte into the instruction.
++    code.nop(PaddingFor(code.getCurr(), 1, 4));
++    const u8* site = code.getCurr<const u8*>();
++    code.db(0xE9);
++    code.dd(0);
++    code.mov(rax, A64::LocationDescriptor{target_desc}.PC());
++    code.mov(qword[r15 + offsetof(A64JitState, pc)], rax);
++    code.jmp(code.GetReturnFromRunCodeAddress());
++    StoreRel32(site + JMP_LENGTH, target_code_ptr ? target_code_ptr : site + JMP_LENGTH);
+ }
+ 
+ void A64EmitX64::EmitPatchMovRcx(CodePtr target_code_ptr) {
+     if (!target_code_ptr) {
+         target_code_ptr = code.GetReturnFromRunCodeAddress();
+     }
+-    const CodePtr patch_location = code.getCurr();
+-    code.mov(code.rcx, reinterpret_cast<u64>(target_code_ptr));
+-    code.EnsurePatchLocationSize(patch_location, 10);
++    // REX.W B9 imm64, with the immediate 2 bytes in.
++    code.nop(PaddingFor(code.getCurr(), 2, 8));
++    code.db(0x48);
++    code.db(0xB9);
++    code.dq(reinterpret_cast<u64>(target_code_ptr));
++}
++
++void A64EmitX64::RetargetJg(CodePtr location, const IR::LocationDescriptor&, CodePtr target_code_ptr) {
++    const u8* site = reinterpret_cast<const u8*>(location) + PaddingFor(location, 2, 4);
++    StoreRel32(site + JCC_LENGTH, target_code_ptr ? target_code_ptr : site + JCC_LENGTH + SHORT_JMP_LENGTH);
++}
++
++void A64EmitX64::RetargetJz(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    RetargetJg(location, target_desc, target_code_ptr);
++}
++
++void A64EmitX64::RetargetJmp(CodePtr location, const IR::LocationDescriptor&, CodePtr target_code_ptr) {
++    const u8* site = reinterpret_cast<const u8*>(location) + PaddingFor(location, 1, 4);
++    StoreRel32(site + JMP_LENGTH, target_code_ptr ? target_code_ptr : site + JMP_LENGTH);
++}
++
++void A64EmitX64::RetargetMovRcx(CodePtr location, CodePtr target_code_ptr) {
++    if (!target_code_ptr) {
++        target_code_ptr = code.GetReturnFromRunCodeAddress();
++    }
++    const u8* site = reinterpret_cast<const u8*>(location) + PaddingFor(location, 2, 8);
++    auto* field = reinterpret_cast<u64*>(reinterpret_cast<std::uintptr_t>(site) + 2);
++    ASSERT(reinterpret_cast<std::uintptr_t>(field) % 8 == 0);
++    __atomic_store_n(field, reinterpret_cast<u64>(target_code_ptr), __ATOMIC_RELEASE);
+ }
+ 
++// uxdroid: each Jit's fast dispatch table may still name an unlinked block. Its code stays in the
++// cache, which never reuses memory, so such an entry runs the old translation, which is still
++// correct for what invalidates blocks here: a fastmem fault, whose access then takes the slow path.
+ void A64EmitX64::Unpatch(const IR::LocationDescriptor& location) {
+     EmitX64::Unpatch(location);
+-    if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
+-        code.DisableWriting();
+-        (*fast_dispatch_table_lookup)(location.Value()) = {};
+-        code.EnableWriting();
+-    }
+ }
+ 
+ }  // namespace Dynarmic::Backend::X64
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64.h b/src/dynarmic/backend/x64/a64_emit_x64.h
+index eba2bb4..8e310b4 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64.h
++++ b/src/dynarmic/backend/x64/a64_emit_x64.h
+@@ -7,6 +7,7 @@
+ 
+ #include <array>
+ #include <map>
++#include <mutex>
+ #include <optional>
+ #include <tuple>
+ 
+@@ -38,7 +39,7 @@ struct A64EmitContext final : public EmitContext {
+ 
+ class A64EmitX64 final : public EmitX64 {
+ public:
+-    A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_interface);
++    A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_interface, LinkTable* links = nullptr);
+     ~A64EmitX64() override;
+ 
+     /**
+@@ -51,22 +52,25 @@ public:
+ 
+     void InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges);
+ 
+-protected:
+-    const A64::UserConfig conf;
+-    A64::Jit* jit_interface;
+-    BlockRangeInformation<u64> block_ranges;
++    /// uxdroid: whether fastmem works here; shared code needs it, as its exclusive accesses do not
++    /// go through the global monitor.
++    bool SupportsFastmem() const { return exception_handler.SupportsFastmem(); }
+ 
+     struct FastDispatchEntry {
+         u64 location_descriptor = 0xFFFF'FFFF'FFFF'FFFFull;
+         const void* code_ptr = nullptr;
+     };
+     static_assert(sizeof(FastDispatchEntry) == 0x10);
+-    // uxdroid: 65536 entries (1 MiB) instead of 2^20 (16 MiB), which every CPU writes in full when
+-    // it is made; uxdroid makes one CPU per guest thread and nesting depth.
++    // uxdroid: each Jit has its own table, A64JitState::fast_dispatch_table, of 65536 entries
++    // (1 MiB) instead of 2^20 (16 MiB). Its memory starts as zeros and is touched only where used;
++    // an all-zero entry names location 0, a jump to address 0, which faults either way.
+     static constexpr u64 fast_dispatch_table_mask = 0xFFFF0;
+     static constexpr size_t fast_dispatch_table_size = 0x10000;
+-    std::array<FastDispatchEntry, fast_dispatch_table_size> fast_dispatch_table;
+-    void ClearFastDispatchTable();
++
++protected:
++    const A64::UserConfig conf;
++    A64::Jit* jit_interface;
++    BlockRangeInformation<u64> block_ranges;
+ 
+     void (*memory_read_128)();
+     void (*memory_write_128)();
+@@ -80,7 +84,6 @@ protected:
+ 
+     const void* terminal_handler_pop_rsb_hint;
+     const void* terminal_handler_fast_dispatch_hint = nullptr;
+-    FastDispatchEntry& (*fast_dispatch_table_lookup)(u64) = nullptr;
+     void GenTerminalHandlers();
+ 
+     // Microinstruction emitters
+@@ -104,7 +107,31 @@ protected:
+         DoNotFastmemMarker marker;
+         bool recompile;
+     };
+-    tsl::robin_map<u64, FastmemPatchInfo> fastmem_patch_info;
++    // uxdroid: the fault handler reads this on whichever thread faults, while another thread may be
++    // emitting, so every access takes its own lock. The handler never takes the cache's lock: a
++    // thread translating under it may fault reading guest code, and would wait on itself.
++    struct LockedFastmemPatchInfo {
++        mutable std::mutex mutex;
++        tsl::robin_map<u64, FastmemPatchInfo> map;
++        template<typename... Args>
++        void emplace(Args&&... args) {
++            std::lock_guard guard{mutex};
++            map.emplace(std::forward<Args>(args)...);
++        }
++        std::optional<FastmemPatchInfo> find(u64 rip) const {
++            std::lock_guard guard{mutex};
++            const auto iter = map.find(rip);
++            if (iter == map.end()) {
++                return std::nullopt;
++            }
++            return iter->second;
++        }
++        void clear() {
++            std::lock_guard guard{mutex};
++            map.clear();
++        }
++    };
++    LockedFastmemPatchInfo fastmem_patch_info;
+     std::set<DoNotFastmemMarker> do_not_fastmem;
+     std::optional<DoNotFastmemMarker> ShouldFastmem(A64EmitContext& ctx, IR::Inst* inst) const;
+     FakeCall FastmemCallback(u64 rip);
+@@ -141,6 +168,11 @@ protected:
+     void EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) override;
+     void EmitPatchJmp(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) override;
+     void EmitPatchMovRcx(CodePtr target_code_ptr = nullptr) override;
++    void RetargetJg(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) override;
++    void RetargetJz(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) override;
++    void RetargetJmp(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) override;
++    void RetargetMovRcx(CodePtr location, CodePtr target_code_ptr) override;
++    void EmitPatchJcc(u8 opcode, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr);
+ };
+ 
+ }  // namespace Dynarmic::Backend::X64
+diff --git a/src/dynarmic/backend/x64/a64_interface.cpp b/src/dynarmic/backend/x64/a64_interface.cpp
+index b9373f7..7ecc88a 100644
+--- a/src/dynarmic/backend/x64/a64_interface.cpp
++++ b/src/dynarmic/backend/x64/a64_interface.cpp
+@@ -3,11 +3,18 @@
+  * SPDX-License-Identifier: 0BSD
+  */
+ 
++// uxdroid: split into a CodeCache, the translated code and what makes it, which any number of
++// Jits share, and the Jit itself, which keeps only the state of one guest CPU. See CodeCache in
++// a64.h for the locking rules.
++
++#include <sys/mman.h>
++
++#include <atomic>
+ #include <cstring>
+ #include <memory>
+ #include <mutex>
++#include <vector>
+ 
+-#include <boost/icl/interval_set.hpp>
+ #include <mcl/assert.hpp>
+ #include <mcl/bit_cast.hpp>
+ #include <mcl/scope_exit.hpp>
+@@ -28,7 +35,24 @@ namespace Dynarmic::A64 {
+ 
+ using namespace Backend::X64;
+ 
+-static RunCodeCallbacks GenRunCodeCallbacks(A64::UserCallbacks* cb, CodePtr (*LookupBlock)(void* lookup_block_arg), void* arg, const A64::UserConfig& conf) {
++namespace {
++
++// The Jit whose code this thread is running, innermost first: the block lookup that translated
++// code calls finds its state through it. Each Run saves and restores it, so a callback that runs
++// another Jit on the same thread leaves it as it was. Jit::Impl is private to Jit, so this names it
++// only through `lookup`, one of its own functions.
++struct RunningJit {
++    void* jit = nullptr;
++    CodePtr (*lookup)(void* jit) = nullptr;
++};
++thread_local RunningJit running;
++
++CodePtr LookupBlockForRunningJit(void*) {
++    ASSERT(running.jit != nullptr);
++    return running.lookup(running.jit);
++}
++
++RunCodeCallbacks GenRunCodeCallbacks(A64::UserCallbacks* cb, CodePtr (*LookupBlock)(void* lookup_block_arg), void* arg, const A64::UserConfig& conf) {
+     return RunCodeCallbacks{
+         std::make_unique<ArgCallback>(LookupBlock, reinterpret_cast<u64>(arg)),
+         std::make_unique<ArgCallback>(Devirtualize<&A64::UserCallbacks::AddTicks>(cb)),
+@@ -37,7 +61,7 @@ static RunCodeCallbacks GenRunCodeCallbacks(A64::UserCallbacks* cb, CodePtr (*Lo
+     };
+ }
+ 
+-static std::function<void(BlockOfCode&)> GenRCP(const A64::UserConfig& conf) {
++std::function<void(BlockOfCode&)> GenRCP(const A64::UserConfig& conf) {
+     return [conf](BlockOfCode& code) {
+         if (conf.page_table) {
+             code.mov(code.r14, mcl::bit_cast<u64>(conf.page_table));
+@@ -48,36 +72,272 @@ static std::function<void(BlockOfCode&)> GenRCP(const A64::UserConfig& conf) {
+     };
+ }
+ 
+-static Optimization::PolyfillOptions GenPolyfillOptions(const BlockOfCode& code) {
++Optimization::PolyfillOptions GenPolyfillOptions(const BlockOfCode& code) {
+     return Optimization::PolyfillOptions{
+         .sha256 = !code.HasHostFeature(HostFeature::SHA),
+         .vector_multiply_widen = true,
+     };
+ }
+ 
++// Shared code cannot honour the global monitor (see CodeCache), so it is ignored on purpose.
++UserConfig ForSharing(UserConfig conf) {
++    if (!conf.unsafe_optimizations) {
++        conf.optimizations &= all_safe_optimizations;
++    }
++    conf.unsafe_optimizations = true;
++    conf.optimizations |= OptimizationFlag::Unsafe_IgnoreGlobalMonitor;
++    // A fastmem fault never recompiles a block that other threads may be running.
++    conf.recompile_on_fastmem_failure = false;
++    conf.recompile_on_exclusive_fastmem_failure = false;
++    return conf;
++}
++
++constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
++
++std::atomic<size_t> total_blocks{0};
++
++// One region of address space for all of a cache's emitters, so a jump from one emitter's code
++// reaches another's with a 32-bit displacement. Each emitter's BlockOfCode takes the next part.
++class RegionAllocator final : public Xbyak::Allocator {
++public:
++    RegionAllocator(size_t parts, size_t part_size)
++            : part_size(part_size), size(parts * part_size) {
++        ASSERT(size <= 0x7FFF'0000);
++        void* mapped = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++        ASSERT_MSG(mapped != MAP_FAILED, "cannot reserve a code region");
++        base = static_cast<u8*>(mapped);
++    }
++    ~RegionAllocator() override {
++        munmap(base, size);
++    }
++
++    uint8_t* alloc(size_t wanted) override {
++        ASSERT(wanted <= part_size && next * part_size < size);
++        return base + part_size * next++;
++    }
++    // The region goes as a whole, with the cache.
++    void free(uint8_t*) override {}
++
++private:
++    const size_t part_size;
++    const size_t size;
++    u8* base = nullptr;
++    size_t next = 0;
++};
++
++// The emitters a thread starts with, spread over threads as they first translate.
++std::atomic<size_t> next_preferred_emitter{0};
++thread_local size_t preferred_emitter = SIZE_MAX;
++
++}  // namespace
++
++struct CodeCache::Impl final {
++    // One code buffer and emitter of the cache, with the lock that serializes emitting into it.
++    struct Emitter {
++        Emitter(Impl& cache, size_t size)
++                : block_of_code(GenRunCodeCallbacks(cache.conf.callbacks, &LookupBlockForRunningJit, &cache, cache.conf), JitStateInfo{A64JitState{}}, size, GenRCP(cache.conf), &cache.region)
++                , emitter(block_of_code, cache.conf, nullptr, &cache.links) {}
++
++        BlockOfCode block_of_code;
++        A64EmitX64 emitter;
++        // Held while emitting into this buffer, and to read its write position.
++        mutable std::mutex mutex;
++    };
++
++    Impl(UserConfig conf_, size_t emitter_count)
++            : conf(ForSharing(conf_))
++            , region(std::max<size_t>(emitter_count, 1), conf.code_cache_size / std::max<size_t>(emitter_count, 1) / 4096 * 4096) {
++        const size_t count = std::max<size_t>(emitter_count, 1);
++        const size_t part = conf.code_cache_size / count / 4096 * 4096;
++        for (size_t i = 0; i < count; ++i) {
++            emitters.push_back(std::make_unique<Emitter>(*this, part));
++        }
++        polyfill_options = GenPolyfillOptions(emitters[0]->block_of_code);
++        ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
++        ASSERT_MSG(conf.fastmem_pointer && conf.fastmem_exclusive_access && emitters[0]->emitter.SupportsFastmem(),
++                   "a shared code cache needs fastmem, for exclusive accesses too");
++    }
++
++    // The block at `location`, translated on first use; null when there is no room for it.
++    //
++    // Locks: the link table's to find a block, one emitter's to emit into its buffer, then the
++    // link table's again inside it to link (see EmitX64::LinkTable). Guest code is decoded into
++    // IR with no lock held, as decoding reads only guest memory and the configuration. A thread
++    // emits into the first emitter it finds free, starting from its own, so threads translating
++    // at once rarely wait for each other. Two threads may translate the same block at once; the
++    // first to register it wins and the other copy is never entered.
++    CodePtr GetBlock(IR::LocationDescriptor location) {
++        if (auto block = emitters[0]->emitter.GetBasicBlock(location)) {
++            return block->entrypoint;
++        }
++        if (full.load(std::memory_order_acquire)) {
++            return nullptr;
++        }
++
++        IR::Block ir_block = Decode(location);
++
++        Emitter& chosen = Lock();
++        std::lock_guard lock{chosen.mutex, std::adopt_lock};
++        if (auto block = chosen.emitter.GetBasicBlock(location)) {
++            return block->entrypoint;
++        }
++        if (full.load(std::memory_order_acquire) || chosen.block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
++            full.store(true, std::memory_order_release);
++            return nullptr;
++        }
++        chosen.block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
++        const CodePtr entrypoint = chosen.emitter.Emit(ir_block).entrypoint;
++        blocks.fetch_add(1, std::memory_order_relaxed);
++        total_blocks.fetch_add(1, std::memory_order_relaxed);
++        {
++            std::lock_guard order_lock{order_mutex};
++            order.push_back(location.Value());
++        }
++        return entrypoint;
++    }
++
++    // Locks a free emitter, or waits for the thread's own when all are busy.
++    Emitter& Lock() {
++        if (preferred_emitter == SIZE_MAX) {
++            preferred_emitter = next_preferred_emitter.fetch_add(1, std::memory_order_relaxed);
++        }
++        const size_t first = preferred_emitter % emitters.size();
++        for (size_t i = 0; i < emitters.size(); ++i) {
++            Emitter& candidate = *emitters[(first + i) % emitters.size()];
++            if (candidate.mutex.try_lock()) {
++                return candidate;
++            }
++        }
++        emitters[first]->mutex.lock();
++        return *emitters[first];
++    }
++
++    // Guest code at `location` as optimized IR. Takes no lock.
++    IR::Block Decode(IR::LocationDescriptor location) const {
++        const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
++        IR::Block ir_block = A64::Translate(A64::LocationDescriptor{location}, get_code,
++                                            {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
++        Optimization::PolyfillPass(ir_block, polyfill_options);
++        Optimization::A64CallbackConfigPass(ir_block, conf);
++        Optimization::NamingPass(ir_block);
++        if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
++            Optimization::A64GetSetElimination(ir_block);
++            Optimization::DeadCodeElimination(ir_block);
++        }
++        if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
++            Optimization::ConstantPropagation(ir_block);
++            Optimization::DeadCodeElimination(ir_block);
++        }
++        if (conf.HasOptimization(OptimizationFlag::MiscIROpt)) {
++            Optimization::A64MergeInterpretBlocksPass(ir_block, conf.callbacks);
++        }
++        Optimization::IdentityRemovalPass(ir_block);
++        Optimization::VerificationPass(ir_block);
++        return ir_block;
++    }
++
++    size_t CodeSize() const {
++        size_t total = 0;
++        for (const auto& part : emitters) {
++            std::lock_guard lock{part->mutex};
++            total += static_cast<size_t>(reinterpret_cast<const char*>(part->block_of_code.getCurr()) - reinterpret_cast<const char*>(part->block_of_code.GetCodeBegin()));
++        }
++        return total;
++    }
++
++    // Where every Jit enters and leaves translated code. The prologue and epilogue are the same
++    // code in each emitter, so a run entered through this one may leave through another's.
++    BlockOfCode& Entry() {
++        return emitters[0]->block_of_code;
++    }
++
++    const UserConfig conf;
++    // Declared before the emitters, which it outlives.
++    RegionAllocator region;
++    EmitX64::LinkTable links;
++    std::vector<std::unique_ptr<Emitter>> emitters;
++    Optimization::PolyfillOptions polyfill_options;
++
++    std::atomic<bool> full{false};
++    std::atomic<size_t> blocks{0};
++    // What was translated, in order, for Locations. A leaf lock: nothing is taken under it.
++    mutable std::mutex order_mutex;
++    std::vector<u64> order;
++};
++
++CodeCache::CodeCache(UserConfig conf, std::size_t emitters)
++        : impl(std::make_unique<Impl>(conf, emitters)) {}
++
++CodeCache::~CodeCache() = default;
++
++size_t CodeCache::CodeSize() const {
++    return impl->CodeSize();
++}
++
++size_t CodeCache::BlockCount() const {
++    return impl->blocks.load(std::memory_order_relaxed);
++}
++
++bool CodeCache::IsFull() const {
++    return impl->full.load(std::memory_order_acquire);
++}
++
++void CodeCache::Retire() {
++    impl->full.store(true, std::memory_order_release);
++}
++
++size_t CodeCache::TotalBlockCount() {
++    return total_blocks.load(std::memory_order_relaxed);
++}
++
++bool CodeCache::Translate(std::uint64_t location) {
++    return impl->GetBlock(IR::LocationDescriptor{location}) != nullptr;
++}
++
++std::vector<std::uint64_t> CodeCache::Locations() const {
++    std::lock_guard lock{impl->order_mutex};
++    return impl->order;
++}
++
++namespace {
++
++constexpr size_t FAST_DISPATCH_TABLE_BYTES = A64EmitX64::fast_dispatch_table_size * sizeof(A64EmitX64::FastDispatchEntry);
++
++// Zeroed memory that only takes pages as entries are written.
++void* MapFastDispatchTable() {
++    void* table = mmap(nullptr, FAST_DISPATCH_TABLE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    ASSERT_MSG(table != MAP_FAILED, "cannot map a fast dispatch table");
++    return table;
++}
++
++}  // namespace
++
+ struct Jit::Impl final {
+ public:
+-    Impl(Jit* jit, UserConfig conf)
++    Impl(Jit*, UserConfig conf, std::shared_ptr<CodeCache> cache_)
+             : conf(conf)
+-            , block_of_code(GenRunCodeCallbacks(conf.callbacks, &GetCurrentBlockThunk, this, conf), JitStateInfo{jit_state}, conf.code_cache_size, GenRCP(conf))
+-            , emitter(block_of_code, conf, jit)
+-            , polyfill_options(GenPolyfillOptions(block_of_code)) {
+-        ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
++            , cache(std::move(cache_))
++            , fast_dispatch_table(MapFastDispatchTable()) {
++        ASSERT(cache);
++        AttachState();
+     }
+ 
+-    ~Impl() = default;
++    ~Impl() {
++        munmap(fast_dispatch_table, FAST_DISPATCH_TABLE_BYTES);
++    }
+ 
+     HaltReason Run() {
+         ASSERT(!is_executing);
+-        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
++        ClearHalt(HaltReason::CacheInvalidation);
+ 
+         is_executing = true;
++        const RunningJit outer = running;
++        running = RunningJit{this, &Impl::Lookup};
+         SCOPE_EXIT {
++            running = outer;
+             this->is_executing = false;
+         };
+ 
+-        // TODO: Check code alignment
+-
+         const CodePtr current_code_ptr = [this] {
+             // RSB optimization
+             const u32 new_rsb_ptr = (jit_state.rsb_ptr - 1) & A64JitState::RSBPtrMask;
+@@ -86,49 +346,44 @@ public:
+                 return reinterpret_cast<CodePtr>(jit_state.rsb_codeptrs[new_rsb_ptr]);
+             }
+ 
+-            return GetCurrentBlock();
++            return GetCurrentBlock(true);
+         }();
+ 
+-        const HaltReason hr = block_of_code.RunCode(&jit_state, current_code_ptr);
+-
+-        PerformRequestedCacheInvalidation(hr);
+-
+-        return hr;
++        return cache->impl->Entry().RunCode(&jit_state, current_code_ptr);
+     }
+ 
+     HaltReason Step() {
+         ASSERT(!is_executing);
+-        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
++        ClearHalt(HaltReason::CacheInvalidation);
+ 
+         is_executing = true;
++        const RunningJit outer = running;
++        running = RunningJit{this, &Impl::Lookup};
+         SCOPE_EXIT {
++            running = outer;
+             this->is_executing = false;
+         };
+ 
+-        const HaltReason hr = block_of_code.StepCode(&jit_state, GetCurrentSingleStep());
+-
+-        PerformRequestedCacheInvalidation(hr);
+-
+-        return hr;
++        return cache->impl->Entry().StepCode(&jit_state, GetCurrentSingleStep());
+     }
+ 
+-    void ClearCache() {
+-        std::unique_lock lock{invalidation_mutex};
+-        invalidate_entire_cache = true;
+-        HaltExecution(HaltReason::CacheInvalidation);
++    void SetCodeCache(std::shared_ptr<CodeCache> new_cache) {
++        ASSERT(!is_executing);
++        ASSERT(new_cache);
++        cache = std::move(new_cache);
++        // Both the return stack buffer and the fast dispatch table point into the old cache.
++        jit_state.ResetRSB();
++        madvise(fast_dispatch_table, FAST_DISPATCH_TABLE_BYTES, MADV_DONTNEED);
+     }
+ 
+-    void InvalidateCacheRange(u64 start_address, size_t length) {
+-        std::unique_lock lock{invalidation_mutex};
+-        const auto end_address = static_cast<u64>(start_address + length - 1);
+-        const auto range = boost::icl::discrete_interval<u64>::closed(start_address, end_address);
+-        invalid_cache_ranges.add(range);
+-        HaltExecution(HaltReason::CacheInvalidation);
++    const std::shared_ptr<CodeCache>& GetCodeCache() const {
++        return cache;
+     }
+ 
+     void Reset() {
+         ASSERT(!is_executing);
+         jit_state = {};
++        AttachState();
+     }
+ 
+     void HaltExecution(HaltReason hr) {
+@@ -229,108 +484,113 @@ public:
+     }
+ 
+     void DumpDisassembly() const {
+-        const size_t size = reinterpret_cast<const char*>(block_of_code.getCurr()) - reinterpret_cast<const char*>(block_of_code.GetCodeBegin());
+-        Common::DumpDisassembledX64(block_of_code.GetCodeBegin(), size);
++        const auto& code = cache->impl->Entry();
++        const size_t size = reinterpret_cast<const char*>(code.getCurr()) - reinterpret_cast<const char*>(code.GetCodeBegin());
++        Common::DumpDisassembledX64(code.GetCodeBegin(), size);
+     }
+ 
+     std::vector<std::string> Disassemble() const {
+-        const size_t size = reinterpret_cast<const char*>(block_of_code.getCurr()) - reinterpret_cast<const char*>(block_of_code.GetCodeBegin());
+-        return Common::DisassembleX64(block_of_code.GetCodeBegin(), size);
++        const auto& code = cache->impl->Entry();
++        const size_t size = reinterpret_cast<const char*>(code.getCurr()) - reinterpret_cast<const char*>(code.GetCodeBegin());
++        return Common::DisassembleX64(code.GetCodeBegin(), size);
++    }
++
++    // The block for the current location, or, when the cache has no room for it, the way out of
++    // RunCode with HaltReason::CodeCacheFull. The fast dispatch table may keep that way out for
++    // this location, which is why SetCodeCache clears the table.
++    //
++    // `from_run` is true when Run enters guest code: this Jit's own table is looked at first, as
++    // translated code looks it up, so entering guest code from the host takes no lock for a block
++    // this Jit ran before, and the block found goes into it. From the dispatcher it is false: the
++    // fast dispatch handler has already missed and written the entry's location, so the entry's
++    // code pointer is stale until the handler stores the result.
++    CodePtr GetCurrentBlock(bool from_run) {
++        const IR::LocationDescriptor location = GetCurrentLocation();
++        auto& entry = FastDispatchEntryFor(location.Value());
++        if (from_run && entry.location_descriptor == location.Value() && entry.code_ptr != nullptr) {
++            return entry.code_ptr;
++        }
++        if (const CodePtr block = cache->impl->GetBlock(location)) {
++            if (from_run) {
++                entry.location_descriptor = location.Value();
++                entry.code_ptr = block;
++            }
++            return block;
++        }
++        HaltExecution(HaltReason::CodeCacheFull);
++        return cache->impl->Entry().GetForceReturnFromRunCodeAddress();
+     }
+ 
+ private:
+-    static CodePtr GetCurrentBlockThunk(void* thisptr) {
+-        Jit::Impl* this_ = static_cast<Jit::Impl*>(thisptr);
+-        return this_->GetCurrentBlock();
++    // The entry translated code finds `descriptor` at: the same hash as the fast dispatch handler
++    // in A64EmitX64::GenTerminalHandlers, crc32 of the table's address into the descriptor.
++    A64EmitX64::FastDispatchEntry& FastDispatchEntryFor(u64 descriptor) const {
++        u64 hash = descriptor;
++        if (cache->impl->Entry().HasHostFeature(HostFeature::SSE42)) {
++            hash = Crc32(descriptor, reinterpret_cast<u64>(fast_dispatch_table));
++        }
++        const u64 offset = hash & A64EmitX64::fast_dispatch_table_mask;
++        return *reinterpret_cast<A64EmitX64::FastDispatchEntry*>(static_cast<u8*>(fast_dispatch_table) + offset);
+     }
+ 
+-    IR::LocationDescriptor GetCurrentLocation() const {
+-        return IR::LocationDescriptor{jit_state.GetUniqueHash()};
++    __attribute__((target("sse4.2"))) static u64 Crc32(u64 crc, u64 data) {
++        return __builtin_ia32_crc32di(crc, data);
+     }
+ 
+-    CodePtr GetCurrentBlock() {
+-        return GetBlock(GetCurrentLocation());
++    static CodePtr Lookup(void* jit) {
++        return static_cast<Impl*>(jit)->GetCurrentBlock(false);
+     }
+ 
+-    CodePtr GetCurrentSingleStep() {
+-        return GetBlock(A64::LocationDescriptor{GetCurrentLocation()}.SetSingleStepping(true));
++    // Points the state at what translated code reads through it.
++    void AttachState() {
++        jit_state.tpidr_el0 = conf.tpidr_el0 ? conf.tpidr_el0 : &zero_register;
++        jit_state.tpidrro_el0 = conf.tpidrro_el0 ? conf.tpidrro_el0 : &zero_register;
++        jit_state.fast_dispatch_table = fast_dispatch_table;
+     }
+ 
+-    CodePtr GetBlock(IR::LocationDescriptor current_location) {
+-        if (auto block = emitter.GetBasicBlock(current_location))
+-            return block->entrypoint;
+-
+-        constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
+-        if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
+-            // Immediately evacuate cache
+-            invalidate_entire_cache = true;
+-            PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
+-        }
+-        block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+-
+-        // JIT Compile
+-        const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
+-        IR::Block ir_block = A64::Translate(A64::LocationDescriptor{current_location}, get_code,
+-                                            {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+-        Optimization::PolyfillPass(ir_block, polyfill_options);
+-        Optimization::A64CallbackConfigPass(ir_block, conf);
+-        Optimization::NamingPass(ir_block);
+-        if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+-            Optimization::A64GetSetElimination(ir_block);
+-            Optimization::DeadCodeElimination(ir_block);
+-        }
+-        if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
+-            Optimization::ConstantPropagation(ir_block);
+-            Optimization::DeadCodeElimination(ir_block);
+-        }
+-        if (conf.HasOptimization(OptimizationFlag::MiscIROpt)) {
+-            Optimization::A64MergeInterpretBlocksPass(ir_block, conf.callbacks);
+-        }
+-        Optimization::IdentityRemovalPass(ir_block);
+-        Optimization::VerificationPass(ir_block);
+-        return emitter.Emit(ir_block).entrypoint;
++    IR::LocationDescriptor GetCurrentLocation() const {
++        return IR::LocationDescriptor{jit_state.GetUniqueHash()};
+     }
+ 
+-    void PerformRequestedCacheInvalidation(HaltReason hr) {
+-        if (Has(hr, HaltReason::CacheInvalidation)) {
+-            std::unique_lock lock{invalidation_mutex};
+-
+-            ClearHalt(HaltReason::CacheInvalidation);
+-
+-            if (!invalidate_entire_cache && invalid_cache_ranges.empty()) {
+-                return;
+-            }
++    CodePtr GetCurrentSingleStep() {
++        return GetOrHalt(A64::LocationDescriptor{GetCurrentLocation()}.SetSingleStepping(true));
++    }
+ 
+-            jit_state.ResetRSB();
+-            if (invalidate_entire_cache) {
+-                block_of_code.ClearCache();
+-                emitter.ClearCache();
+-            } else {
+-                emitter.InvalidateCacheRanges(invalid_cache_ranges);
+-            }
+-            invalid_cache_ranges.clear();
+-            invalidate_entire_cache = false;
++    CodePtr GetOrHalt(IR::LocationDescriptor location) {
++        if (const CodePtr block = cache->impl->GetBlock(location)) {
++            return block;
+         }
++        HaltExecution(HaltReason::CodeCacheFull);
++        return cache->impl->Entry().GetForceReturnFromRunCodeAddress();
+     }
+ 
+     bool is_executing = false;
+ 
+     const UserConfig conf;
+     A64JitState jit_state;
+-    BlockOfCode block_of_code;
+-    A64EmitX64 emitter;
+-    Optimization::PolyfillOptions polyfill_options;
+-
+-    bool invalidate_entire_cache = false;
+-    boost::icl::interval_set<u64> invalid_cache_ranges;
+-    std::mutex invalidation_mutex;
++    std::shared_ptr<CodeCache> cache;
++    void* const fast_dispatch_table;
++    // What TPIDR_EL0 and TPIDRRO_EL0 read without a register of their own; writes to it are lost
++    // the next time it is read, as before, when they went nowhere.
++    std::uint64_t zero_register = 0;
+ };
+ 
+ Jit::Jit(UserConfig conf)
+-        : impl(std::make_unique<Jit::Impl>(this, conf)) {}
++        : impl(std::make_unique<Jit::Impl>(this, conf, std::make_shared<CodeCache>(conf))) {}
++
++Jit::Jit(UserConfig conf, std::shared_ptr<CodeCache> cache)
++        : impl(std::make_unique<Jit::Impl>(this, conf, std::move(cache))) {}
+ 
+ Jit::~Jit() = default;
+ 
++void Jit::SetCodeCache(std::shared_ptr<CodeCache> cache) {
++    impl->SetCodeCache(std::move(cache));
++}
++
++const std::shared_ptr<CodeCache>& Jit::GetCodeCache() const {
++    return impl->GetCodeCache();
++}
++
+ HaltReason Jit::Run() {
+     return impl->Run();
+ }
+@@ -340,11 +600,11 @@ HaltReason Jit::Step() {
+ }
+ 
+ void Jit::ClearCache() {
+-    impl->ClearCache();
++    ASSERT_MSG(false, "uxdroid: code caches are never cleared; move the Jit to a new CodeCache");
+ }
+ 
+-void Jit::InvalidateCacheRange(u64 start_address, size_t length) {
+-    impl->InvalidateCacheRange(start_address, length);
++void Jit::InvalidateCacheRange(u64, size_t) {
++    ASSERT_MSG(false, "uxdroid: code caches are never invalidated; move the Jit to a new CodeCache");
+ }
+ 
+ void Jit::Reset() {
+diff --git a/src/dynarmic/backend/x64/a64_jitstate.h b/src/dynarmic/backend/x64/a64_jitstate.h
+index 0929e81..e01c267 100644
+--- a/src/dynarmic/backend/x64/a64_jitstate.h
++++ b/src/dynarmic/backend/x64/a64_jitstate.h
+@@ -6,6 +6,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <cstdint>
+ 
+ #include <mcl/stdint.hpp>
+ 
+@@ -49,6 +50,17 @@ struct A64JitState {
+     // Exclusive state
+     static constexpr u64 RESERVATION_GRANULE_MASK = 0xFFFF'FFFF'FFFF'FFF0ull;
+     u8 exclusive_state = 0;
++    // uxdroid: the reservation of this Jit's last exclusive load, kept here rather than in the
++    // global monitor, so the code that reads and writes it is the same for every Jit sharing a
++    // code cache.
++    u64 exclusive_address = 0;
++    alignas(16) std::array<u64, 2> exclusive_value{};
++
++    // uxdroid: per-Jit values that translated code used to have baked in as constants. Code in a
++    // shared cache reads them from here, through r15, so it runs on any Jit.
++    std::uint64_t* tpidr_el0 = nullptr;
++    const std::uint64_t* tpidrro_el0 = nullptr;
++    void* fast_dispatch_table = nullptr;
+ 
+     static constexpr size_t RSBSize = 8;  // MUST be a power of 2.
+     static constexpr size_t RSBPtrMask = RSBSize - 1;
+diff --git a/src/dynarmic/backend/x64/block_of_code.cpp b/src/dynarmic/backend/x64/block_of_code.cpp
+index 22d9868..cd57637 100644
+--- a/src/dynarmic/backend/x64/block_of_code.cpp
++++ b/src/dynarmic/backend/x64/block_of_code.cpp
+@@ -219,8 +219,8 @@ bool IsUnderRosetta() {
+ 
+ }  // anonymous namespace
+ 
+-BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, std::function<void(BlockOfCode&)> rcp)
+-        : Xbyak::CodeGenerator(total_code_size, nullptr, &s_allocator)
++BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, std::function<void(BlockOfCode&)> rcp, Xbyak::Allocator* allocator)
++        : Xbyak::CodeGenerator(total_code_size, nullptr, allocator ? allocator : &s_allocator)
+         , cb(std::move(cb))
+         , jsi(jsi)
+         , constant_pool(*this, CONSTANT_POOL_SIZE)
+@@ -521,7 +521,9 @@ void* BlockOfCode::AllocateFromCodeSpace(size_t alloc_size) {
+ 
+     void* ret = getCurr<void*>();
+     size_ += alloc_size;
+-    memset(ret, 0, alloc_size);
++    // uxdroid: not cleared, since a code buffer is freshly mapped memory, which is zero, and
++    // uxdroid never reuses one (code caches are never cleared). Clearing wrote every page of each
++    // emitter's 2 MiB constant pool, most of which is never used.
+     return ret;
+ }
+ 
+diff --git a/src/dynarmic/backend/x64/block_of_code.h b/src/dynarmic/backend/x64/block_of_code.h
+index 3f7573a..a7cebc1 100644
+--- a/src/dynarmic/backend/x64/block_of_code.h
++++ b/src/dynarmic/backend/x64/block_of_code.h
+@@ -37,7 +37,9 @@ struct RunCodeCallbacks {
+ 
+ class BlockOfCode final : public Xbyak::CodeGenerator {
+ public:
+-    BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, std::function<void(BlockOfCode&)> rcp);
++    /// uxdroid: `allocator`, when given, places the code where it chooses, such as one part of a
++    /// region several BlockOfCodes share so their code can jump between them.
++    BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, std::function<void(BlockOfCode&)> rcp, Xbyak::Allocator* allocator = nullptr);
+     BlockOfCode(const BlockOfCode&) = delete;
+ 
+     /// Call when external emitters have finished emitting their preludes.
+diff --git a/src/dynarmic/backend/x64/emit_x64.cpp b/src/dynarmic/backend/x64/emit_x64.cpp
+index 902ddef..4c68d6f 100644
+--- a/src/dynarmic/backend/x64/emit_x64.cpp
++++ b/src/dynarmic/backend/x64/emit_x64.cpp
+@@ -40,14 +40,23 @@ void EmitContext::EraseInstruction(IR::Inst* inst) {
+     inst->ClearArgs();
+ }
+ 
+-EmitX64::EmitX64(BlockOfCode& code)
+-        : code(code) {
++EmitX64::EmitX64(BlockOfCode& code, LinkTable* shared_links)
++        : code(code)
++        , own_links(shared_links ? nullptr : std::make_unique<LinkTable>())
++        , links(shared_links ? *shared_links : *own_links)
++        , block_descriptors(links.block_descriptors)
++        , patch_information(links.patch_information) {
+     exception_handler.Register(code);
+ }
+ 
+ EmitX64::~EmitX64() = default;
+ 
+ std::optional<EmitX64::BlockDescriptor> EmitX64::GetBasicBlock(IR::LocationDescriptor descriptor) const {
++    std::lock_guard lock{links.mutex};
++    return GetBasicBlockLocked(descriptor);
++}
++
++std::optional<EmitX64::BlockDescriptor> EmitX64::GetBasicBlockLocked(IR::LocationDescriptor descriptor) const {
+     const auto iter = block_descriptors.find(descriptor);
+     if (iter == block_descriptors.end()) {
+         return std::nullopt;
+@@ -79,6 +88,7 @@ void EmitX64::EmitCallHostFunction(EmitContext& ctx, IR::Inst* inst) {
+ void EmitX64::PushRSBHelper(Xbyak::Reg64 loc_desc_reg, Xbyak::Reg64 index_reg, IR::LocationDescriptor target) {
+     using namespace Xbyak::util;
+ 
++    std::lock_guard lock{links.mutex};
+     const auto iter = block_descriptors.find(target);
+     CodePtr target_code_ptr = iter != block_descriptors.end()
+                                 ? iter->second.entrypoint
+@@ -336,6 +346,13 @@ Xbyak::Label EmitX64::EmitCond(IR::Cond cond) {
+ 
+ EmitX64::BlockDescriptor EmitX64::RegisterBlock(const IR::LocationDescriptor& descriptor, CodePtr entrypoint, size_t size) {
+     PerfMapRegister(entrypoint, code.getCurr(), LocationDescriptorToFriendlyName(descriptor));
++
++    std::lock_guard lock{links.mutex};
++    // uxdroid: another emitter of the same cache may have registered this block first; its code
++    // stays the block, and this copy is never entered.
++    if (const auto existing = GetBasicBlockLocked(descriptor)) {
++        return *existing;
++    }
+     Patch(descriptor, entrypoint);
+ 
+     BlockDescriptor block_desc{entrypoint, size};
+@@ -355,32 +372,55 @@ void EmitX64::EmitTerminal(IR::Terminal terminal, IR::LocationDescriptor initial
+ }
+ 
+ void EmitX64::Patch(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
+-    const CodePtr save_code_ptr = code.getCurr();
+     const PatchInformation& patch_info = patch_information[target_desc];
+ 
+     for (CodePtr location : patch_info.jg) {
+-        code.SetCodePtr(location);
+-        EmitPatchJg(target_desc, target_code_ptr);
++        RetargetJg(location, target_desc, target_code_ptr);
+     }
+ 
+     for (CodePtr location : patch_info.jz) {
+-        code.SetCodePtr(location);
+-        EmitPatchJz(target_desc, target_code_ptr);
++        RetargetJz(location, target_desc, target_code_ptr);
+     }
+ 
+     for (CodePtr location : patch_info.jmp) {
+-        code.SetCodePtr(location);
+-        EmitPatchJmp(target_desc, target_code_ptr);
++        RetargetJmp(location, target_desc, target_code_ptr);
+     }
+ 
+     for (CodePtr location : patch_info.mov_rcx) {
+-        code.SetCodePtr(location);
+-        EmitPatchMovRcx(target_code_ptr);
++        RetargetMovRcx(location, target_code_ptr);
+     }
++}
++
++void EmitX64::RetargetJg(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    const CodePtr save_code_ptr = code.getCurr();
++    code.SetCodePtr(location);
++    EmitPatchJg(target_desc, target_code_ptr);
++    code.SetCodePtr(save_code_ptr);
++}
+ 
++void EmitX64::RetargetJz(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    const CodePtr save_code_ptr = code.getCurr();
++    code.SetCodePtr(location);
++    EmitPatchJz(target_desc, target_code_ptr);
++    code.SetCodePtr(save_code_ptr);
++}
++
++void EmitX64::RetargetJmp(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
++    const CodePtr save_code_ptr = code.getCurr();
++    code.SetCodePtr(location);
++    EmitPatchJmp(target_desc, target_code_ptr);
++    code.SetCodePtr(save_code_ptr);
++}
++
++void EmitX64::RetargetMovRcx(CodePtr location, CodePtr target_code_ptr) {
++    const CodePtr save_code_ptr = code.getCurr();
++    code.SetCodePtr(location);
++    EmitPatchMovRcx(target_code_ptr);
+     code.SetCodePtr(save_code_ptr);
+ }
+ 
++// Unpatch, ClearCache and InvalidateBasicBlocks change the link table without its lock: uxdroid's
++// caches never invalidate or clear (see Jit::ClearCache), so nothing calls them on shared tables.
+ void EmitX64::Unpatch(const IR::LocationDescriptor& target_desc) {
+     if (patch_information.count(target_desc)) {
+         Patch(target_desc, nullptr);
+diff --git a/src/dynarmic/backend/x64/emit_x64.h b/src/dynarmic/backend/x64/emit_x64.h
+index 5a46f04..f72f876 100644
+--- a/src/dynarmic/backend/x64/emit_x64.h
++++ b/src/dynarmic/backend/x64/emit_x64.h
+@@ -8,6 +8,7 @@
+ #include <array>
+ #include <functional>
+ #include <memory>
++#include <mutex>
+ #include <optional>
+ #include <string>
+ #include <type_traits>
+@@ -78,11 +79,33 @@ public:
+         size_t size;         // Length in bytes of emitted code
+     };
+ 
+-    explicit EmitX64(BlockOfCode& code);
++    struct PatchInformation {
++        std::vector<CodePtr> jg;
++        std::vector<CodePtr> jz;
++        std::vector<CodePtr> jmp;
++        std::vector<CodePtr> mov_rcx;
++    };
++
++    /// uxdroid: which blocks exist and which locations jump to each, shared by every emitter of a
++    /// code cache, each emitting into its own part of one code region, so a block from one emitter
++    /// links to blocks from all the others. `mutex` is taken after the emitter's own lock (the
++    /// cache's lock for that emitter), never before, and held only to read or change the maps and
++    /// to write a patch location's bytes, so that no block is registered between a location
++    /// finding its target missing and recording itself to be patched.
++    struct LinkTable {
++        std::mutex mutex;
++        tsl::robin_map<IR::LocationDescriptor, BlockDescriptor> block_descriptors;
++        tsl::robin_map<IR::LocationDescriptor, PatchInformation> patch_information;
++    };
++
++    /// `links` is shared with other emitters; null gives this emitter a table of its own.
++    explicit EmitX64(BlockOfCode& code, LinkTable* links = nullptr);
+     virtual ~EmitX64();
+ 
+     /// Looks up an emitted host block in the cache.
+     std::optional<BlockDescriptor> GetBasicBlock(IR::LocationDescriptor descriptor) const;
++    /// As GetBasicBlock, with `links.mutex` held.
++    std::optional<BlockDescriptor> GetBasicBlockLocked(IR::LocationDescriptor descriptor) const;
+ 
+     /// Empties the entire cache.
+     virtual void ClearCache();
+@@ -122,24 +145,27 @@ protected:
+     virtual void EmitTerminalImpl(IR::Term::CheckHalt terminal, IR::LocationDescriptor initial_location, bool is_single_step) = 0;
+ 
+     // Patching
+-    struct PatchInformation {
+-        std::vector<CodePtr> jg;
+-        std::vector<CodePtr> jz;
+-        std::vector<CodePtr> jmp;
+-        std::vector<CodePtr> mov_rcx;
+-    };
+     void Patch(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr);
+     virtual void Unpatch(const IR::LocationDescriptor& target_desc);
+     virtual void EmitPatchJg(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) = 0;
+     virtual void EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) = 0;
+     virtual void EmitPatchJmp(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) = 0;
+     virtual void EmitPatchMovRcx(CodePtr target_code_ptr = nullptr) = 0;
++    // uxdroid: point an emitted patch location at a new target, or back at its unlinked path when
++    // the target is null. The defaults rewrite the location in place, which is only safe while no
++    // other thread runs the code; the A64 emitter retargets with one atomic store instead.
++    virtual void RetargetJg(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr);
++    virtual void RetargetJz(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr);
++    virtual void RetargetJmp(CodePtr location, const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr);
++    virtual void RetargetMovRcx(CodePtr location, CodePtr target_code_ptr);
+ 
+     // State
+     BlockOfCode& code;
+     ExceptionHandler exception_handler;
+-    tsl::robin_map<IR::LocationDescriptor, BlockDescriptor> block_descriptors;
+-    tsl::robin_map<IR::LocationDescriptor, PatchInformation> patch_information;
++    std::unique_ptr<LinkTable> own_links;
++    LinkTable& links;
++    tsl::robin_map<IR::LocationDescriptor, BlockDescriptor>& block_descriptors;
++    tsl::robin_map<IR::LocationDescriptor, PatchInformation>& patch_information;
+ };
+ 
+ }  // namespace Dynarmic::Backend::X64
+diff --git a/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc b/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+index 272b896..2e91272 100644
+--- a/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
++++ b/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+@@ -29,7 +29,7 @@ std::optional<AxxEmitX64::DoNotFastmemMarker> AxxEmitX64::ShouldFastmem(AxxEmitC
+ FakeCall AxxEmitX64::FastmemCallback(u64 rip_) {
+     const auto iter = fastmem_patch_info.find(rip_);
+ 
+-    if (iter == fastmem_patch_info.end()) {
++    if (!iter) {
+         fmt::print("dynarmic: Segfault happened within JITted code at rip = {:016x}\n", rip_);
+         fmt::print("Segfault wasn't at a fastmem patch location!\n");
+         fmt::print("Now dumping code.......\n\n");
+@@ -37,18 +37,12 @@ FakeCall AxxEmitX64::FastmemCallback(u64 rip_) {
+         ASSERT_FALSE("iter != fastmem_patch_info.end()");
+     }
+ 
+-    FakeCall result{
+-        .call_rip = iter->second.callback,
+-        .ret_rip = iter->second.resume_rip,
++    // uxdroid: the access goes the slow way this once and the block is never recompiled, since the
++    // cache's code may be running on other threads and this handler takes no cache lock.
++    return FakeCall{
++        .call_rip = iter->callback,
++        .ret_rip = iter->resume_rip,
+     };
+-
+-    if (iter->second.recompile) {
+-        const auto marker = iter->second.marker;
+-        do_not_fastmem.insert(marker);
+-        InvalidateBasicBlocks({std::get<0>(marker)});
+-    }
+-
+-    return result;
+ }
+ 
+ template<std::size_t bitsize, auto callback>
+@@ -359,7 +353,8 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
+     EmitExclusiveLock(code, conf, tmp, tmp2.cvt32());
+ 
+     code.mov(code.byte[r15 + offsetof(AxxJitState, exclusive_state)], u8(1));
+-    code.mov(tmp, mcl::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
++    // uxdroid: the reservation is the running Jit's, in its state.
++    code.lea(tmp, ptr[r15 + offsetof(AxxJitState, exclusive_address)]);
+     code.mov(qword[tmp], vaddr);
+ 
+     const auto fastmem_marker = ShouldFastmem(ctx, inst);
+@@ -393,7 +388,7 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
+         code.call(wrapped_fn);
+     }
+ 
+-    code.mov(tmp, mcl::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
++    code.lea(tmp, ptr[r15 + offsetof(AxxJitState, exclusive_value)]);
+     EmitWriteMemoryMov<bitsize>(code, tmp, value_idx, false);
+ 
+     EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+@@ -440,7 +435,8 @@ void AxxEmitX64::EmitExclusiveWriteMemoryInline(AxxEmitContext& ctx, IR::Inst* i
+ 
+     SharedLabel end = GenSharedLabel();
+ 
+-    code.mov(tmp, mcl::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
++    // uxdroid: the reservation is the running Jit's, in its state.
++    code.lea(tmp, ptr[r15 + offsetof(AxxJitState, exclusive_address)]);
+     code.mov(status, u32(1));
+     code.cmp(code.byte[r15 + offsetof(AxxJitState, exclusive_state)], u8(0));
+     code.je(*end, code.T_NEAR);
+@@ -450,7 +446,7 @@ void AxxEmitX64::EmitExclusiveWriteMemoryInline(AxxEmitContext& ctx, IR::Inst* i
+     EmitExclusiveTestAndClear(code, conf, vaddr, tmp, rax);
+ 
+     code.mov(code.byte[r15 + offsetof(AxxJitState, exclusive_state)], u8(0));
+-    code.mov(tmp, mcl::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
++    code.lea(tmp, ptr[r15 + offsetof(AxxJitState, exclusive_value)]);
+ 
+     if constexpr (bitsize == 128) {
+         code.mov(rax, qword[tmp + 0]);
+diff --git a/src/dynarmic/interface/A64/a64.h b/src/dynarmic/interface/A64/a64.h
+index a150da8..7c4c742 100644
+--- a/src/dynarmic/interface/A64/a64.h
++++ b/src/dynarmic/interface/A64/a64.h
+@@ -18,11 +18,67 @@
+ namespace Dynarmic {
+ namespace A64 {
+ 
++/**
++ * uxdroid: translated code that any number of Jits run, on any threads.
++ *
++ * A cache holds the code of one generation. It never clears or invalidates what it holds, since
++ * another thread may be running that code or be inside a callback that returns into it; when it
++ * has no room left, a Jit that needs a new block stops with HaltReason::CodeCacheFull, and its
++ * owner moves it to a new cache with SetCodeCache. A cache is freed when its last Jit leaves it.
++ *
++ * A cache has one or more emitters, each with its own part of one code region and its own lock,
++ * and one link table of every block and every jump waiting for a block, with a lock of its own.
++ * A thread decodes guest code into IR with no lock held, emits it with the first emitter whose
++ * lock is free, and takes the link table's lock inside the emitter's to look up targets, record
++ * jumps and register the block; it looks blocks up with the link table's lock alone. Links are
++ * retargeted with one aligned atomic store each, so a thread running the code being relinked sees
++ * the old or the new target, never a torn instruction. Entering guest code takes no lock for a
++ * block the Jit's own fast dispatch table already holds.
++ *
++ * The configuration's callbacks are baked into the code and called on every thread that runs it,
++ * so they must not depend on which Jit made the cache. The global monitor is not used: exclusive
++ * stores compare and swap against the value each Jit's exclusive load read.
++ */
++class CodeCache final {
++public:
++    /// `conf.code_cache_size` is split evenly between `emitters`, so more threads can translate
++    /// at once; when any emitter is full, the cache is.
++    explicit CodeCache(UserConfig conf, std::size_t emitters = 1);
++    ~CodeCache();
++
++    /// Bytes of translated code this cache holds.
++    std::size_t CodeSize() const;
++    /// Blocks translated into this cache.
++    std::size_t BlockCount() const;
++    /// Whether a block was refused for lack of room, or the cache was retired.
++    bool IsFull() const;
++    /// Takes no more blocks, as if full, so its Jits move on to a new cache.
++    void Retire();
++    /// Blocks translated into every cache of the process.
++    static std::size_t TotalBlockCount();
++
++    /// uxdroid: translates the block at `location` (a location descriptor: PC and FPCR bits)
++    /// ahead of any Jit needing it, unless the cache has it. The code there must be readable.
++    /// False when the cache is full.
++    bool Translate(std::uint64_t location);
++    /// uxdroid: the location descriptors of the blocks this cache translated, oldest first.
++    std::vector<std::uint64_t> Locations() const;
++
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++
+ class Jit final {
+ public:
+     explicit Jit(UserConfig conf);
++    /// uxdroid: a Jit that runs code from `cache`, which other Jits may share.
++    Jit(UserConfig conf, std::shared_ptr<CodeCache> cache);
+     ~Jit();
+ 
++    /// uxdroid: moves this Jit to another cache. Not while it runs.
++    void SetCodeCache(std::shared_ptr<CodeCache> cache);
++    const std::shared_ptr<CodeCache>& GetCodeCache() const;
++
+     /**
+      * Runs the emulated CPU.
+      * Cannot be recursively called.
+@@ -38,6 +94,8 @@ public:
+     /**
+      * Clears the code cache of all compiled code.
+      * Can be called at any time. Halts execution if called within a callback.
++     * uxdroid: unsupported, since a cache may be shared; it stops the program. Move the Jit to a
++     * new CodeCache instead.
+      */
+     void ClearCache();
+ 
+@@ -45,6 +103,7 @@ public:
+      * Invalidate the code cache at a range of addresses.
+      * @param start_address The starting address of the range to invalidate.
+      * @param length The length (in bytes) of the range to invalidate.
++     * uxdroid: unsupported, as ClearCache.
+      */
+     void InvalidateCacheRange(std::uint64_t start_address, std::size_t length);
+ 
+diff --git a/src/dynarmic/interface/halt_reason.h b/src/dynarmic/interface/halt_reason.h
+index 121a845..9a6e69d 100644
+--- a/src/dynarmic/interface/halt_reason.h
++++ b/src/dynarmic/interface/halt_reason.h
+@@ -13,6 +13,8 @@ enum class HaltReason : std::uint32_t {
+     Step = 0x00000001,
+     CacheInvalidation = 0x00000002,
+     MemoryAbort = 0x00000004,
++    // uxdroid: the Jit's code cache has no room for a block it needs; give it a new cache.
++    CodeCacheFull = 0x00000008,
+     UserDefined1 = 0x01000000,
+     UserDefined2 = 0x02000000,
+     UserDefined3 = 0x04000000,

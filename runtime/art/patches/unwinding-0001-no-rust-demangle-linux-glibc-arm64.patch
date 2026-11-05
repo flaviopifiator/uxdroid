@@ -1,0 +1,46 @@
+diff --git a/libunwindstack/Android.bp b/libunwindstack/Android.bp
+index 59a854e..62d1070 100644
+--- a/libunwindstack/Android.bp
++++ b/libunwindstack/Android.bp
+@@ -111,6 +111,11 @@ cc_defaults {
+             header_libs: ["bionic_libc_platform_headers"],
+             whole_static_libs: ["libasync_safe"],
+         },
++        // uxdroid: no Rust toolchain for this host-cross target (Demangle.cpp).
++        linux_glibc_arm64: {
++            exclude_static_libs: ["librustc_demangle_static"],
++            cflags: ["-DUXDROID_NO_RUST_DEMANGLE"],
++        },
+     },
+ 
+     arch: {
+diff --git a/libunwindstack/Demangle.cpp b/libunwindstack/Demangle.cpp
+index 29b58b4..7d555e8 100644
+--- a/libunwindstack/Demangle.cpp
++++ b/libunwindstack/Demangle.cpp
+@@ -19,7 +19,10 @@
+ 
+ #include <string>
+ 
++// uxdroid: the linux_glibc arm64 host has no Rust toolchain; Rust names stay mangled there.
++#if !defined(UXDROID_NO_RUST_DEMANGLE)
+ #include <rustc_demangle.h>
++#endif
+ 
+ #include <unwindstack/Demangle.h>
+ 
+@@ -34,10 +37,13 @@ static std::string Demangle(const char* name, size_t length) {
+   if (name[1] == 'Z') {
+     // Try to demangle C++ name.
+     demangled_str = abi::__cxa_demangle(name, nullptr, nullptr, nullptr);
+-  } else if (name[1] == 'R') {
++  }
++#if !defined(UXDROID_NO_RUST_DEMANGLE)
++  else if (name[1] == 'R') {
+     // Try to demangle rust name.
+     demangled_str = rustc_demangle(name, nullptr, nullptr, nullptr);
+   }
++#endif
+ 
+   if (demangled_str == nullptr) {
+     return name;

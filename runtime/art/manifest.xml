@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote name="aosp" fetch=".." review="https://android-review.googlesource.com/"/>
+  
+  <default remote="aosp" revision="main" sync-j="4"/>
+  
+  <manifest-server url="http://android-smartsync.corp.google.com/android.googlesource.com/manifestserver"/>
+  
+  <project name="device/generic/art" revision="d9c26558defdcdf2907c2abde9a9320dd404a7a9" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="device/google/cuttlefish_vmm" revision="08c852a0ab29d4dbf3784bb32414c409b3789a73" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/art" path="art" revision="6484611fd45e69db9f33f98bfd6864014b030ecf" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/build" path="build/make" revision="045a3d6a3e359633a14853a5a5e1e4f2a11cbdae" upstream="main" dest-branch="main" groups="pdk">
+    <copyfile src="core/root.mk" dest="Makefile"/>
+    <linkfile src="CleanSpec.mk" dest="build/CleanSpec.mk"/>
+    <linkfile src="buildspec.mk.default" dest="build/buildspec.mk.default"/>
+    <linkfile src="core" dest="build/core"/>
+    <linkfile src="envsetup.sh" dest="build/envsetup.sh"/>
+    <linkfile src="target" dest="build/target"/>
+    <linkfile src="tools" dest="build/tools"/>
+  </project>
+  <project name="platform/build/bazel" path="build/bazel" revision="6232e90c629557ac5639a3adf1fe879f67425d0d" upstream="main" dest-branch="main" groups="pdk">
+    <linkfile src="bazel.WORKSPACE" dest="WORKSPACE"/>
+    <linkfile src="bazel.BUILD" dest="BUILD"/>
+  </project>
+  <project name="platform/build/bazel_common_rules" path="build/bazel_common_rules" revision="b1a2840cb13746f94e4c88e7e28d308f51f87804" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/build/blueprint" path="build/blueprint" revision="dc14b923a2526131c8ffedf3f7ce7a17e9e69a99" upstream="main" dest-branch="main" groups="pdk,tradefed"/>
+  <project name="platform/build/release" path="build/release" revision="e0a12b3cca3d13f22d870b2fe954af1951098940" upstream="main" dest-branch="main" groups="pdk,tradefed"/>
+  <project name="platform/build/soong" path="build/soong" revision="d046c2afef086a35d24222b09f4d2c4914e8a2a5" upstream="main" dest-branch="main" groups="pdk,tradefed">
+    <linkfile src="root.bp" dest="Android.bp"/>
+    <linkfile src="bootstrap.bash" dest="bootstrap.bash"/>
+  </project>
+  <project name="platform/dalvik" path="dalvik" revision="838bd34deecb3715b2b4006edede2ab79e42e336" upstream="main" dest-branch="main" groups="pdk-cw-fs,pdk-fs"/>
+  <project name="platform/development" path="development" revision="88f7870b2c652922dc2afb01c076737e8bc50130" upstream="main" dest-branch="main" groups="pdk-cw-fs,pdk-fs"/>
+  <project name="platform/external/antlr" path="external/antlr" revision="16467b971bd3e2009fad32dd79016f2c7e421deb" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/apache-commons-bcel" path="external/apache-commons-bcel" revision="54f0e2b8b85f705ca8254925db41fd2fb780c95d" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/apache-commons-math" path="external/apache-commons-math" revision="b30a9e724617734b637163330354f76c5fafda2f" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/apache-harmony" path="external/apache-harmony" revision="f10a425b03b9e701e4bbe7ba7f1df3b2aabc6cb6" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/apache-xml" path="external/apache-xml" revision="12f80e62b22d7437a559fdf627fc00bf4a99e1bb" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/auto" path="external/auto" revision="7422238d6e3307d7fe2c317ff589e35388095b08" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/avb" path="external/avb" revision="761178607206f4cb2af79ed9eec52d8cbd814adb" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/bazel-skylib" path="external/bazel-skylib" revision="8dc2399ac318aaa8318e5041de9c66945539f09b" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/bazelbuild-kotlin-rules" path="external/bazelbuild-kotlin-rules" revision="18f440b3692558a6df568667ab19ba8623c9a771" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/bazelbuild-rules_android" path="external/bazelbuild-rules_android" revision="9e965d6fece27a77de5377433c2f7e6999b8cc0b" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/bazelbuild-rules_license" path="external/bazelbuild-rules_license" revision="48d5273aeec5d79939b6db8ed317d870fd967189" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/bcc" path="external/bcc" revision="8aa864777004a92873c2e9d863bf107eb53ac495" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/boringssl" path="external/boringssl" revision="ff82e866658b678df9ae4aac825828ce45b50209" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/bouncycastle" path="external/bouncycastle" revision="0d7e2cf65fc99a078af6bc47afa350af8dfec5ef" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/caliper" path="external/caliper" revision="9eda958cd3fe9284e48995525ee050363699abb6" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/compiler-rt" path="external/compiler-rt" revision="4904b270dec10c70942d5e8ee81fe33b82390721" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/cpu_features" path="external/cpu_features" revision="95eaf552d20d31fef48556c336cb091ea76dc0f8" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/dagger2" path="external/dagger2" revision="6d3ad713bb3578f55ec0adaddfe44f3d438d644d" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/dexmaker" path="external/dexmaker" revision="8e4625b9e470218589b3c55614e8d5caec7a0394" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/dlmalloc" path="external/dlmalloc" revision="f01aeb3b386a8aa2b7836abcd08c85a4681a6e79" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/e2fsprogs" path="external/e2fsprogs" revision="ef148046cf58dc1009da35ed9edb7a7425e19f39" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/easymock" path="external/easymock" revision="06a9728c3609f856e87db38a6602196cec3ab727" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/elfutils" path="external/elfutils" revision="2ddc8edd4519c1fada966a382be50dde09e4a5c5" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/erofs-utils" path="external/erofs-utils" revision="7293c06aaf1a792ff4fd94b1baa5a2194406c5a5" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/error_prone" path="external/error_prone" revision="852dfd290f8e24222beb2a39c58579adf18a64e7" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/escapevelocity" path="external/escapevelocity" revision="38a6a5273f1c3f896bda129a9aa1cecf426d49b9" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/expat" path="external/expat" revision="9c75fdc5f12965c98fe844fdb5f6c8b45974375f" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/f2fs-tools" path="external/f2fs-tools" revision="d34dcc887617535a0001ea389a2bb8058f41ea05" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/fdlibm" path="external/fdlibm" revision="68f940b16a0e43460179fbb51409349d4b264878" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/fec" path="external/fec" revision="90857deb7973c0ca24c79b9c1809fc9667f32c4f" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/fmtlib" path="external/fmtlib" revision="97ceae9d27415d6444f3e24f491da8ed6902ecfa" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/go-cmp" path="external/go-cmp" revision="00c577686ed8e223f4d26337954720473c05d372" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/golang-protobuf" path="external/golang-protobuf" revision="8ae658e8f184e498b3c9faa3cabcf29091136e44" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/google-java-format" path="external/google-java-format" revision="10816b529e1d7005ca788e7b4c5efd1c72957e26" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/google-smali" path="external/google-smali" revision="4a765c6172590ebda4d8caa6679b4ee35be5808f" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/google-styleguide" path="external/google-styleguide" revision="8c35d5ee8e2913d4bd6623e2b93232b1da0ab719" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/googletest" path="external/googletest" revision="cbeab5d01811d23ea488efc07f2c31f7c53024e2" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/gson" path="external/gson" revision="9817dd581ce91d8a691ae8be6e597192a9bd59ee" upstream="main" dest-branch="main" groups="pdk,tradefed"/>
+  <project name="platform/external/guava" path="external/guava" revision="813574612f9b98718e0e18d48fae3ca652891f7b" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/guice" path="external/guice" revision="259f233130f7b5f48b0e0d107d0f14ea8066e0bd" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/hamcrest" path="external/hamcrest" revision="a9e4557596c775bae5aa7e4fce94179ad9069fb8" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/jacoco" path="external/jacoco" revision="ed90d92a6557101b1ca056daa2800c59600d38f0" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/jakarta.inject" path="external/jakarta.inject" revision="bb5bf9cf72f26db19d68e067cd8f0db4b4be50b6" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/jarjar" path="external/jarjar" revision="fe1e8e6b4fe69a9b5de9b1acb2953ca4e2c1912d" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/javapoet" path="external/javapoet" revision="de411701842a43218e83fda32b15c5ca8e1d1e3f" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/javasqlite" path="external/javasqlite" revision="38c779544f330c7ef0f77883e4a671a544bc137d" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/jcommander" path="external/jcommander" revision="33b6bfbddef97fdf26e96ec34161f8ddc376f6ed" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/jline" path="external/jline" revision="51da8339d903e45bfc1997165681de56ac78e7f9" upstream="main" dest-branch="main" groups="pdk,pdk-fs,tradefed"/>
+  <project name="platform/external/jsoncpp" path="external/jsoncpp" revision="d8ee8eb2e47497cf3684e1ecc11868d77162ee4f" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/jspecify" path="external/jspecify" revision="e800637eb9be229f81f2876cb47802246c2df807" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/jsr305" path="external/jsr305" revision="5a1b89e0139e883613547437f25e01298371d057" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/jsr330" path="external/jsr330" revision="4f4806c19731b2e0d1e51fb76f5c33be402e34fa" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/junit" path="external/junit" revision="5d5ef81b0231093556801ff8404b89c0cb4f4617" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/junit-params" path="external/junit-params" revision="bb6848de1fc3b71ad6e1343faf7a1d4246431cfd" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/kotlin.metadata" path="external/kotlin.metadata" revision="3d27273d9a1f34c809d80255a5fdefaea4227f06" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/kotlinc" path="external/kotlinc" revision="401d708dc899a2c375cc92b1ecdc90905038bcdf" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/kotlinx.metadata" path="external/kotlinx.metadata" revision="b3947439705674be19d03eb43f3608ce20339c0e" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/ksp" path="external/ksp" revision="e94d28afc4862df4c69f850acf32b29ce1cb80d7" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/libbpf" path="external/libbpf" revision="18f843023836351b511b94df88fa9ea3c2e815c4" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/libcxx" path="external/libcxx" revision="4f4a65c06cecf421b56b9fea867d3aa7200f7f1a" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/libcxxabi" path="external/libcxxabi" revision="65715172d940193fee91631e19adb138bce340c6" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/libffi" path="external/libffi" revision="1fd5a2e1d639cd1ddf29dd0c484c123bbd850c21" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/libxml2" path="external/libxml2" revision="0b730a5499b2bdd04e3d6f54bafcbeb858ad723a" upstream="main" dest-branch="main" groups="libxml2,pdk"/>
+  <project name="platform/external/licenseclassifier" path="external/licenseclassifier" revision="96de5ceda0994b1eeb763eebddaffdb64bae662e" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/lz4" path="external/lz4" revision="f2a717445d3a8a1aaa5aeef1cb2e9a4bc739e9b1" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/lzma" path="external/lzma" revision="2311e53f4d401cfbbb709555005b8defcc003a35" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/mksh" path="external/mksh" revision="1548076841f243748a3f56da23b38794d437bc12" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/mockftpserver" path="external/mockftpserver" revision="bed3dde93cccaf3eaa5e671dbfbbc3fcabc2dc13" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/mockito" path="external/mockito" revision="60ff0ca61c33347e58543c37beafc9817108ae45" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/mockwebserver" path="external/mockwebserver" revision="8b3d08a674ca082fa165cd1c9a8878c1c29d0ef1" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/musl" path="external/musl" revision="21eff5b8df047b1f56e76f1b39829349029827a3" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/nist-pkits" path="external/nist-pkits" revision="8dc2613fd7b87320915503751d8f0d95da6556b9" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/objenesis" path="external/objenesis" revision="13ee742e0a56ea0d2c9c1663a18b61c697874fac" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/oj-libjdwp" path="external/oj-libjdwp" revision="a41f5a46a1787c4c759f7bdbb989fc36c8ea4691" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/okhttp" path="external/okhttp" revision="05b3c271102f7e16bd772dd8a9dab5c6b1424c24" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/okio" path="external/okio" revision="1620ec7c58c2bb475f1d0bc78b2951f89915ce46" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/ow2-asm" path="external/ow2-asm" revision="ea8038fe25a82b4d3b8f71b2924c17ca1c937a36" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/pcre" path="external/pcre" revision="9f8efd77b4b9e838fbc97c36831044e1cf3ba2fe" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/perfetto" path="external/perfetto" revision="40b529923598b739b2892a536a7692eedbed5685" upstream="main" dest-branch="main" groups="pdk,sysui-studio"/>
+  <project name="platform/external/protobuf" path="external/protobuf" revision="c8206780937dba60e53ce2fef7cc57c50439c30b" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/python/cpython3" path="external/python/cpython3" revision="8ae4cfb5a06911391987b1a7c06d1f5719b4ce05" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/python/six" path="external/python/six" revision="c5e2b601d1d19b0f9f9efa3622d0ab901704432a" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/rust/android-crates-io" path="external/rust/android-crates-io" revision="5a35dba892863c34b659e63bef90f6fabf342edb" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/rust/cxx" path="external/rust/cxx" revision="686b428d8a630aecfd8328389cd8e6ef304e6f72" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/selinux" path="external/selinux" revision="6f8f496eabd35f28dfa6b4be5fc82e325e1df620" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/slf4j" path="external/slf4j" revision="208237d1b1232510077386d180983b80cdd29678" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/snakeyaml" path="external/snakeyaml" revision="e9a54f8c81279c3d972d80d5723c8fd3820e1951" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/spdx-tools" path="external/spdx-tools" revision="490a95bbcc5c15b868048529f4dbd15a87c4833f" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/sqlite" path="external/sqlite" revision="38878b88206dbc25342587258cbe8723b3c19d50" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/squashfs-tools" path="external/squashfs-tools" revision="33469ab3363ab75399f05818a70f00a5abae7a78" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/starlark-go" path="external/starlark-go" revision="4947cdc739c985f6d86941e22894f5cefe7c9e9a" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/testng" path="external/testng" revision="74272bbd508bb083cfabbea4a90a303afb5c39a6" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/tinyxml2" path="external/tinyxml2" revision="7485b22521f577cf944e5687361548d8993d8d2c" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/toybox" path="external/toybox" revision="59a869a838cfadbf6bc41cb400471ca9d2cae9b5" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/turbine" path="external/turbine" revision="0abcbd8dc502a6ccc5bd7b022c89343618fecccc" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/vixl" path="external/vixl" revision="84f5ed23e4b5a07cef857a8ed0c9fcee009fe93d" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/vogar" path="external/vogar" revision="29c45d111469f774dca6769eafe052132c82eea6" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/zlib" path="external/zlib" revision="f29fc757b1f27c182f36790eb0ccc6cf8ec27e8e" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/external/zopfli" path="external/zopfli" revision="99852d61990655f83827f98870fa90a687cadae2" upstream="main" dest-branch="main" groups="pdk-cw-fs,pdk-fs"/>
+  <project name="platform/external/zstd" path="external/zstd" revision="415469b3387190483d00ed838165d022d86cb899" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/frameworks/libs/modules-utils" path="frameworks/libs/modules-utils" revision="b5f632eb359176c3ccb281c70ce13f035a303d66" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/frameworks/proto_logging" path="frameworks/proto_logging" revision="73db26eb739bfd6bdcb6ef1498edb64b16b6e409" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/libcore" path="libcore" revision="de876a01b29230b877c9f408348c38a90ee724a5" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/libnativehelper" path="libnativehelper" revision="aef2939781fc0b57b4477df7160935cdf5697919" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/packages/modules/Connectivity" path="packages/modules/Connectivity" revision="2519a78731526d2eb20ae8812acdcab6ef7a09b6" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/packages/modules/DnsResolver" path="packages/modules/DnsResolver" revision="4d70e9efa5ae4b5eae682e5267fa09a2d694d23e" upstream="main" dest-branch="main" groups="pdk-cw-fs,pdk-fs"/>
+  <project name="platform/packages/modules/adb" path="packages/modules/adb" revision="1cf2f017d312f73b3dc53bda85ef2610e35a80e9" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/packages/modules/common" path="packages/modules/common" revision="9b6850e1d36af3efda26b7fc012138689361f0ac" upstream="main" dest-branch="main" groups="pdk-cw-fs,pdk-fs"/>
+  <project name="platform/packages/modules/vndk" path="packages/modules/vndk" revision="18c78f8c11a1487e9dfa7a87612b839edefd1ccf" upstream="main" dest-branch="main" groups="pdk-cw-fs,pdk-fs"/>
+  <project name="platform/platform_testing" path="platform_testing" revision="1bd9a7bc598e475819d4360343cdcd1117c4fe16" upstream="main" dest-branch="main" groups="cts,pdk-cw-fs,pdk-fs"/>
+  <project name="platform/prebuilts/asuite" path="prebuilts/asuite" revision="d90d0060aedfd80f2119c1db5339a093f2758926" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/bazel/common" path="prebuilts/bazel/common" revision="e24e8ba7c6deed0e2e9c36ad6f255437acd98e0d" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/bazel/linux-x86_64" path="prebuilts/bazel/linux-x86_64" revision="5c92123af5646d469fc53ef61994f5bca0306f66" upstream="main" dest-branch="main" groups="linux,pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/build-tools" path="prebuilts/build-tools" revision="07d9f1ce91469a888dd091aac1589f7e2b2f8d90" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/bundletool" path="prebuilts/bundletool" revision="4d55b55cd444c97bc021d35316010f57f62d7844" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/clang-tools" path="prebuilts/clang-tools" revision="2e77dab4d331387ed8036a3b2ae9fa48ca2f74a4" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/clang/host/linux-x86" path="prebuilts/clang/host/linux-x86" revision="70a12c4fe88940ab2b0e6d763492dffa2f07e15a" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/cmdline-tools" path="prebuilts/cmdline-tools" revision="1c17e1076d3100642c9a266ab53ae03456cd2216" upstream="main" dest-branch="main" groups="pdk-fs" clone-depth="1"/>
+  <project name="platform/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8" path="prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8" revision="c11702cc105d1eddfabf15f9da1b48d74815e875" upstream="main" dest-branch="main" groups="linux,pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/go/linux-x86" path="prebuilts/go/linux-x86" revision="166b4d06e301e8baf20303835e6528bb5dc55c31" upstream="main" dest-branch="main" groups="linux,tradefed" clone-depth="1"/>
+  <project name="platform/prebuilts/gradle-plugin" path="prebuilts/gradle-plugin" revision="8ece0daf601fb59dbc90a3c49a0610c0922cb166" upstream="main" dest-branch="main" groups="pdk-cw-fs,pdk-fs" clone-depth="1"/>
+  <project name="platform/prebuilts/jdk/jdk21" path="prebuilts/jdk/jdk21" revision="ef5bcc92586b839ae3dbacc154127092fa4002ec" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/jdk/jdk8" path="prebuilts/jdk/jdk8" revision="6cd518be7a7147ed5b1053edfbf66379bf5a45f9" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/misc" path="prebuilts/misc" revision="5b5dcfe62c9ce49c575197de4a39ed807d4ab783" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/module_sdk/StatsD" path="prebuilts/module_sdk/StatsD" revision="0e3afefeb5b7bd8a404e52ae5cdd05325ed67bfc" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/module_sdk/conscrypt" path="prebuilts/module_sdk/conscrypt" revision="c0dbb602663903c36a5e3b6ce1a1635ef8cd3315" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/ndk" path="prebuilts/ndk" revision="e0e58e67cd11713799cdf6b50ba5843d62881660" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/r8" path="prebuilts/r8" revision="fc5b15d29cba468ac8f626b299727fb7dbec9512" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/remoteexecution-client" path="prebuilts/remoteexecution-client" revision="1a2000a04722f08895cf0b7113841cf670932697" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/runtime" path="prebuilts/runtime" revision="070571b455076f77a01c7b07154a15e545d2b428" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/rust" path="prebuilts/rust" revision="b9c747ff3d3c30c2014b6f94f8599415010ac37f" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/sdk" path="prebuilts/sdk" revision="3af7c93524be6f51e092b87b17f009f13ee98b43" upstream="main" dest-branch="main" groups="pdk" clone-depth="1"/>
+  <project name="platform/prebuilts/tools" path="prebuilts/tools" revision="6e8deee32a622fc68688568fff6ea16e2b47bc0b" upstream="main" dest-branch="main" groups="pdk,tools" clone-depth="1"/>
+  <project name="platform/sdk" path="sdk" revision="1789df15502f1991eff51ff970dce5df8404dd56" upstream="main" dest-branch="main" groups="pdk-cw-fs,pdk-fs"/>
+  <project name="platform/system/apex" path="system/apex" revision="75c8ee81684d118ef3af2a4e898b8835da0be0c8" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/bpf" path="system/bpf" revision="c52a98dde5ecdbc62086c8624c2d1190d1d6737e" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/core" path="system/core" revision="a3b721a32242006b59cb12bd62c9133632af3a2d" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/extras" path="system/extras" revision="fc2494a2abd7ab21774d03deb09c1362bbb0bba8" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/gsid" path="system/gsid" revision="7b23404f158a0b2e9637cd63031804851d862da7" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/libbase" path="system/libbase" revision="6d19b5c690fa4220c10e42c2326150bbd4d4b7bb" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/libprocinfo" path="system/libprocinfo" revision="e8bf00215cb2175a87c38deb9ae3ff5a441ffd18" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/libsysprop" path="system/libsysprop" revision="2ad339045c671c4d64858f9b4bb6e730d9fae1cb" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/libziparchive" path="system/libziparchive" revision="3861cb86976b51f61193255f61b7bcf99c5f2918" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/logging" path="system/logging" revision="bcac7c30d88a3773a7c0bc9f5617a23a886331fd" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/memory/libmeminfo" path="system/memory/libmeminfo" revision="9a8f5952d95c704431bc477f7f0228db47a17ae9" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/netd" path="system/netd" revision="e11b8688b1f99292ade06f89f957c1f7e76ceae9" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/sepolicy" path="system/sepolicy" revision="4571ddd9440721fec583c906a337de949a77749e" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/server_configurable_flags" path="system/server_configurable_flags" revision="5fb17205d7335fc10f64133e3c40fc17ea27e4c3" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/testing/gtest_extras" path="system/testing/gtest_extras" revision="bcd079a69b19521e10945d119819d6419fd0c0f5" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/tools/aidl" path="system/tools/aidl" revision="a73091e714248afbf28a6d2ec3226d756288cc75" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/tools/sysprop" path="system/tools/sysprop" revision="aa6e5ff2053d88a326eebc1e1a1bcdc217633c5a" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/tools/xsdc" path="system/tools/xsdc" revision="5152b8cfd805b38a8464db4969568472bfeb10a8" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/system/unwinding" path="system/unwinding" revision="2ce2a964527143636a49b0c1a4de52e744b97a59" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/test/app_compat/csuite" path="test/app_compat/csuite" revision="19e8e06e4f233ca3dc9bea61e1e92c8b69aa8fed" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/test/suite_harness" path="test/suite_harness" revision="eb047ca8f48c09daf3e57405a8cfa97c778e1f57" upstream="main" dest-branch="main" groups="cts,pdk-cw-fs,pdk-fs"/>
+  <project name="platform/tools/apifinder" path="tools/apifinder" revision="ed3cc22572ea5fc243355a6e5093f0fcd823685c" upstream="main" dest-branch="main" groups="pdk,tools"/>
+  <project name="platform/tools/apksig" path="tools/apksig" revision="184702d9d18877edf9e5296c4e191cf0aa2b5fbb" upstream="main" dest-branch="main" groups="pdk,tradefed"/>
+  <project name="platform/tools/asuite" path="tools/asuite" revision="8cddfbd03ca4188445806a806db39c0b4f27c428" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="platform/tools/dexter" path="tools/dexter" revision="d992a222ec28b56efa29f9104db060379298049c" upstream="main" dest-branch="main" groups="tools"/>
+  <project name="platform/tools/loganalysis" path="tools/loganalysis" revision="eb1e03308b1d4f76dd9da63845a4604cd39326c6" upstream="main" dest-branch="main" groups="nopresubmit,pdk,tradefed"/>
+  <project name="platform/tools/metalava" path="tools/metalava" revision="550a85e8491c819771b9736dcd7d19f79dab6fb7" upstream="main" dest-branch="main" groups="tools"/>
+  <project name="platform/tools/repohooks" path="tools/repohooks" revision="ee593394dd36395f0f9433b738abf1859e92193d" upstream="main" dest-branch="main" groups="adt-infra,cts,developers,motodev,pdk,tools,tradefed"/>
+  <project name="platform/tools/tradefederation" path="tools/tradefederation/core" revision="7692f71e056605b72cff7f1f6529ae2096102560" upstream="main" dest-branch="main" groups="pdk,tradefed"/>
+  <project name="platform/tools/tradefederation/contrib" path="tools/tradefederation/contrib" revision="edc83060c851773cc8c8ed4d568664d97067d8d9" upstream="main" dest-branch="main" groups="pdk,tradefed"/>
+  <project name="toolchain/pgo-profiles" revision="e9f2453456ef50dc9c670d5e582883de494760d5" upstream="main" dest-branch="main" groups="pdk"/>
+  <project name="tools/platform-compat" revision="88aaf9df5107403b278dfa4dcff9b5ec2455bf06" upstream="main" dest-branch="main" groups="pdk,pdk-cw-fs,pdk-fs"/>
+</manifest>

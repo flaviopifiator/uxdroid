@@ -1,0 +1,22 @@
+[package]
+name = "uxdroid-system"
+description = "What Android's system provides below its framework: natives, properties and default bodies"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crc32fast = "1.5"
+# The same deflate the APK reader's zip uses, so no new crate enters the build.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+jni-sys = "0.4"
+libc = "0.2"
+serde_json = "1.0.154"
+uxdroid-audio = { path = "../audio" }
+uxdroid-bridge = { path = "../bridge" }
+uxdroid-ndk = { path = "../ndk" }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
