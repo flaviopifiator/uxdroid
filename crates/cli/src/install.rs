@@ -42,7 +42,7 @@ const INSTALLER_CLASS: &str = "dev.uxdroid.system.Installer";
 const STEP_LIMIT: Duration = Duration::from_secs(600);
 /// The density the framework reports, `DisplayService.DENSITY` in system/java: density splits are
 /// chosen for it.
-const HOST_DENSITY: u32 = 160;
+pub(crate) const HOST_DENSITY: u32 = 160;
 /// Android 11: apps targeting it or later need a v2 or later signature.
 const V2_REQUIRED_FROM_SDK: u32 = 30;
 
@@ -507,7 +507,7 @@ fn copy_hashing(mut source: std::fs::File, from: &Path, to: &Path) -> Result<Str
 }
 
 /// Copies every APK given into `unpacked`, then reads and verifies the copies, unpacking bundles
-/// there too. An app from a source must be one file with the SHA-256 the source gave.
+/// there too. An app from a source must be the files downloaded, each with the SHA-256 it had then.
 fn gather(
     apks: &[&Path],
     files: Vec<std::fs::File>,
@@ -548,13 +548,14 @@ fn gather(
     for (number, (apk, file)) in apks.iter().zip(files).enumerate() {
         let copy = directory.join(format!("given-{number}"));
         let sha256 = copy_hashing(file, apk, &copy)?;
-        if let Origin::Store(from) = origin
-            && sha256 != from.sha256
-        {
-            return Err(format!(
-                "the APK of {} from {} changed after it was downloaded (SHA-256 {sha256}, the index gives {}), so it is refused",
-                from.package, from.record.source, from.sha256
-            ));
+        if let Origin::Store(from) = origin {
+            let expected = from.sha256s.get(number).map_or("none", String::as_str);
+            if sha256 != expected {
+                return Err(format!(
+                    "the APK of {} from {} changed after it was downloaded (SHA-256 {sha256}, the index gives {expected}), so it is refused",
+                    from.package, from.record.source
+                ));
+            }
         }
         let Some(entries) = bundle_entries(&copy).map_err(|error| match error {
             uxdroid_apk::Error::Splits(reason) => format!("{}: {reason}", apk.display()),
@@ -583,7 +584,8 @@ fn gather(
 /// What an app from a store source must be, as its source signed it.
 pub(crate) struct FromStore<'a> {
     pub package: &'a str,
-    pub sha256: &'a str,
+    /// The SHA-256 each file had when it was downloaded, in the order given: a base, then splits.
+    pub sha256s: &'a [String],
     /// The SHA-256 of each certificate the source says signs it; none when it does not say.
     pub signers: &'a [String],
     pub record: &'a Installed,
@@ -646,7 +648,7 @@ fn check_origin(base: &Part, origin: &Origin) -> Result<(), String> {
 
 /// The languages of this user's locale, as `LANGUAGE` and the locale variables name them; English
 /// when none is set.
-fn host_languages() -> Vec<String> {
+pub(crate) fn host_languages() -> Vec<String> {
     let language = |locale: &str| {
         locale
             .split(['_', '.', '@', '-'])

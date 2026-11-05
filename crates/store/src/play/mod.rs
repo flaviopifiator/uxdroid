@@ -34,9 +34,10 @@ use std::time::{Duration, Instant};
 
 pub use account::{DEFAULT_DISPENSER, Mode, Settings, set_dispenser, use_account, use_anonymous};
 pub use profile::Profile;
-use proto::Message;
+use proto::{Message, base64url};
 
 use crate::config::SourceConfig;
+use crate::fdroid::MAX_APK_BYTES;
 use crate::fetch::{Fetch, Request, Status};
 use crate::{App, Error, Release, valid_package};
 
@@ -44,7 +45,10 @@ use crate::{App, Error, Release, valid_package};
 const MAX_ANSWER_BYTES: u64 = 8 * 1024 * 1024;
 /// Play is asked at most this often, so a long update does not hammer it.
 const PACE: Duration = Duration::from_millis(250);
+/// More splits than any app has; a delivery with more is refused.
+const MAX_FILES: usize = 64;
 const MAX_RESULTS: usize = 100;
+const MAX_SPLIT_NAME: usize = 255;
 
 static LAST_CALL: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -115,6 +119,24 @@ pub(crate) fn call(
         }
         Status::Other(code) => Err(code),
     })
+}
+
+/// One file of a delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct File {
+    /// `base`, or the split's name.
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    pub sha256: Option<Vec<u8>>,
+    pub sha1: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Delivery {
+    pub files: Vec<File>,
+    /// A cookie the downloads carry.
+    pub cookie: Option<String>,
 }
 
 /// The Play source of a store, for one command.
@@ -256,6 +278,145 @@ impl<'a> Play<'a> {
             ))),
         }
     }
+
+    /// Acquires `release` of `app`, free, and asks where its files are.
+    pub(crate) fn deliver(&self, app: &App, release: &Release) -> Result<Delivery, Error> {
+        let package = &app.package;
+        if let Some(price) = &release.paid {
+            return Err(Error::new(format!(
+                "{package} costs {price} on Google Play, and uxdroid installs only free apps from it"
+            )));
+        }
+        let code = release.version_code;
+        let form = format!("ot=1&doc={package}&vc={code}").into_bytes();
+        self.api("purchase", Some(form))?
+            .map_err(|status| self.refused(&format!("acquiring {package}"), status))?;
+        let answer = self
+            .api(&format!("delivery?ot=1&doc={package}&vc={code}"), None)?
+            .map_err(|status| self.refused(&format!("delivering {package}"), status))?;
+        let delivery = Message::new(&answer).at(&[1, 21])?.unwrap_or_default();
+        let status = delivery.uint(1)?.unwrap_or(0);
+        let data = match delivery.message(2)? {
+            Some(data) if status == 1 => data,
+            _ => {
+                return Err(Error::new(format!(
+                    "Google Play does not deliver {package} {} to this device ({}, SDK {}) (status {status}): it may not be available for it or in its country",
+                    release.version_code, self.profile.abi, self.profile.sdk
+                )));
+            }
+        };
+        self.files(package, data)
+    }
+
+    fn files(&self, package: &str, data: Message) -> Result<Delivery, Error> {
+        let refuse = |why: String| {
+            Error::new(format!(
+                "Google Play's delivery of {package} {why}, so it is refused"
+            ))
+        };
+        let hash = |text: Option<&str>, length: usize| -> Result<Option<Vec<u8>>, Error> {
+            match text {
+                None | Some("") => Ok(None),
+                Some(text) => base64url(text)
+                    .filter(|bytes| bytes.len() == length)
+                    .map(Some)
+                    .ok_or_else(|| refuse("has a malformed hash".to_string())),
+            }
+        };
+        let mut files = Vec::new();
+        let base = File {
+            name: "base".to_string(),
+            url: data.string(3)?.unwrap_or_default().to_string(),
+            size: data.uint(1)?.unwrap_or(0),
+            sha1: hash(data.string(2)?, 20)?,
+            sha256: hash(data.string(19)?, 32)?,
+        };
+        files.push(base);
+        for split in data.messages(15)? {
+            let name = split.string(1)?.unwrap_or_default();
+            if !valid_split_name(name) || files.iter().any(|file: &File| file.name == name) {
+                return Err(refuse(format!(
+                    "names a split {}, which is not a valid or a new split name",
+                    name.escape_debug()
+                )));
+            }
+            files.push(File {
+                name: name.to_string(),
+                url: split.string(5)?.unwrap_or_default().to_string(),
+                size: split.uint(2)?.unwrap_or(0),
+                sha1: hash(split.string(4)?, 20)?,
+                sha256: hash(split.string(9)?, 32)?,
+            });
+            if files.len() > MAX_FILES {
+                return Err(refuse(format!("has more than {MAX_FILES} files")));
+            }
+        }
+        for file in &files {
+            if file.size == 0 || file.size > MAX_APK_BYTES {
+                return Err(refuse(format!(
+                    "gives {} a size of {} bytes",
+                    file.name, file.size
+                )));
+            }
+            if !self.allowed_download(&file.url) {
+                return Err(refuse(format!(
+                    "gives {} the address {}, which is not Google Play's",
+                    file.name,
+                    file.url.escape_debug()
+                )));
+            }
+        }
+        let cookie = match data.message(5)? {
+            Some(cookie) => {
+                let name = cookie.string(1)?.unwrap_or_default();
+                let value = cookie.string(2)?.unwrap_or_default();
+                let token = |text: &str| {
+                    text.len() <= 4096
+                        && text
+                            .bytes()
+                            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b';' | b','))
+                };
+                if name.is_empty() || !token(name) || !token(value) {
+                    return Err(refuse("has a malformed cookie".to_string()));
+                }
+                Some(format!("{name}={value}"))
+            }
+            None => None,
+        };
+        Ok(Delivery { files, cookie })
+    }
+
+    /// Files come from Play's download host over https, or from the API's own origin, as a test
+    /// server serves them.
+    fn allowed_download(&self, url: &str) -> bool {
+        let origin = |url: &str| -> Option<String> {
+            let (scheme, rest) = url.split_once("://")?;
+            let host = rest.split(['/', '?', '#']).next()?;
+            (!host.is_empty() && !host.contains(['@', '\\'])).then(|| format!("{scheme}://{host}"))
+        };
+        let printable = url.len() <= 8192 && url.bytes().all(|byte| byte.is_ascii_graphic());
+        printable
+            && (origin(url).as_deref() == Some("https://play.googleapis.com")
+                || origin(url)
+                    .is_some_and(|origin| Some(origin) == self::origin_of(&self.source.url)))
+    }
+}
+
+fn origin_of(api: &str) -> Option<String> {
+    let (scheme, rest) = api.split_once("://")?;
+    let host = rest.split('/').next()?;
+    Some(format!("{scheme}://{host}"))
+}
+
+/// Split names become file names in the installer's checks and in error messages.
+fn valid_split_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_SPLIT_NAME
+        && name != "base"
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// The apps in a document of a list: the document itself, or the apps of its clusters.
@@ -380,5 +541,22 @@ mod tests {
         assert_eq!(shown_date("Feb 29, 2000"), Some(951_782_400_000));
         assert_eq!(shown_date("10 mar 2025"), None);
         assert_eq!(shown_date("Mar 99, 2025"), None);
+    }
+
+    #[test]
+    fn split_names_are_checked() {
+        assert!(valid_split_name("config.x86_64"));
+        assert!(valid_split_name("feature-one"));
+        for bad in [
+            "",
+            "base",
+            ".hidden",
+            "../x",
+            "a/b",
+            "a b",
+            &"x".repeat(256),
+        ] {
+            assert!(!valid_split_name(bad), "{bad}");
+        }
     }
 }

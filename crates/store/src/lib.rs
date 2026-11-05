@@ -20,11 +20,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
 use config::{Config, Kind, unknown_source};
 use fdroid::Fdroid;
-use fetch::{Fetch, Http};
+use fetch::{Fetch, Http, Request};
 use play::{Play, Profile};
 
 pub use search::{Hit, Matches, search};
@@ -221,18 +222,48 @@ impl Installed {
     }
 }
 
-/// An APK downloaded into a file this process created, with the SHA-256 the source gave, already
-/// checked. The installer checks it again on its own copy. The file goes when this is dropped.
+/// The APKs of a release, each downloaded into a file this process created and checked against
+/// what the source stated: a base, then its splits when the source delivers some. The installer
+/// checks each again on its own copy. The files go when this is dropped.
 pub struct Download {
+    pub files: Vec<Downloaded>,
+}
+
+impl Download {
+    pub fn paths(&self) -> Vec<&Path> {
+        self.files.iter().map(|file| file.path.as_path()).collect()
+    }
+
+    pub fn size(&self) -> u64 {
+        self.files.iter().map(|file| file.size).sum()
+    }
+}
+
+pub struct Downloaded {
+    /// `base`, or the name of the split.
+    pub name: String,
     pub path: PathBuf,
+    /// Its SHA-256 as downloaded, lowercase hex.
     pub sha256: String,
+    pub size: u64,
     _lock: File,
 }
 
-impl Drop for Download {
+impl Drop for Downloaded {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// One file of a download: where it is and what it must be.
+struct Wanted {
+    name: String,
+    request: Request,
+    size: u64,
+    sha256: Option<String>,
+    sha1: Option<String>,
+    /// Sent with its headers, as Google Play's downloads are; F-Droid's are plain fetches.
+    send: bool,
 }
 
 /// The store of one data directory: `<data>/store` holds its sources and their indexes.
@@ -449,7 +480,8 @@ impl Store {
     }
 
     /// Downloads `release` into `<data>/store/downloads`, refusing more bytes than it has or other
-    /// contents than its SHA-256.
+    /// contents than its hashes. From Google Play, the release is acquired first, free, and its
+    /// base and splits are downloaded as Play delivers them.
     pub fn download(&self, app: &App, release: &Release) -> Result<Download, Error> {
         if !valid_package(&app.package) {
             return Err(Error::new(format!(
@@ -457,25 +489,77 @@ impl Store {
                 app.package.escape_debug()
             )));
         }
-        if self
-            .config
-            .source(&app.source)
-            .is_some_and(|source| source.kind == Kind::Play)
-        {
-            return Err(Error::new(
-                "this uxdroid cannot download from Google Play yet",
-            ));
-        }
+        let source = self.config.source(&app.source);
+        let wanted = match source {
+            Some(source) if source.kind == Kind::Play => {
+                let play = Play::new(source, &self.root, &self.profile, self.fetch.as_ref());
+                let delivery = play.deliver(app, release)?;
+                let mut wanted = Vec::new();
+                for file in delivery.files {
+                    let mut request = Request::get(file.url);
+                    if let Some(cookie) = &delivery.cookie {
+                        request = request.header("Cookie", cookie.clone());
+                    }
+                    wanted.push(Wanted {
+                        name: file.name,
+                        request,
+                        size: file.size,
+                        sha256: file.sha256.map(|hash| play::proto::hex(&hash)),
+                        sha1: file.sha1.map(|hash| play::proto::hex(&hash)),
+                        send: true,
+                    });
+                }
+                wanted
+            }
+            _ => vec![Wanted {
+                name: "base".to_string(),
+                request: Request::get(&release.url),
+                size: release.size,
+                sha256: Some(release.sha256.clone()),
+                sha1: None,
+                send: false,
+            }],
+        };
         let directory = self.root.join("downloads");
         std::fs::create_dir_all(&directory).map_err(|error| {
             Error::new(format!("cannot write {}: {error}", directory.display()))
         })?;
         sweep_downloads(&directory);
+        let total = wanted
+            .iter()
+            .fold(0u64, |total, file| total.saturating_add(file.size));
+        let mut files = Vec::new();
+        let mut done = 0;
+        for (number, wanted) in wanted.into_iter().enumerate() {
+            let file =
+                self.download_one(app, release, &directory, number, wanted, (done, total))?;
+            done += file.size;
+            files.push(file);
+        }
+        Ok(Download { files })
+    }
+
+    /// Downloads one file of `release`, reporting its bytes after `before` of `total`.
+    fn download_one(
+        &self,
+        app: &App,
+        release: &Release,
+        directory: &Path,
+        number: usize,
+        wanted: Wanted,
+        (before, total): (u64, u64),
+    ) -> Result<Downloaded, Error> {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos());
+        // The first file keeps the name it always had; splits get their number.
+        let suffix = if number == 0 {
+            String::new()
+        } else {
+            format!("-{number}")
+        };
         let path = directory.join(format!(
-            "{}-{}-{}-{stamp}.apk",
+            "{}-{}-{}-{stamp}{suffix}.apk",
             app.package,
             release.version_code,
             std::process::id()
@@ -493,52 +577,89 @@ impl Store {
                     .map(|()| lock)
             })
             .map_err(|error| Error::new(format!("cannot lock {}: {error}", path.display())))?;
-        let download = Download {
+        let mut downloaded = Downloaded {
+            name: wanted.name.clone(),
             path,
-            sha256: release.sha256.clone(),
+            sha256: String::new(),
+            size: 0,
             _lock: lock,
         };
         let mut hashing = Hashing {
             inner: &mut file,
             hash: Sha256::new(),
+            sha1: wanted.sha1.as_ref().map(|_| Sha1::new()),
             done: 0,
-            total: release.size,
+            before,
+            total,
             transfer: self.transfer.as_ref(),
             cancelled: false,
         };
-        let copied = self.fetch.copy(&release.url, release.size, &mut hashing);
+        let copied = if wanted.send {
+            self.fetch
+                .send(&wanted.request, wanted.size, &mut hashing)
+                .and_then(|status| match status {
+                    fetch::Status::Ok(size) => Ok(size),
+                    fetch::Status::Other(code) => Err(Error::new(format!(
+                        "cannot fetch the APK of {} from {}: the server answered {code}",
+                        app.package, app.source
+                    ))),
+                })
+        } else {
+            self.fetch
+                .copy(&wanted.request.url, wanted.size, &mut hashing)
+        };
         if hashing.cancelled {
             return Err(Error::new(format!(
                 "the download of {} from {} was cancelled",
                 app.package, app.source
             )));
         }
+        let what = if wanted.name == "base" {
+            format!("the APK of {} from {}", app.package, app.source)
+        } else {
+            format!(
+                "the split {} of {} from {}",
+                wanted.name, app.package, app.source
+            )
+        };
         let size = copied.map_err(|error| {
             if error.0.contains("is larger than") {
                 Error::new(format!(
-                    "the APK of {} from {} is larger than the {} bytes its index gives, so it is refused",
-                    app.package, app.source, release.size
+                    "{what} is larger than the {} bytes its index gives, so it is refused",
+                    wanted.size
                 ))
             } else {
                 error
             }
         })?;
-        let digest: String = hashing
-            .hash
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        if size != release.size || digest != release.sha256 {
+        let sha1 = hashing
+            .sha1
+            .take()
+            .map(|hash| play::proto::hex(&hash.finalize()));
+        let digest = play::proto::hex(&hashing.hash.finalize());
+        let expected = wanted.sha256.as_deref().unwrap_or(&digest);
+        if size != wanted.size || digest != expected {
             return Err(Error::new(format!(
-                "the APK of {} from {} does not match its index (SHA-256 {}, {} bytes; the index gives {}, {} bytes), so it is refused",
-                app.package, app.source, digest, size, release.sha256, release.size
+                "{what} does not match its index (SHA-256 {}, {} bytes; the index gives {}, {} bytes), so it is refused",
+                digest, size, expected, wanted.size
+            )));
+        }
+        if sha1 != wanted.sha1 {
+            return Err(Error::new(format!(
+                "{what} does not match its index (SHA-1 {}; the index gives {}), so it is refused",
+                sha1.unwrap_or_default(),
+                wanted.sha1.unwrap_or_default()
             )));
         }
         file.sync_all().map_err(|error| {
-            Error::new(format!("cannot write {}: {error}", download.path.display()))
+            Error::new(format!(
+                "cannot write {}: {error}",
+                downloaded.path.display()
+            ))
         })?;
-        Ok(download)
+        downloaded.sha256 = digest;
+        downloaded.size = size;
+        Ok(downloaded)
     }
 }
 
@@ -558,11 +679,14 @@ fn sweep_downloads(directory: &Path) {
     }
 }
 
-/// Writes a download to its file, hashing it and reporting its progress.
+/// Writes a download to its file, hashing it and reporting its progress among all the files of its
+/// release.
 struct Hashing<'a> {
     inner: &'a mut File,
     hash: Sha256,
+    sha1: Option<Sha1>,
     done: u64,
+    before: u64,
     total: u64,
     transfer: &'a dyn Fn(u64, u64) -> bool,
     cancelled: bool,
@@ -575,8 +699,11 @@ impl Write for Hashing<'_> {
         }
         let written = self.inner.write(bytes)?;
         self.hash.update(&bytes[..written]);
+        if let Some(sha1) = &mut self.sha1 {
+            sha1.update(&bytes[..written]);
+        }
         self.done += written as u64;
-        if !(self.transfer)(self.done, self.total) {
+        if !(self.transfer)(self.before + self.done, self.total) {
             self.cancelled = true;
             return Err(std::io::Error::other("cancelled"));
         }

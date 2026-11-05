@@ -348,21 +348,37 @@ fn install_release(
         version_code: release.version_code,
         version_name: release.version_name.clone(),
     };
+    let sha256s: Vec<String> = download
+        .files
+        .iter()
+        .map(|file| file.sha256.clone())
+        .collect();
     let origin = Origin::Store(FromStore {
         package: &app.package,
-        sha256: &download.sha256,
+        sha256s: &sha256s,
         signers: &release.signers,
         record: &record,
     });
-    let (report, note) = install(&[download.path.as_path()], data, &origin)?;
+    let (report, note) = install(&download.paths(), data, &origin)?;
+    let what = match &download.files[..] {
+        [file] => format!("{} bytes, SHA-256 {}", file.size, file.sha256),
+        files => format!(
+            "{} APKs ({}), {} bytes",
+            files.len(),
+            files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            download.size()
+        ),
+    };
     Ok((
         format!(
-            "downloaded {} {} from {}: {} bytes, SHA-256 {}\n{report}",
+            "downloaded {} {} from {}: {what}\n{report}",
             app.package,
             version(&release.version_name, release.version_code),
             app.source,
-            release.size,
-            release.sha256
         ),
         note,
     ))

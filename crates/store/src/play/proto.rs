@@ -243,6 +243,32 @@ impl Writer {
     }
 }
 
+/// Base64 with the URL alphabet, padded or not, as Google gives hashes. Anything else is refused.
+pub(crate) fn base64url(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim_end_matches('=');
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0;
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    // Leftover bits must be padding zeros, and a single leftover character is not base64.
+    (bits < 6 && buffer & ((1 << bits) - 1) == 0).then_some(out)
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -315,5 +341,18 @@ mod tests {
         assert!(Message::new(&invalid_text).string(1).is_err());
         let number_as_bytes = [0x08, 0x01];
         assert!(Message::new(&number_as_bytes).message(1).is_err());
+    }
+
+    #[test]
+    fn hashes_in_base64url_decode() {
+        assert_eq!(
+            hex(&base64url("V9EG0M-odjRCs2Re8nQcOLuCC9Vv1GEr9AojttmYvl4").unwrap()),
+            "57d106d0cfa8763442b3645ef2741c38bb820bd56fd4612bf40a23b6d998be5e"
+        );
+        assert_eq!(base64url("YQ==").unwrap(), b"a");
+        assert_eq!(base64url("YQ").unwrap(), b"a");
+        assert!(base64url("Y").is_none());
+        assert!(base64url("YR").is_none(), "nonzero padding bits");
+        assert!(base64url("a b").is_none());
     }
 }

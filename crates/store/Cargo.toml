@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 ureq = { version = "3.5.1", default-features = false, features = ["rustls-no-provider", "_ring", "gzip", "platform-verifier"] }
 uxdroid-apk = { path = "../apk" }
