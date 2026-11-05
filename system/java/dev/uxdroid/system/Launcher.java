@@ -230,9 +230,33 @@ public final class Launcher {
             return providers;
         }
 
-        /** The framework's own manifest parser, so the app sees the values Android would give it. */
+        /**
+         * The framework's own manifest parser, so the app sees the values Android would give it. An app
+         * installed with splits is parsed as Android parses its code directory: base.apk and every
+         * split_*.apk beside it as one package.
+         */
         static PackageParser.Package parsePackage(File apk) throws PackageParser.PackageParserException {
-            return new PackageParser().parsePackage(apk, 0);
+            return new PackageParser().parsePackage(splits(apk).length > 0 ? apk.getParentFile() : apk, 0);
+        }
+
+        /** The splits uxdroid install put beside an installed base.apk, by name, as its splits file lists them. */
+        static String[] splits(File apk) {
+            File list = new File(apk.getParentFile(), SPLITS);
+            if (!apk.getName().equals("base.apk") || !list.isFile()) return new String[0];
+            try {
+                return java.nio.file.Files.readAllLines(list.toPath()).stream()
+                        .filter(name -> !name.isEmpty()).toArray(String[]::new);
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException("cannot read " + list, e);
+            }
+        }
+
+        /** The file uxdroid install lists an app's splits in, beside base.apk. */
+        static final String SPLITS = "splits";
+
+        /** Where a split of an installed base.apk is. */
+        static File split(File apk, String name) {
+            return new File(apk.getParentFile(), "split_" + name + ".apk");
         }
 
         static ApplicationInfo applicationInfo(PackageParser.Package parsed, File apk, boolean create) {
@@ -259,11 +283,22 @@ public final class Launcher {
             return null;
         }
 
-        /** Where the installer put the app: its code is the APK, its data under ANDROID_DATA. */
+        /**
+         * Where the installer put the app: its code is the APK and its splits, its data under ANDROID_DATA.
+         * The framework's LoadedApk adds the splits, which are not isolated, to the app's class loader
+         * after the base, in this order, which is the one install compiled them in, and their resources
+         * to the app's.
+         */
         private static void place(ApplicationInfo application, File apk, boolean create) {
             String path = apk.getAbsolutePath();
             application.sourceDir = path;
             application.publicSourceDir = path;
+            String[] splits = splits(apk);
+            String[] paths = new String[splits.length];
+            for (int i = 0; i < splits.length; i++) paths[i] = split(apk, splits[i]).getAbsolutePath();
+            application.splitNames = splits.length == 0 ? null : splits;
+            application.splitSourceDirs = splits.length == 0 ? null : paths;
+            application.splitPublicSourceDirs = splits.length == 0 ? null : paths.clone();
             File data = new File(dataRoot(), "data/" + application.packageName);
             File libraries = new File(data, "lib");
             if (create && !libraries.isDirectory() && !libraries.mkdirs()) {

@@ -58,14 +58,23 @@ final class Record {
         }
     }
 
-    /** The runtime and the APK, by path, size and modification time. Changing either makes a record stale. */
+    /**
+     * The runtime, the APK and its splits, by path, size and modification time. Changing any makes a
+     * record stale. An APK without splits has the identity it always had, so its record stays valid.
+     */
     static String identity(String root, File apk) {
         StringBuilder text = new StringBuilder(new File(root).getAbsolutePath());
         for (String name : RUNTIME_FILES) {
             File file = new File(root, name);
             text.append('|').append(name).append(' ').append(file.length()).append(' ').append(file.lastModified());
         }
-        return text.append("|apk ").append(apk.length()).append(' ').append(apk.lastModified()).toString();
+        text.append("|apk ").append(apk.length()).append(' ').append(apk.lastModified());
+        for (String name : Launcher.App.splits(apk)) {
+            File split = Launcher.App.split(apk, name);
+            text.append("|split ").append(name).append(' ').append(split.length()).append(' ')
+                    .append(split.lastModified());
+        }
+        return text.toString();
     }
 
     /**

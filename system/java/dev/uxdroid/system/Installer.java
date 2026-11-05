@@ -10,7 +10,8 @@ import java.io.File;
 /**
  * The part of {@code uxdroid install} that needs the framework: it parses the manifest with the
  * framework's own parser and records the result, and writes the library of default bodies, so a start
- * does neither. Run on the staged APK, it records the paths the APK will have once installed.
+ * does neither. Run on the staged APK, it records the paths the APK will have once installed. With the
+ * splits uxdroid install staged beside it, it parses them with the base as one package, as Android does.
  *
  * <p>Prints {@code launcher <class>} (or {@code launcher none}) and {@code defaults <count>}.
  */

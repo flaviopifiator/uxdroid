@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A feature split with code and resources of its own. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.split"
+    android:versionCode="1" split="feature" android:isFeatureSplit="true">
+    <application android:hasCode="true" />
+</manifest>
