@@ -533,6 +533,51 @@ docker compose build dev && docker compose build translation
 docker compose run --rm translation cargo test -p uxdroid-translate -p uxdroid-cli
 ```
 
+## Packages
+
+`packaging/build.sh` builds uxdroid for one CPU and packages it as `uxdroid_<version>_<arch>.deb` and `uxdroid-<version>-linux-<arch>.tar.gz`, with their SHA-256 sums. It runs in the `packager` service, which is Ubuntu 22.04: its glibc 2.35 is the oldest of the tested distributions, so what links there runs on all of them. amd64 builds natively and arm64 through the aarch64 cross toolchain.
+
+```bash
+docker compose run --rm packager packaging/build.sh amd64 /cache/dist
+docker compose run --rm packager packaging/build.sh arm64 /cache/dist
+
+# The runtime package. The framework's classes and the boot image name the root the runtime was
+# built for, so it is built again for /usr/lib/uxdroid/runtime from the trees of "Run an APK", in a
+# volume of its own (owned by uid 1000), with the steps after build.sh. It needs AOSP's trees, so it
+# is built here and attached to a release by hand, not on CI's hosted runners.
+export RUNTIME=/usr/lib/uxdroid/runtime
+for step in art/package.sh art/compile.sh art/build_platform.sh framework/build.sh framework/build_system.sh; do
+    docker compose --profile art run --rm -T -e RUNTIME -v uxdroid-pkg-runtime:/usr/lib/uxdroid \
+        art-builder bash /work/runtime/$step
+done
+docker compose run --rm -v uxdroid-pkg-runtime:/usr/lib/uxdroid:ro packager \
+    packaging/runtime.sh amd64 /usr/lib/uxdroid/runtime /cache/dist
+gh release upload v<version> <dist>/uxdroid-runtime_<version>_amd64.deb
+```
+
+The arm64 runtime package is built the same way with `ARCH=arm64` in the `android16-builder` service, from a volume of its own.
+
+| Package | Installs | Depends on | Recommends |
+|---------|----------|------------|------------|
+| `uxdroid` | `/usr/lib/uxdroid`: the program, `libuxdroid_system.so` and `libuxdroid_nativebridge.so`, with `/usr/bin/uxdroid` linked to it | glibc 2.35 and libgcc | `uxdroid-runtime`, and the libraries uxdroid opens when an app needs them: Mesa's EGL, GLES and GBM, xkbcommon, PulseAudio and ALSA |
+| `uxdroid-runtime` | `/usr/lib/uxdroid/runtime`: ART, the framework and uxdroid's platform classes, without the smoke tests' samples | `uxdroid` of the same version, whose JNI natives it calls | — |
+
+`VERSION` overrides the workspace's version, as a release tag does, and `VERSION_SUFFIX` is appended, as CI's `+ci.<run>`.
+
+CI (`.github/workflows/ci.yml`) runs on every push and pull request:
+
+1. **Lint and test**: `cargo fmt`, `clippy` and the workspace's tests, in the dev image.
+2. **Package**: `packaging/build.sh` for amd64 and arm64.
+3. **Install**: on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04, for each CPU (arm64 under QEMU user), `packaging/smoke.sh` installs the `.deb` with apt and checks the following:
+   - every recommended library has a package on that distribution;
+   - the program's libraries all resolve;
+   - it searches, installs, lists and removes an app from F-Droid;
+   - the tarball runs from where it is unpacked;
+   - removing the package leaves no files.
+4. **Release**: a `v*` tag publishes the packages and their `SHA256SUMS` as a GitHub release.
+
+The install check runs no app, since CI has no runtime package.
+
 ## Performance
 
 Every milestone is measured against the competitors that can run in the test environment, with a repeatable benchmark under `benches/`. [benches/loader](../benches/loader/README.md) compares load times with other loaders, and [benches/art](../benches/art/README.md) compares runtime startup. [benches/translation](../benches/translation/README.md) compares arm64 code run by the bridge's translator with native x86_64 and QEMU user. [benches/framework](../benches/framework/README.md) measures startup and memory on AOSP's framework, RustDesk included, against milestone 3's own platform, and the cost and latency of audio; no competitor could run those workloads here.

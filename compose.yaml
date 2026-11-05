@@ -179,6 +179,20 @@ services:
       - art_competitor:/competitor
       - .:/work:ro
 
+  # Builds the .deb and .tar.gz packages for one CPU on Ubuntu 22.04's glibc:
+  # docker compose run --rm packager packaging/build.sh amd64|arm64
+  packager:
+    image: uxdroid-packager
+    build:
+      context: .
+      dockerfile: packaging/Dockerfile
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - .:/work
+      - cache:/cache
+
 volumes:
   cache:
   art_src:
