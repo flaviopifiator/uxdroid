@@ -133,6 +133,7 @@ fn open(
     outbox: &Sender<Reply>,
 ) -> Result<Store, String> {
     let mut store = Store::open_with(data, connect()).map_err(|error| error.0)?;
+    store.set_profile(crate::store::profile());
     let notes = outbox.clone();
     store.on_progress(Box::new(move |message| {
         let _ = notes.send(Reply::Note(message.to_string()));

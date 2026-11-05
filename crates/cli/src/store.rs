@@ -6,10 +6,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use uxdroid_store::config::{Config, DEFAULT_REFRESH_AFTER_HOURS};
-use uxdroid_store::{App, Device, Installed, Refresh, Release, Store, valid_package};
+use uxdroid_store::config::{Config, DEFAULT_REFRESH_AFTER_HOURS, PLAY};
+use uxdroid_store::play::{Mode, Profile, Settings};
+use uxdroid_store::{App, Device, Installed, Refresh, Release, Store, Want, valid_package};
 
-use crate::install::{FromStore, Origin, install, lock_package};
+use crate::install::{FromStore, HOST_DENSITY, Origin, host_languages, install, lock_package};
 use crate::runtime::home_dir;
 use crate::{EXIT_FAILURE, EXIT_USAGE, INSTALL_USAGE, fail, print};
 
@@ -22,7 +23,8 @@ pub(crate) const LIST_USAGE: &str = "usage: uxdroid list [--data <dir>]";
 pub(crate) const SOURCES_USAGE: &str = "usage: uxdroid sources [--data <dir>]\n       \
      uxdroid sources add <name> <url> --fingerprint <sha256> [--data <dir>]\n       \
      uxdroid sources enable|disable <name> [--data <dir>]\n       \
-     uxdroid sources refresh-after <hours> [--data <dir>]";
+     uxdroid sources refresh-after <hours> [--data <dir>]\n       \
+     uxdroid sources play [--anonymous | --account <email>] [--dispenser <url>] [--data <dir>]";
 const DEFAULT_LIMIT: usize = 20;
 const NAME_WIDTH: usize = 32;
 
@@ -197,7 +199,20 @@ fn table(rows: &[Vec<String>]) -> String {
 fn open_store(data: &Path) -> Result<Store, String> {
     let mut store = Store::open(data).map_err(|error| error.0)?;
     store.on_progress(Box::new(note));
+    store.set_profile(profile());
     Ok(store)
+}
+
+/// The device Google Play is told about: this machine, and the density and languages the installer
+/// keeps splits for.
+pub(crate) fn profile() -> Profile {
+    let device = Device::host();
+    Profile {
+        abi: device.abi,
+        sdk: device.sdk,
+        density: HOST_DENSITY,
+        languages: host_languages(),
+    }
 }
 
 fn note(message: &str) {
@@ -243,7 +258,7 @@ pub(crate) fn run_search(args: &[OsString]) -> ExitCode {
     let result = (|| {
         let store = open_store(&parsed.data()?)?;
         let (apps, notes) = store
-            .apps(None, parsed.refresh())
+            .apps_for(None, parsed.refresh(), Want::Matching(&text))
             .map_err(|error| error.0)?;
         for message in &notes {
             note(message);
@@ -434,10 +449,7 @@ pub(crate) fn install_package(
     note: &dyn Fn(&str),
 ) -> Result<(String, Option<String>), String> {
     let installed = Installed::read(data, package).map_err(|error| error.0)?;
-    let (apps, notes) = store.apps(from, refresh).map_err(|error| error.0)?;
-    for message in &notes {
-        note(message);
-    }
+    let apps = offers(store, package, from, refresh, installed.as_ref(), note)?;
     let app = choose(&apps, package, installed.as_ref()).ok_or_else(|| match from {
         Some(from) => format!("{package} is not in {from}"),
         None => format!("no enabled source has {package}: uxdroid search finds apps"),
@@ -468,6 +480,66 @@ pub(crate) fn install_package(
         }
     }
     install_release(store, data, app, release)
+}
+
+/// The enabled Google Play source, when there is one.
+fn play_source(store: &Store) -> Option<String> {
+    store
+        .config()
+        .play()
+        .filter(|source| source.enabled)
+        .map(|source| source.name.clone())
+}
+
+/// The offers of `package` that `install` chooses from. Without `from`, sources with an index come
+/// first: Google Play is asked only when none has the package, or when it was installed from Play,
+/// and the user is told when Play was not asked.
+fn offers(
+    store: &Store,
+    package: &str,
+    from: Option<&str>,
+    refresh: Refresh,
+    installed: Option<&Installed>,
+    note: &dyn Fn(&str),
+) -> Result<Vec<App>, String> {
+    let wanted = [package.to_string()];
+    let lookup = |from: Option<&str>| -> Result<Vec<App>, String> {
+        let (apps, notes) = store
+            .apps_for(from, refresh, Want::Packages(&wanted))
+            .map_err(|error| error.0)?;
+        for message in &notes {
+            note(message);
+        }
+        Ok(apps)
+    };
+    let Some(play) = play_source(store).filter(|_| from.is_none()) else {
+        return lookup(from);
+    };
+    if installed.is_some_and(|installed| installed.source == play) {
+        return lookup(Some(&play));
+    }
+    let apps = match store.apps_for(None, refresh, Want::Everything) {
+        Ok((apps, notes)) => {
+            for message in &notes {
+                note(message);
+            }
+            apps
+        }
+        Err(error) => {
+            note(&error.0);
+            Vec::new()
+        }
+    };
+    match choose(&apps, package, installed) {
+        Some(app) => {
+            note(&format!(
+                "{package} is in {}, so it is installed from there and Google Play is not asked; uxdroid install {package} --from {play} installs it from Google Play",
+                app.source
+            ));
+            Ok(apps)
+        }
+        None => lookup(Some(&play)),
+    }
 }
 
 fn report(result: Result<(String, Option<String>), String>) -> ExitCode {
@@ -687,7 +759,12 @@ pub(crate) fn update(
         .collect();
     let mut offered: Vec<App> = Vec::new();
     for source in sources {
-        match store.apps(Some(source), refresh) {
+        let wanted: Vec<String> = packages
+            .iter()
+            .filter(|(_, record)| record.source == source)
+            .map(|(package, _)| package.clone())
+            .collect();
+        match store.apps_for(Some(source), refresh, Want::Packages(&wanted)) {
             Ok((apps, notes)) => {
                 notes.iter().for_each(|message| note(message));
                 offered.extend(apps);
@@ -820,17 +897,40 @@ fn remove(data: &Path, package: &str) -> Result<(), String> {
     }
 }
 
+/// What `uxdroid sources enable play` says the first time.
+pub(crate) const PLAY_WARNING: &str = "Google Play's terms allow only Google's own store app, so Google may limit or block the accounts that sign in with another client such as uxdroid. Anonymous mode signs in to shared accounts handed out by a third-party service, Aurora OSS's token dispenser (https://auroraoss.com), which uxdroid does not control and which may stop working at any time. uxdroid sources play --account <email> signs in with your own account instead, at your own risk.";
+
 pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
-    let Some(parsed) = Args::parse(args, &[("--fingerprint", true), ("--data", true)]) else {
+    let Some(parsed) = Args::parse(
+        args,
+        &[
+            ("--fingerprint", true),
+            ("--anonymous", false),
+            ("--account", true),
+            ("--dispenser", true),
+            ("--data", true),
+        ],
+    ) else {
         return fail(SOURCES_USAGE, EXIT_USAGE);
     };
     let words: Vec<&str> = parsed.words.iter().map(String::as_str).collect();
     let fingerprint = parsed
         .value("--fingerprint")
         .and_then(|value| value.to_str());
+    let account = parsed.value("--account").map(|value| value.to_str());
+    let dispenser = parsed.value("--dispenser").map(|value| value.to_str());
+    let play_flags = parsed.has("--anonymous") || account.is_some() || dispenser.is_some();
     let valid = match words[..] {
-        [] | ["enable", _] | ["disable", _] | ["refresh-after", _] => !parsed.has("--fingerprint"),
-        ["add", _, _] => fingerprint.is_some(),
+        [] | ["enable", _] | ["disable", _] | ["refresh-after", _] => {
+            !parsed.has("--fingerprint") && !play_flags
+        }
+        ["add", _, _] => fingerprint.is_some() && !play_flags,
+        ["play"] => {
+            !parsed.has("--fingerprint")
+                && !(parsed.has("--anonymous") && account.is_some())
+                && account.is_none_or(|account| account.is_some())
+                && dispenser.is_none_or(|dispenser| dispenser.is_some())
+        }
         _ => false,
     };
     if !valid {
@@ -855,9 +955,20 @@ pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
                 Some(format!("added {name}"))
             }
             ["enable", name] => {
+                let mut added = false;
                 store
-                    .change(|config| config.set_enabled(name, true))
+                    .change(|config| {
+                        if name == PLAY && config.source(PLAY).is_none() {
+                            added = config.enable_play();
+                            Ok(())
+                        } else {
+                            config.set_enabled(name, true)
+                        }
+                    })
                     .map_err(|error| error.0)?;
+                if added {
+                    let _ = fail(&format!("warning: {PLAY_WARNING}"), 0);
+                }
                 Some(format!("enabled {name}"))
             }
             ["disable", name] => {
@@ -865,6 +976,14 @@ pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
                     .change(|config| config.set_enabled(name, false))
                     .map_err(|error| error.0)?;
                 Some(format!("disabled {name}"))
+            }
+            ["play"] => {
+                return play_settings(
+                    &store,
+                    parsed.has("--anonymous"),
+                    account.flatten(),
+                    dispenser.flatten(),
+                );
             }
             _ => None,
         };
@@ -883,12 +1002,93 @@ pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
             .map(|message| format!("{message}\n"))
             .unwrap_or_default();
         out.push_str(&sources_table(store.config()));
+        if store.config().play().is_some() {
+            out.push_str(&play_line(&store.play_settings().map_err(|error| error.0)?));
+        }
         Ok(out)
     })();
     match result {
         Ok(report) => print(&report),
         Err(error) => fail(&format!("error: {error}"), EXIT_FAILURE),
     }
+}
+
+/// How Google Play is signed in to, in one line.
+fn play_line(settings: &Settings) -> String {
+    match (settings.mode, &settings.email) {
+        (Mode::Account, Some(email)) => format!("{PLAY} signs in as {email}\n"),
+        _ => format!(
+            "{PLAY} signs in anonymously through the token dispenser {}\n",
+            settings.dispenser
+        ),
+    }
+}
+
+/// `uxdroid sources play`: shows or changes how Google Play is signed in to. An account's token is
+/// read from standard input, never from the command line, which other users can see.
+fn play_settings(
+    store: &Store,
+    anonymous: bool,
+    account: Option<&str>,
+    dispenser: Option<&str>,
+) -> Result<String, String> {
+    let settings = if let Some(email) = account {
+        let token = read_token(email)?;
+        let settings = store.play_account(email, &token).map_err(|error| error.0)?;
+        if let Some(dispenser) = dispenser {
+            store.play_dispenser(dispenser).map_err(|error| error.0)?;
+        }
+        settings
+    } else if anonymous {
+        store.play_anonymous(dispenser).map_err(|error| error.0)?
+    } else if let Some(dispenser) = dispenser {
+        store.play_dispenser(dispenser).map_err(|error| error.0)?
+    } else {
+        store.play_settings().map_err(|error| error.0)?
+    };
+    let mut out = play_line(&settings);
+    if settings.mode == Mode::Account && account.is_some() {
+        out.push_str("its token is kept readable only by you, and is never printed\n");
+    }
+    if store.config().play().is_none_or(|source| !source.enabled) {
+        out.push_str(&format!(
+            "{PLAY} is not enabled: uxdroid sources enable {PLAY} enables it\n"
+        ));
+    }
+    Ok(out)
+}
+
+/// Reads one line from standard input, without echoing it when that is a terminal.
+fn read_token(email: &str) -> Result<String, String> {
+    use std::io::{BufRead, Read};
+    // SAFETY: isatty and the termios calls only read and set the attributes of descriptor 0.
+    let terminal = unsafe { libc::isatty(0) } == 1;
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    let hidden = terminal && unsafe { libc::tcgetattr(0, &mut saved) } == 0;
+    if terminal {
+        let _ = fail(
+            &format!("paste the AAS or OAuth token of {email} and press Enter (it is not shown):"),
+            0,
+        );
+    }
+    if hidden {
+        let mut quiet = saved;
+        quiet.c_lflag &= !libc::ECHO;
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &quiet) };
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().lock().take(16 * 1024).read_line(&mut line);
+    if hidden {
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
+    }
+    read.map_err(|error| format!("cannot read the token: {error}"))?;
+    let token = line.trim().to_string();
+    if token.is_empty() {
+        return Err(format!(
+            "no token was given for {email}: give it on standard input, as README.md describes"
+        ));
+    }
+    Ok(token)
 }
 
 /// An interval for `refresh-after`: whole hours, at most a year.
