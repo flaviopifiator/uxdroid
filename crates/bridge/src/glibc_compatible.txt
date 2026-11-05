@@ -80,6 +80,8 @@ wmemchr wmemcmp wmemcpy wmemmove wmemset write writev
 # registers, and aligned_alloc's memory is glibc's malloc as every app allocation already is.
 aligned_alloc alarm eventfd_read eventfd_write execle feclearexcept fetestexcept getpriority ldiv
 pthread_getcpuclockid readahead sysinfo tgkill timer_create timer_delete timer_settime
+# Audited for the F-Droid catalog: the same five arguments and the same abort on overflow.
+__pread64_chk __pread_chk
 # The real-time signals free in this process are glibc's, which reserves its own as bionic does.
 __libc_current_sigrtmax __libc_current_sigrtmin
 # Data with the same type in both libcs.

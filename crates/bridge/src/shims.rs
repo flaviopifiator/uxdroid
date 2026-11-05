@@ -2973,6 +2973,27 @@ mod tests {
     }
 
     #[test]
+    fn pread_chk_reads_at_its_offset() {
+        for name in [c"__pread_chk", c"__pread64_chk"] {
+            let pread_chk: unsafe extern "C" fn(c_int, *mut c_void, usize, i64, usize) -> isize =
+                function(name);
+            let file = std::env::temp_dir().join(format!("uxdroid-pread-{}", std::process::id()));
+            std::fs::write(&file, b"\0\0dump").unwrap();
+            let path = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+            let mut buffer = [0u8; 4];
+            // SAFETY: the path is a C string, and the buffer is as long as given.
+            unsafe {
+                let fd = libc::open(path.as_ptr(), libc::O_RDONLY);
+                assert!(fd >= 0);
+                assert_eq!(pread_chk(fd, buffer.as_mut_ptr().cast(), 4, 2, 4), 4);
+                libc::close(fd);
+            }
+            assert_eq!(&buffer, b"dump", "{name:?}");
+            std::fs::remove_file(&file).unwrap();
+        }
+    }
+
+    #[test]
     fn umask_chk_sets_a_valid_mask() {
         let umask_chk: unsafe extern "C" fn(libc::mode_t) -> libc::mode_t =
             function(c"__umask_chk");
