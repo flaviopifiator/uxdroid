@@ -1,0 +1,46 @@
+Free only the alternate signal stack the thread allocated.
+
+On the host, TearDownAlternateSignalStack freed whatever stack the kernel reported. App native code
+can replace it with a raw sigaltstack system call (Instagram's crash reporter does, on its startup
+thread), and the runtime then freed the app's memory and crashed in free() when the thread ended.
+
+diff --git a/runtime/thread_linux.cc b/runtime/thread_linux.cc
+index 860d0e5..163ffed 100644
+--- a/runtime/thread_linux.cc
++++ b/runtime/thread_linux.cc
+@@ -36,6 +36,10 @@ static void SigAltStack(stack_t* new_stack, stack_t* old_stack) {
+ static constexpr int kHostAltSigStackSize =
+     32 * KB < MINSIGSTKSZ ? MINSIGSTKSZ : 32 * KB;
+ 
++// The stack this thread allocated. App native code may install its own alternate stack with a raw
++// sigaltstack system call, so the one the kernel reports at teardown is not necessarily ours.
++static thread_local uint8_t* gAllocatedSignalStack = nullptr;
++
+ void Thread::SetUpAlternateSignalStack() {
+   // Create and set an alternate signal stack.
+ #ifdef ART_TARGET_ANDROID
+@@ -46,6 +50,7 @@ void Thread::SetUpAlternateSignalStack() {
+   ss.ss_size = kHostAltSigStackSize;
+   ss.ss_flags = 0;
+   CHECK(ss.ss_sp != nullptr);
++  gAllocatedSignalStack = reinterpret_cast<uint8_t*>(ss.ss_sp);
+   SigAltStack(&ss, nullptr);
+ 
+   // Double-check that it worked.
+@@ -55,12 +60,12 @@ void Thread::SetUpAlternateSignalStack() {
+ }
+ 
+ void Thread::TearDownAlternateSignalStack() {
+-  // Get the pointer so we can free the memory.
++  // Free what this thread allocated, never a stack app code installed in its place.
+   stack_t ss;
+-  SigAltStack(nullptr, &ss);
+-  uint8_t* allocated_signal_stack = reinterpret_cast<uint8_t*>(ss.ss_sp);
++  uint8_t* allocated_signal_stack = gAllocatedSignalStack;
++  gAllocatedSignalStack = nullptr;
+ 
+-  // Tell the kernel to stop using it.
++  // Tell the kernel to stop using whichever stack is installed.
+   ss.ss_sp = nullptr;
+   ss.ss_flags = SS_DISABLE;
+   ss.ss_size = kHostAltSigStackSize;  // Avoid ENOMEM failure with Mac OS' buggy libc.
