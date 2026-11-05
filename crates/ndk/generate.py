@@ -38,6 +38,7 @@ EGL_TRANSLATED = {
     "eglDestroySurface": "destroy_surface",
     "eglGetConfigAttrib": "get_config_attrib",
     "eglGetDisplay": "get_display",
+    "eglGetNativeClientBufferANDROID": "get_native_client_buffer",
     "eglGetPlatformDisplay": "get_platform_display",
     "eglGetProcAddress": "get_proc_address",
     "eglPresentationTimeANDROID": "presentation_time",

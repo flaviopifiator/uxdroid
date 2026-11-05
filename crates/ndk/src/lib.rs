@@ -20,6 +20,7 @@ mod egl;
 mod egl_table;
 mod gles_table;
 mod gpu;
+mod hardware_buffer;
 mod java;
 mod live;
 mod looper;
@@ -27,7 +28,9 @@ mod media;
 mod opensles;
 mod pixels;
 pub mod present;
+mod shared_memory;
 mod window;
+mod zlib;
 
 /// The EGL, GLES and native window functions, for the framework's Java GL bindings in
 /// `libuxdroid_system.so` (`android.opengl` and `com.google.android.gles_jni`), which are JNI
@@ -173,6 +176,36 @@ pub static LIBANDROID: Table = Table {
             "void(ptr,ptr,ptr)",
             choreographer::unregister_refresh_rate_callback
         ),
+        function!(
+            c"AHardwareBuffer_acquire",
+            "void(ptr)",
+            hardware_buffer::acquire
+        ),
+        function!(
+            c"AHardwareBuffer_allocate",
+            "i32(ptr,ptr)",
+            hardware_buffer::allocate
+        ),
+        function!(
+            c"AHardwareBuffer_describe",
+            "void(ptr,ptr)",
+            hardware_buffer::describe
+        ),
+        function!(
+            c"AHardwareBuffer_lock",
+            "i32(ptr,u64,i32,ptr,ptr)",
+            hardware_buffer::lock
+        ),
+        function!(
+            c"AHardwareBuffer_release",
+            "void(ptr)",
+            hardware_buffer::release
+        ),
+        function!(
+            c"AHardwareBuffer_unlock",
+            "i32(ptr,ptr)",
+            hardware_buffer::unlock
+        ),
         function!(c"ALooper_acquire", "void(ptr)", looper::acquire),
         function!(
             c"ALooper_addFd",
@@ -216,6 +249,21 @@ pub static LIBANDROID: Table = Table {
             "i32(ptr)",
             window::unlock_and_post
         ),
+        function!(
+            c"ASharedMemory_create",
+            "i32(ptr,u64)",
+            shared_memory::create
+        ),
+        function!(
+            c"ASharedMemory_getSize",
+            "u64(i32)",
+            shared_memory::get_size
+        ),
+        function!(
+            c"ASharedMemory_setProt",
+            "i32(i32,i32)",
+            shared_memory::set_prot
+        ),
     ],
 };
 
@@ -245,7 +293,7 @@ pub static LIBJNIGRAPHICS: Table = Table {
 pub use opensles::interfaces as opensles_interfaces;
 
 /// Every table this crate serves.
-pub fn tables() -> [&'static Table; 9] {
+pub fn tables() -> [&'static Table; 10] {
     [
         &LIBANDROID,
         &LIBJNIGRAPHICS,
@@ -256,12 +304,164 @@ pub fn tables() -> [&'static Table; 9] {
         &opensles::TABLE,
         &aaudio::TABLE,
         &media::TABLE,
+        &zlib::TABLE,
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_memory_regions_have_their_size_and_map() {
+        let function = |name: &[u8]| {
+            LIBANDROID
+                .find(name)
+                .and_then(|export| export.bind())
+                .unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(name)))
+        };
+        type Create = unsafe extern "C" fn(*const std::ffi::c_char, usize) -> i32;
+        type GetSize = unsafe extern "C" fn(i32) -> usize;
+        type SetProt = unsafe extern "C" fn(i32, i32) -> i32;
+        // SAFETY: the NDK's signatures of these three functions.
+        unsafe {
+            let create: Create = std::mem::transmute(function(b"ASharedMemory_create"));
+            let get_size: GetSize = std::mem::transmute(function(b"ASharedMemory_getSize"));
+            let set_prot: SetProt = std::mem::transmute(function(b"ASharedMemory_setProt"));
+            let fd = create(c"startup".as_ptr(), 8192);
+            assert!(fd >= 0);
+            assert_eq!(get_size(fd), 8192);
+            let map = libc::mmap(
+                std::ptr::null_mut(),
+                8192,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            assert_ne!(map, libc::MAP_FAILED);
+            map.cast::<u8>().write(7);
+            libc::munmap(map, 8192);
+            assert_eq!(set_prot(fd, libc::PROT_READ), 0);
+            libc::close(fd);
+            assert_eq!(create(c"empty".as_ptr(), 0), -1);
+            assert_eq!(get_size(-1), 0);
+        }
+    }
+
+    #[test]
+    fn hardware_buffers_keep_their_pixels_and_description() {
+        let bind = |name: &[u8]| {
+            LIBANDROID
+                .find(name)
+                .and_then(|export| export.bind())
+                .unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(name)))
+        };
+        type Allocate = unsafe extern "C" fn(*const [u32; 10], *mut *mut std::ffi::c_void) -> i32;
+        type Describe = unsafe extern "C" fn(*const std::ffi::c_void, *mut [u32; 10]);
+        type Lock = unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            u64,
+            i32,
+            *const std::ffi::c_void,
+            *mut *mut u8,
+        ) -> i32;
+        type Unlock = unsafe extern "C" fn(*mut std::ffi::c_void, *mut i32) -> i32;
+        type Release = unsafe extern "C" fn(*mut std::ffi::c_void);
+        const CPU_READ_OFTEN: u64 = 3;
+        const CPU_WRITE_OFTEN: u64 = 3 << 4;
+        // AHardwareBuffer_Desc: width, height, layers, format, usage (u64), stride, rfu0, rfu1 (u64).
+        let usage = CPU_READ_OFTEN | CPU_WRITE_OFTEN;
+        let desc: [u32; 10] = [16, 8, 1, 1, usage as u32, 0, 0, 0, 0, 0];
+        // SAFETY: the NDK's signatures; the descriptions are AHardwareBuffer_Desc's 40 bytes.
+        unsafe {
+            let allocate: Allocate = std::mem::transmute(bind(b"AHardwareBuffer_allocate"));
+            let describe: Describe = std::mem::transmute(bind(b"AHardwareBuffer_describe"));
+            let lock: Lock = std::mem::transmute(bind(b"AHardwareBuffer_lock"));
+            let unlock: Unlock = std::mem::transmute(bind(b"AHardwareBuffer_unlock"));
+            let release: Release = std::mem::transmute(bind(b"AHardwareBuffer_release"));
+            let mut buffer = std::ptr::null_mut();
+            assert_eq!(allocate(&desc, &mut buffer), 0);
+            let mut seen = [0u32; 10];
+            describe(buffer, &mut seen);
+            assert_eq!(&seen[..7], &[16, 8, 1, 1, usage as u32, 0, 16]);
+            let mut pixels = std::ptr::null_mut();
+            assert_eq!(
+                lock(buffer, CPU_WRITE_OFTEN, -1, std::ptr::null(), &mut pixels),
+                0
+            );
+            pixels.add(16 * 4 * 7 + 4 * 15).write(0xab);
+            let mut fence = 0;
+            assert_eq!(unlock(buffer, &mut fence), 0);
+            assert_eq!(fence, -1);
+            assert_eq!(
+                lock(buffer, CPU_READ_OFTEN, -1, std::ptr::null(), &mut pixels),
+                0
+            );
+            assert_eq!(pixels.add(16 * 4 * 7 + 4 * 15).read(), 0xab);
+            unlock(buffer, std::ptr::null_mut());
+            // A lock for the GPU alone gives the CPU nothing to touch.
+            assert_ne!(lock(buffer, 1 << 8, -1, std::ptr::null(), &mut pixels), 0);
+            release(buffer);
+            let unknown: [u32; 10] = [16, 8, 1, 0x7777, usage as u32, 0, 0, 0, 0, 0];
+            assert_ne!(allocate(&unknown, &mut buffer), 0);
+        }
+    }
+
+    #[test]
+    fn hardware_buffers_are_not_offered_to_egl_yet() {
+        let address = egl_table::EGL
+            .find(b"eglGetNativeClientBufferANDROID")
+            .and_then(|export| export.bind())
+            .expect("eglGetNativeClientBufferANDROID binds without Mesa having it");
+        // SAFETY: the extension's signature; the buffer is never read.
+        let client = unsafe {
+            let get: unsafe extern "C" fn(*const std::ffi::c_void) -> *const std::ffi::c_void =
+                std::mem::transmute(address);
+            get(std::ptr::dangling())
+        };
+        assert!(client.is_null());
+    }
+
+    #[test]
+    fn libz_binds_to_the_host_zlib() {
+        let zlib = tables()
+            .into_iter()
+            .find(|table| table.library == "libz.so")
+            .expect("a libz.so table");
+        // What Instagram 454's x86_64 libraries import from libz.so.
+        for name in [
+            "adler32",
+            "compress2",
+            "compressBound",
+            "crc32",
+            "deflate",
+            "deflateBound",
+            "deflateEnd",
+            "deflateInit2_",
+            "deflateReset",
+            "inflate",
+            "inflateEnd",
+            "inflateInit2_",
+            "inflateInit_",
+            "inflateReset",
+            "inflateReset2",
+            "uncompress",
+        ] {
+            let export = zlib
+                .find(name.as_bytes())
+                .unwrap_or_else(|| panic!("{name}"));
+            assert!(export.bind().is_some(), "{name} binds to the host's zlib");
+        }
+        let version = zlib.find(b"zlibVersion").unwrap().bind().unwrap();
+        // SAFETY: zlibVersion takes nothing and returns a static C string.
+        let version = unsafe {
+            let version: unsafe extern "C" fn() -> *const std::ffi::c_char =
+                std::mem::transmute(version);
+            std::ffi::CStr::from_ptr(version())
+        };
+        assert!(version.to_bytes().starts_with(b"1."), "{version:?}");
+    }
 
     #[test]
     fn every_table_is_valid() {

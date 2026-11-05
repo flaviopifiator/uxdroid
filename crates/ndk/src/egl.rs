@@ -638,6 +638,13 @@ pub unsafe extern "C" fn presentation_time(
     TRUE
 }
 
+/// `EGLClientBuffer eglGetNativeClientBufferANDROID(const AHardwareBuffer*)`: hardware buffers live
+/// in process memory (`hardware_buffer.rs`), which no GPU can import yet, so there is no client
+/// buffer to give, and the extension's failure value says so. Libraries that link it still load.
+pub unsafe extern "C" fn get_native_client_buffer(_buffer: *const c_void) -> *const c_void {
+    std::ptr::null()
+}
+
 /// `__eglMustCastToProperFunctionPointerType eglGetProcAddress(const char*)`: the translated
 /// functions for their names, Mesa's for the rest.
 pub unsafe extern "C" fn get_proc_address(name: *const c_char) -> *const c_void {
