@@ -27,13 +27,13 @@ const DEFAULT_LIMIT: usize = 20;
 const NAME_WIDTH: usize = 32;
 
 /// Command arguments: words, and options from `flags` (`true` when they take a value), each once.
-struct Args {
-    words: Vec<String>,
+pub(crate) struct Args {
+    pub(crate) words: Vec<String>,
     options: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl Args {
-    fn parse(args: &[OsString], flags: &[(&'static str, bool)]) -> Option<Self> {
+    pub(crate) fn parse(args: &[OsString], flags: &[(&'static str, bool)]) -> Option<Self> {
         let mut parsed = Args {
             words: Vec::new(),
             options: Vec::new(),
@@ -78,7 +78,7 @@ impl Args {
     }
 
     /// `--data`, else the directory `uxdroid app` starts the default profile's apps from.
-    fn data(&self) -> Result<PathBuf, String> {
+    pub(crate) fn data(&self) -> Result<PathBuf, String> {
         let data = match self.value("--data") {
             Some(data) => PathBuf::from(data),
             None => home_dir("XDG_DATA_HOME", ".local/share")?.join("uxdroid/data"),
@@ -123,7 +123,7 @@ pub(crate) fn names_a_package(args: &[OsString]) -> bool {
 
 /// Strings from a source are untrusted: control characters are shown escaped, so they cannot forge
 /// lines or move the cursor.
-fn clean(text: &str) -> String {
+pub(crate) fn clean(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
@@ -135,7 +135,7 @@ fn clean(text: &str) -> String {
         .collect()
 }
 
-fn shorten(text: &str, width: usize) -> String {
+pub(crate) fn shorten(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         text.to_string()
     } else {
@@ -146,7 +146,7 @@ fn shorten(text: &str, width: usize) -> String {
 }
 
 /// `YYYY-MM-DD` in UTC for milliseconds since the epoch.
-fn date(milliseconds: u64) -> String {
+pub(crate) fn date(milliseconds: u64) -> String {
     // Howard Hinnant's days-to-civil algorithm.
     let days = (milliseconds / 86_400_000) as i64 + 719_468;
     let era = days.div_euclid(146_097);
@@ -204,7 +204,7 @@ fn note(message: &str) {
     let _ = fail(&format!("note: {message}"), 0);
 }
 
-fn version(name: &str, code: u64) -> String {
+pub(crate) fn version(name: &str, code: u64) -> String {
     if name.is_empty() {
         format!("({code})")
     } else {
@@ -307,7 +307,7 @@ fn choose<'a>(apps: &'a [App], package: &str, installed: Option<&Installed>) -> 
 }
 
 /// Why `app` has no release for `device`, naming its newest one.
-fn unfit(app: &App, device: &Device) -> String {
+pub(crate) fn unfit(app: &App, device: &Device) -> String {
     let newest = &app.releases[0];
     let mut needs = Vec::new();
     if !newest.abis.is_empty() && !newest.abis.contains(&device.abi) {
@@ -394,45 +394,64 @@ pub(crate) fn run_install_package(args: &[OsString]) -> ExitCode {
         }
         let data = parsed.data()?;
         let store = open_store(&data)?;
-        let installed = Installed::read(&data, package).map_err(|error| error.0)?;
-        let (apps, notes) = store
-            .apps(from.as_deref(), parsed.refresh())
-            .map_err(|error| error.0)?;
-        for message in &notes {
-            note(message);
-        }
-        let app = choose(&apps, package, installed.as_ref()).ok_or_else(|| match &from {
-            Some(from) => format!("{package} is not in {from}"),
-            None => format!("no enabled source has {package}: uxdroid search finds apps"),
-        })?;
-        let device = Device::host();
-        let release = app.newest(&device).ok_or_else(|| unfit(app, &device))?;
-        if let Some(installed) = installed
-            .as_ref()
-            .filter(|installed| installed.source == app.source)
-        {
-            if installed.version_code == release.version_code {
-                return Ok((
-                    format!(
-                        "{package} {} from {} is already installed\n",
-                        version(&installed.version_name, installed.version_code),
-                        app.source
-                    ),
-                    None,
-                ));
-            }
-            if installed.version_code > release.version_code {
-                return Err(format!(
-                    "{package} {} is installed, newer than {} from {}, and Android does not downgrade apps",
-                    version(&installed.version_name, installed.version_code),
-                    version(&release.version_name, release.version_code),
-                    app.source
-                ));
-            }
-        }
-        install_release(&store, &data, app, release)
+        install_package(
+            &store,
+            &data,
+            package,
+            from.as_deref(),
+            parsed.refresh(),
+            &note,
+        )
     })();
     report(result)
+}
+
+/// Installs `package` from `from`, or from the source it was installed from, or from the first
+/// enabled source that has it: its newest release for this machine, unless that one is installed.
+/// Notes about the sources go to `note` as they come.
+pub(crate) fn install_package(
+    store: &Store,
+    data: &Path,
+    package: &str,
+    from: Option<&str>,
+    refresh: Refresh,
+    note: &dyn Fn(&str),
+) -> Result<(String, Option<String>), String> {
+    let installed = Installed::read(data, package).map_err(|error| error.0)?;
+    let (apps, notes) = store.apps(from, refresh).map_err(|error| error.0)?;
+    for message in &notes {
+        note(message);
+    }
+    let app = choose(&apps, package, installed.as_ref()).ok_or_else(|| match from {
+        Some(from) => format!("{package} is not in {from}"),
+        None => format!("no enabled source has {package}: uxdroid search finds apps"),
+    })?;
+    let device = Device::host();
+    let release = app.newest(&device).ok_or_else(|| unfit(app, &device))?;
+    if let Some(installed) = installed
+        .as_ref()
+        .filter(|installed| installed.source == app.source)
+    {
+        if installed.version_code == release.version_code {
+            return Ok((
+                format!(
+                    "{package} {} from {} is already installed\n",
+                    version(&installed.version_name, installed.version_code),
+                    app.source
+                ),
+                None,
+            ));
+        }
+        if installed.version_code > release.version_code {
+            return Err(format!(
+                "{package} {} is installed, newer than {} from {}, and Android does not downgrade apps",
+                version(&installed.version_name, installed.version_code),
+                version(&release.version_name, release.version_code),
+                app.source
+            ));
+        }
+    }
+    install_release(store, data, app, release)
 }
 
 fn report(result: Result<(String, Option<String>), String>) -> ExitCode {
@@ -448,7 +467,7 @@ fn report(result: Result<(String, Option<String>), String>) -> ExitCode {
 }
 
 /// Packages installed in `data`: a code directory, a signer record or native libraries.
-fn installed_packages(data: &Path) -> BTreeSet<String> {
+pub(crate) fn installed_packages(data: &Path) -> BTreeSet<String> {
     let mut packages = BTreeSet::new();
     let names = |directory: PathBuf| {
         std::fs::read_dir(directory)
@@ -487,8 +506,8 @@ pub(crate) fn run_list(args: &[OsString]) -> ExitCode {
     };
     let result = (|| -> Result<String, String> {
         let data = parsed.data()?;
-        let packages = installed_packages(&data);
-        if packages.is_empty() {
+        let listed = list(&data);
+        if listed.is_empty() {
             return Ok(format!("no app is installed in {}\n", data.display()));
         }
         let mut rows = vec![vec![
@@ -496,16 +515,8 @@ pub(crate) fn run_list(args: &[OsString]) -> ExitCode {
             "SOURCE".to_string(),
             "VERSION".to_string(),
         ]];
-        for package in packages {
-            let (source, installed_version) = match Installed::read(&data, &package) {
-                Ok(Some(record)) => (
-                    record.source.clone(),
-                    version(&record.version_name, record.version_code),
-                ),
-                Ok(None) => ("file".to_string(), apk_version(&data, &package)),
-                Err(error) => ("unknown".to_string(), clean(&error.0)),
-            };
-            rows.push(vec![package, source, installed_version]);
+        for app in listed {
+            rows.push(vec![app.package, app.source, app.version]);
         }
         Ok(table(&rows))
     })();
@@ -513,6 +524,36 @@ pub(crate) fn run_list(args: &[OsString]) -> ExitCode {
         Ok(report) => print(&report),
         Err(error) => fail(&format!("error: {error}"), EXIT_FAILURE),
     }
+}
+
+/// An installed app as `uxdroid list` shows it.
+pub(crate) struct Listed {
+    pub package: String,
+    /// The source it came from, `file`, or `unknown` when its record cannot be read.
+    pub source: String,
+    pub version: String,
+}
+
+/// The apps installed in `data`, by package name.
+pub(crate) fn list(data: &Path) -> Vec<Listed> {
+    installed_packages(data)
+        .into_iter()
+        .map(|package| {
+            let (source, installed_version) = match Installed::read(data, &package) {
+                Ok(Some(record)) => (
+                    record.source.clone(),
+                    version(&record.version_name, record.version_code),
+                ),
+                Ok(None) => ("file".to_string(), apk_version(data, &package)),
+                Err(error) => ("unknown".to_string(), clean(&error.0)),
+            };
+            Listed {
+                package,
+                source,
+                version: installed_version,
+            }
+        })
+        .collect()
 }
 
 /// The version in the installed `base.apk`'s manifest, when there is one.
@@ -540,40 +581,67 @@ pub(crate) fn run_update(args: &[OsString]) -> ExitCode {
         Ok(data) => data,
         Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),
     };
-    let named = parsed.words.first();
     let failed = std::cell::Cell::new(false);
-    let mut out = String::new();
     let fault = |message: String| {
         let _ = fail(&format!("error: {message}"), 0);
         failed.set(true);
     };
+    let out = match update(
+        &data,
+        parsed.words.first().map(String::as_str),
+        parsed.refresh(),
+        &|| open_store(&data),
+        &note,
+        &fault,
+    ) {
+        Ok(out) => out,
+        Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),
+    };
+    let code = print(&out);
+    if failed.get() {
+        ExitCode::from(EXIT_FAILURE)
+    } else {
+        code
+    }
+}
+
+/// Updates `named`, or every app installed from a source, to the newest release of its source for
+/// this machine, and returns what was done. A failure that stops everything is an error; one that
+/// stops a single app goes to `fault`, and notes about the sources to `note`. The store is opened
+/// with `open` only when there is an app to update.
+pub(crate) fn update(
+    data: &Path,
+    named: Option<&str>,
+    refresh: Refresh,
+    open: &dyn Fn() -> Result<Store, String>,
+    note: &dyn Fn(&str),
+    fault: &dyn Fn(String),
+) -> Result<String, String> {
+    let failed = std::cell::Cell::new(false);
+    let fault = |message: String| {
+        failed.set(true);
+        fault(message);
+    };
+    let mut out = String::new();
     let packages: Vec<(String, Installed)> = match named {
         Some(package) => {
             if !valid_package(package) {
-                return fail(
-                    &format!("error: bad package name {}", clean(package)),
-                    EXIT_FAILURE,
-                );
+                return Err(format!("bad package name {}", clean(package)));
             }
-            match Installed::read(&data, package) {
-                Ok(Some(record)) => vec![(package.clone(), record)],
-                Ok(None) if installed_packages(&data).contains(package) => {
-                    return fail(
-                        &format!(
-                            "error: {package} was installed from a file, so it has no source to update from: uxdroid install {package} --from <source> installs it from one"
-                        ),
-                        EXIT_FAILURE,
-                    );
+            match Installed::read(data, package) {
+                Ok(Some(record)) => vec![(package.to_string(), record)],
+                Ok(None) if installed_packages(data).contains(package) => {
+                    return Err(format!(
+                        "{package} was installed from a file, so it has no source to update from: uxdroid install {package} --from <source> installs it from one"
+                    ));
                 }
-                Ok(None) => {
-                    return fail(&format!("error: {package} is not installed"), EXIT_FAILURE);
-                }
-                Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),
+                Ok(None) => return Err(format!("{package} is not installed")),
+                Err(error) => return Err(error.0),
             }
         }
-        None => installed_packages(&data)
+        None => installed_packages(data)
             .into_iter()
-            .filter_map(|package| match Installed::read(&data, &package) {
+            .filter_map(|package| match Installed::read(data, &package) {
                 Ok(Some(record)) => Some((package, record)),
                 Ok(None) => None,
                 Err(error) => {
@@ -584,16 +652,13 @@ pub(crate) fn run_update(args: &[OsString]) -> ExitCode {
             .collect(),
     };
     if packages.is_empty() {
-        return if failed.get() {
-            ExitCode::from(EXIT_FAILURE)
+        return Ok(if failed.get() {
+            String::new()
         } else {
-            print("no app installed from a source\n")
-        };
+            "no app installed from a source\n".to_string()
+        });
     }
-    let store = match open_store(&data) {
-        Ok(store) => store,
-        Err(error) => return fail(&format!("error: {error}"), EXIT_FAILURE),
-    };
+    let store = open()?;
     let device = Device::host();
     // Each source is read once, for all its apps.
     let sources: BTreeSet<&str> = packages
@@ -602,7 +667,7 @@ pub(crate) fn run_update(args: &[OsString]) -> ExitCode {
         .collect();
     let mut offered: Vec<App> = Vec::new();
     for source in sources {
-        match store.apps(Some(source), parsed.refresh()) {
+        match store.apps(Some(source), refresh) {
             Ok((apps, notes)) => {
                 notes.iter().for_each(|message| note(message));
                 offered.extend(apps);
@@ -633,7 +698,7 @@ pub(crate) fn run_update(args: &[OsString]) -> ExitCode {
         let installed = version(&record.version_name, record.version_code);
         match app.newest(&device) {
             Some(release) if release.version_code > record.version_code => {
-                match install_release(&store, &data, app, release) {
+                match install_release(&store, data, app, release) {
                     Ok((report, message)) => {
                         if let Some(message) = message {
                             note(&message);
@@ -654,12 +719,7 @@ pub(crate) fn run_update(args: &[OsString]) -> ExitCode {
             )),
         }
     }
-    let code = print(&out);
-    if failed.get() {
-        ExitCode::from(EXIT_FAILURE)
-    } else {
-        code
-    }
+    Ok(out)
 }
 
 pub(crate) fn run_remove(args: &[OsString]) -> ExitCode {
@@ -673,19 +733,23 @@ pub(crate) fn run_remove(args: &[OsString]) -> ExitCode {
         if !valid_package(package) {
             return Err(format!("bad package name {}", clean(package)));
         }
-        let data = parsed.data()?;
-        if !installed_packages(&data).contains(package) {
-            return Err(format!("{package} is not installed in {}", data.display()));
-        }
-        remove(&data, package)?;
-        Ok(format!(
-            "removed {package}: its code, data, signer record and component settings\n"
-        ))
+        remove_package(&parsed.data()?, package)
     })();
     match result {
         Ok(report) => print(&report),
         Err(error) => fail(&format!("error: {error}"), EXIT_FAILURE),
     }
+}
+
+/// Removes the installed app `package` and says what went.
+pub(crate) fn remove_package(data: &Path, package: &str) -> Result<String, String> {
+    if !installed_packages(data).contains(package) {
+        return Err(format!("{package} is not installed in {}", data.display()));
+    }
+    remove(data, package)?;
+    Ok(format!(
+        "removed {package}: its code, data, signer record and component settings\n"
+    ))
 }
 
 /// Removes what installs and starts of `package` wrote, under the package's install lock and its
@@ -753,9 +817,9 @@ pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
         return fail(SOURCES_USAGE, EXIT_USAGE);
     }
     let hours = match words[..] {
-        ["refresh-after", hours] => match hours.parse::<u64>() {
-            Ok(hours) if hours <= 24 * 365 => Some(hours),
-            _ => return fail(SOURCES_USAGE, EXIT_USAGE),
+        ["refresh-after", hours] => match refresh_hours(hours) {
+            Some(hours) => Some(hours),
+            None => return fail(SOURCES_USAGE, EXIT_USAGE),
         },
         _ => None,
     };
@@ -805,6 +869,11 @@ pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
         Ok(report) => print(&report),
         Err(error) => fail(&format!("error: {error}"), EXIT_FAILURE),
     }
+}
+
+/// An interval for `refresh-after`: whole hours, at most a year.
+pub(crate) fn refresh_hours(text: &str) -> Option<u64> {
+    text.parse::<u64>().ok().filter(|hours| *hours <= 24 * 365)
 }
 
 fn sources_table(config: &Config) -> String {
