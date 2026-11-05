@@ -140,6 +140,22 @@ impl Mcp {
     }
 }
 
+fn percent_decoded(text: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut rest = text.as_bytes();
+    while let Some((&first, tail)) = rest.split_first() {
+        if first == b'%' {
+            let hex = std::str::from_utf8(&tail[..2]).unwrap();
+            bytes.push(u8::from_str_radix(hex, 16).unwrap());
+            rest = &tail[2..];
+        } else {
+            bytes.push(first);
+            rest = tail;
+        }
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
 #[test]
 fn initialize_negotiates_the_version_and_names_the_tools_capability() {
     let dir = scratch("initialize");
@@ -152,6 +168,17 @@ fn initialize_negotiates_the_version_and_names_the_tools_capability() {
     assert_eq!(result["serverInfo"]["name"], json!("uxdroid"));
     assert!(result["capabilities"]["tools"].is_object());
     assert!(result["instructions"].as_str().unwrap().contains("ui"));
+    // The client may show the server with the project's icon.
+    let icon = &result["serverInfo"]["icons"][0];
+    assert_eq!(icon["mimeType"], json!("image/svg+xml"));
+    assert_eq!(icon["sizes"], json!(["any"]));
+    let src = icon["src"].as_str().unwrap();
+    let encoded = src.strip_prefix("data:image/svg+xml,").unwrap();
+    let logo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/logo/icon.svg");
+    assert_eq!(
+        percent_decoded(encoded),
+        std::fs::read_to_string(logo).unwrap()
+    );
     // A notification is never answered: the next answer is the ping's.
     mcp.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
     assert_eq!(mcp.call(2, "ping", json!({}))["result"], json!({}));

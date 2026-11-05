@@ -293,6 +293,23 @@ const ALL_COMMANDS_USAGE: &str = "usage: uxdroid inspect <apk>\n       \
      uxdroid app <package> ui|screenshot|tap|type|scroll|back|key|wait [<options>]\n       \
      uxdroid app list\n";
 
+const LOGO: &str = "  \u{2022}      \u{2022}\n   \u{2572}    \u{2571}\n \u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\n \u{2502} >      \u{2502}  uxdroid\n \u{2502}    ___ \u{2502}  Run Android apps on Linux as native processes.\n \u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}\n";
+
+#[test]
+fn help_shows_the_logo_and_every_command() {
+    for flag in ["--help", "-h", "help"] {
+        let output = uxdroid(&[flag]);
+
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+        assert_eq!(
+            stdout(&output),
+            format!("{LOGO}\n{ALL_COMMANDS_USAGE}"),
+            "{flag}"
+        );
+        assert_eq!(stderr(&output), "", "{flag}");
+    }
+}
+
 #[test]
 fn no_command_or_an_unknown_one_lists_all_commands() {
     for args in [&[][..], &["launch", "app.apk"]] {

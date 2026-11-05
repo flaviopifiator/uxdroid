@@ -1,3 +1,5 @@
+<img src="logo/icon.svg" alt="" width="64">
+
 # uxdroid user guide
 
 Run Android APKs as native Linux processes, with no emulator, no container and no Android system image.
