@@ -423,6 +423,7 @@ fn resolve_import(
         }
         Some(libc::Import::Special(special)) => add_service(Service::Special(special)).map(Some),
         Some(libc::Import::Data) => Ok(host_address(name, true).map(|address| address as u64)),
+        Some(libc::Import::Object(address)) => Ok(Some(address as u64)),
         None if is_data => Ok(None),
         // Only whether the host has it: taking an unaudited function's stub here would waste one.
         None if crate::shims::has_function(name) => {
@@ -567,6 +568,7 @@ pub(crate) fn binding(name: &str, tables: &[&'static Table], is_data: bool) -> p
         Some(libc::Import::Special(_)) => Binding::Libc,
         Some(libc::Import::Data) if host_address(name, true).is_some() => Binding::Libc,
         Some(libc::Import::Data) => Binding::Unresolved,
+        Some(libc::Import::Object(_)) => Binding::Libc,
         None if is_data => Binding::Unresolved,
         None if crate::shims::has_function(name) => Binding::Stub(unsigned_reason()),
         None => Binding::Unresolved,

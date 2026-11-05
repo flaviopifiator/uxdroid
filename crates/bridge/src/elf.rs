@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+/// The first four bytes of every ELF file.
+pub const MAGIC: &[u8; 4] = b"\x7fELF";
 pub const EHDR_SIZE: usize = 64;
 pub const PHDR_SIZE: usize = 56;
 pub const SYM_SIZE: usize = 24;
@@ -119,7 +121,7 @@ pub fn parse_header(header: &[u8]) -> Result<HeaderTable> {
     if header.len() < EHDR_SIZE {
         return Err(ElfError::Malformed("truncated header"));
     }
-    if &header[..4] != b"\x7fELF" {
+    if &header[..4] != MAGIC {
         return Err(ElfError::Malformed("bad magic"));
     }
     if header[4] != 2 || header[5] != 1 || header[6] != 1 {

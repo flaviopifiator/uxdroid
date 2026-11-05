@@ -29,6 +29,7 @@ mod opensles;
 mod pixels;
 pub mod present;
 mod shared_memory;
+mod trace;
 mod window;
 mod zlib;
 
@@ -264,6 +265,20 @@ pub static LIBANDROID: Table = Table {
             "i32(i32,i32)",
             shared_memory::set_prot
         ),
+        function!(
+            c"ATrace_beginAsyncSection",
+            "void(ptr,i32)",
+            trace::begin_async_section
+        ),
+        function!(c"ATrace_beginSection", "void(ptr)", trace::begin_section),
+        function!(
+            c"ATrace_endAsyncSection",
+            "void(ptr,i32)",
+            trace::end_async_section
+        ),
+        function!(c"ATrace_endSection", "void()", trace::end_section),
+        function!(c"ATrace_isEnabled", "u8()", trace::is_enabled),
+        function!(c"ATrace_setCounter", "void(ptr,i64)", trace::set_counter),
     ],
 };
 
@@ -311,6 +326,34 @@ pub fn tables() -> [&'static Table; 10] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LinkedIn's arm64 Cronet traces through these: tracing is never on, and each call returns.
+    #[test]
+    fn atrace_calls_return_and_tracing_is_off() {
+        let function = |name: &[u8]| {
+            LIBANDROID
+                .find(name)
+                .and_then(|export| export.bind())
+                .unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(name)))
+        };
+        type Section = unsafe extern "C" fn(*const std::ffi::c_char);
+        type AsyncSection = unsafe extern "C" fn(*const std::ffi::c_char, i32);
+        type Counter = unsafe extern "C" fn(*const std::ffi::c_char, i64);
+        // SAFETY: each address is the table's function of that signature; the names are C strings.
+        unsafe {
+            let is_enabled: extern "C" fn() -> bool =
+                std::mem::transmute(function(b"ATrace_isEnabled"));
+            assert!(!is_enabled());
+            std::mem::transmute::<usize, Section>(function(b"ATrace_beginSection"))(c"x".as_ptr());
+            std::mem::transmute::<usize, extern "C" fn()>(function(b"ATrace_endSection"))();
+            let begin: AsyncSection = std::mem::transmute(function(b"ATrace_beginAsyncSection"));
+            begin(c"x".as_ptr(), 7);
+            let end: AsyncSection = std::mem::transmute(function(b"ATrace_endAsyncSection"));
+            end(c"x".as_ptr(), 7);
+            let counter: Counter = std::mem::transmute(function(b"ATrace_setCounter"));
+            counter(c"x".as_ptr(), 42);
+        }
+    }
 
     #[test]
     fn shared_memory_regions_have_their_size_and_map() {

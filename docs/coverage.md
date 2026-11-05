@@ -43,10 +43,14 @@ NDK r30, API 37, every symbol of every stub library (4774: 4490 functions, 284 d
 | Path | resolved | trap | unimpl | missing |
 |------|---------:|-----:|-------:|--------:|
 | x86_64-bridge, before the stubs (`f537ea1`) | 2077 (43.5%) | 725 | - | 1972 |
-| x86_64-bridge | 2079 (43.5%) | 725 | 1892 | 78 |
+| x86_64-bridge, unimplemented stubs (`1239a1c`) | 2079 (43.5%) | 725 | 1892 | 78 |
+| x86_64-bridge | 2138 (44.8%) | 719 | 1850 | 67 |
 | arm64-translator, before the stubs | 2081 (43.6%) | 798 | - | 1895 |
-| arm64-translator | 2083 (43.6%) | 737 | 1875 | 79 |
+| arm64-translator, unimplemented stubs | 2083 (43.6%) | 737 | 1875 | 79 |
+| arm64-translator | 2143 (44.9%) | 731 | 1833 | 67 |
 
 The two resolved functions are the fortified `__pwrite_chk` and `__pwrite64_chk`, which LinkedIn's `libLMDBAndroid.so` calls. The arm64 trap count fell by 61 because the planner used to count a signed libc function the host lacks, such as `fgetln`, as an unaudited host function, while the load found nothing to call and failed; both now bind it to the stub naming `libc.so`, so the two paths agree on libc (149 each).
 
-Every function now loads; what is missing is data only: `libOpenMAXAL`'s interface IDs, `libmediandk`'s newer keys and features, and libc's `sys_signame`, `sys_siglist`, `optreset`, `__stack_chk_guard`, `__p_class_syms`, `__p_type_syms` and the `error_*` counters, `libm`'s `__fe_dfl_env` and `libstdc++`'s `std::nothrow`, plus `_ctype_` for arm64 code.
+Every function now loads. bionic's data symbols are implemented on both paths (`crates/bridge/src/shims/data.rs`), so what is missing is the data of two libraries uxdroid has no table for: `libOpenMAXAL`'s interface IDs (41) and `libmediandk`'s newer keys and features (26).
+
+The last row adds libandroid's `ATrace_*` (no-ops, tracing off), libc's fdsan, API-level, property, FORTIFY (`__memchr_chk`, `__memrchr_chk`, `__sendto_chk`, `__ppoll_chk`, `__ppoll64_chk`), `sigset64_t`, `CLOCK_MONOTONIC` wait, `__get_h_errno`, `setprogname`, `fpurge`, `fgetln` and `free_sized` calls, and the data symbols. The arm64 guest table is generated at API 37 with `android/` headers, which signs fdsan and the API 36 and 37 calls: libc resolves 784 of 1445 symbols for x86_64 code and 774 for arm64 code, against 734 and 723 before.

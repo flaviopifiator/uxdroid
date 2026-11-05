@@ -455,11 +455,38 @@ fn plan_imports(data: &Path, library: &str) -> serde_json::Value {
     plan["libraries"][library]["imports"].clone()
 }
 
-/// LinkedIn's Cronet build imports `ATrace_beginSection` and `ATrace_endSection`, which uxdroid's
-/// libandroid lacks.
+/// A function on libandroid's NDK list that uxdroid's table lacks still installs, with a warning.
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn an_arm64_library_calling_ndk_functions_uxdroid_lacks_installs_with_a_warning() {
+    let (output, data) = install_arm64(
+        "arm64-thermal",
+        "libthermal.so",
+        // API 30, newer than the library's 24, so declared here.
+        "extern \"C\" void* AThermal_acquireManager(void);\n\
+         extern \"C\" void* thermal(void) { return AThermal_acquireManager(); }\n",
+        &["-landroid"],
+    );
+
+    let stdout = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        stdout.contains(
+            "warning: com.example.app: libthermal.so calls functions uxdroid does not have yet, \
+             and stops if it reaches one: AThermal_acquireManager\n"
+        ),
+        "{stdout}"
+    );
+    assert_eq!(
+        plan_imports(&data, "libthermal.so")["AThermal_acquireManager"],
+        "unimplemented: libandroid.so"
+    );
+}
+
+/// LinkedIn's Cronet build traces through `ATrace_*`, which libandroid's table has.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_library_tracing_through_atrace_installs_bound_to_libandroid() {
     let (output, data) = install_arm64(
         "arm64-atrace",
         "libcronet.so",
@@ -470,19 +497,52 @@ fn an_arm64_library_calling_ndk_functions_uxdroid_lacks_installs_with_a_warning(
 
     let stdout = text(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
-    assert!(
-        stdout.contains(
-            "warning: com.example.app: libcronet.so calls functions uxdroid does not have yet, \
-             and stops if it reaches one: ATrace_beginSection, ATrace_endSection\n"
-        ),
-        "{stdout}"
-    );
+    assert!(!stdout.contains("warning:"), "{stdout}");
     let imports = plan_imports(&data, "libcronet.so");
+    assert_eq!(imports["ATrace_beginSection"], "table libandroid.so");
+    assert_eq!(imports["ATrace_endSection"], "table libandroid.so");
+}
+
+/// Facebook ships a DEX file as `lib/arm64-v8a/libhelium_standalone.dex.so`. Android's installer
+/// extracts it like the libraries and never loads it as one, so planning skips it.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn a_file_under_lib_that_is_not_elf_is_extracted_and_not_planned() {
+    let dir = scratch("arm64-not-elf");
+    let source = dir.join("lib.cpp");
+    std::fs::write(&source, "extern \"C\" int real(void) { return 1; }\n").unwrap();
+    let library = arm64_library(&dir, "libreal.so", &source, &[]);
+    let dex = b"dex\n035\0 not a library, though it is named like one";
+    let apk = dir.join("app.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .file("lib/arm64-v8a/libreal.so", &library)
+        .file("lib/arm64-v8a/libhelium_standalone.dex.so", dex)
+        .write_signed(&apk, &Key::test());
+    let data = dir.join("data");
+
+    let output = install(&apk, &data);
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let libraries = data.join("data/com.example.app/lib");
     assert_eq!(
-        imports["ATrace_beginSection"],
-        "unimplemented: libandroid.so"
+        listing(&libraries),
+        [
+            "arm64-v8a.plan.json",
+            "libhelium_standalone.dex.so",
+            "libreal.so"
+        ]
     );
-    assert_eq!(imports["ATrace_endSection"], "unimplemented: libandroid.so");
+    assert_eq!(
+        std::fs::read(libraries.join("libhelium_standalone.dex.so")).unwrap(),
+        dex
+    );
+    let plan: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(libraries.join("arm64-v8a.plan.json")).unwrap(),
+    )
+    .unwrap();
+    let planned: Vec<&String> = plan["libraries"].as_object().unwrap().keys().collect();
+    assert_eq!(planned, ["libreal.so"]);
 }
 
 #[cfg(target_arch = "x86_64")]

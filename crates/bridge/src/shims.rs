@@ -14,6 +14,9 @@ use std::sync::{Mutex, OnceLock};
 use crate::loader;
 use crate::table::Table;
 
+mod bionic;
+pub(crate) mod data;
+
 /// The Android API level uxdroid reports to libraries.
 const API_LEVEL: &CStr = c"35";
 
@@ -320,11 +323,15 @@ traps! {
 fn table() -> &'static HashMap<&'static str, Target> {
     static TABLE: OnceLock<HashMap<&'static str, Target>> = OnceLock::new();
     TABLE.get_or_init(|| {
+        data::init_stack_guard();
         let mut table = HashMap::new();
+        let objects = data::objects();
         for &(name, address) in TRAPS
             .iter()
             .chain(STREAM_FUNCTIONS)
             .chain(crate::paths::PATH_FUNCTIONS)
+            .chain(bionic::FUNCTIONS)
+            .chain(&objects)
         {
             table.insert(name, Target::Function(address));
         }
@@ -335,10 +342,6 @@ fn table() -> &'static HashMap<&'static str, Target> {
         // On LP64 bionic, off64_t is off_t, so the 64 names are the same functions.
         table.insert("fseeko64", Target::Function(stdio::fseeko as *const ()));
         table.insert("ftello64", Target::Function(stdio::ftello as *const ()));
-        table.insert(
-            "_ctype_",
-            Target::Function(std::ptr::from_ref(&CTYPE).cast()),
-        );
         for &(name, target) in ALIASES {
             table.insert(name, Target::Alias(target));
         }
@@ -355,6 +358,7 @@ fn table() -> &'static HashMap<&'static str, Target> {
 
 const ALIASES: &[(&str, &CStr)] = &[
     ("__errno", c"__errno_location"),
+    ("__get_h_errno", c"__h_errno_location"),
     ("__gnu_basename", c"basename"),
     ("__gnu_strerror_r", c"strerror_r"),
     ("strerror_r", c"__xpg_strerror_r"),
@@ -396,10 +400,17 @@ functions! {
     "__vsprintf_chk" => vsprintf_chk,
     "_longjmp" => uxdroid_longjmp,
     "_setjmp" => uxdroid_underscore_setjmp,
+    "__system_property_area_serial" => system_property_area_serial,
     "__system_property_find" => system_property_find,
+    "__system_property_find_nth" => system_property_find_nth,
+    "__system_property_foreach" => system_property_foreach,
     "__system_property_get" => system_property_get,
     "__system_property_read" => system_property_read,
     "__system_property_read_callback" => system_property_read_callback,
+    "__system_property_serial" => system_property_serial,
+    "__system_property_set" => system_property_set,
+    "__system_property_wait" => system_property_wait,
+    "__system_property_wait_any" => system_property_wait_any,
     "__pwrite64_chk" => pwrite_chk,
     "__pwrite_chk" => pwrite_chk,
     "__umask_chk" => umask_chk,
@@ -425,6 +436,7 @@ functions! {
     "dlopen" => loader::dlopen,
     "dlsym" => loader::dlsym,
     "epoll_pwait" => epoll_pwait,
+    "epoll_pwait64" => epoll_pwait,
     "fpathconf" => fpathconf,
     "fprintf" => uxdroid_fprintf,
     "freeaddrinfo" => freeaddrinfo,
@@ -441,8 +453,10 @@ functions! {
     "nl_langinfo" => nl_langinfo,
     "pathconf" => pathconf,
     "ppoll" => ppoll,
+    "ppoll64" => ppoll,
     "printf" => uxdroid_printf,
     "pselect" => pselect,
+    "pselect64" => pselect,
     "pthread_atfork" => pthread_atfork,
     "pthread_exit" => pthread_exit,
     "pthread_gettid_np" => pthread_gettid_np,
@@ -464,6 +478,7 @@ functions! {
     "sigismember64" => sigismember,
     "siglongjmp" => uxdroid_longjmp,
     "signalfd" => signalfd,
+    "signalfd64" => signalfd,
     "sigpending" => sigpending,
     "sigpending64" => sigpending,
     "sigprocmask" => sigprocmask,
@@ -1594,6 +1609,84 @@ extern "C" fn system_property_read_callback(
 ) {
 }
 
+/// There are no properties to visit.
+extern "C" fn system_property_foreach(_callback: *const c_void, _cookie: *mut c_void) -> c_int {
+    0
+}
+
+extern "C" fn system_property_find_nth(_index: u32) -> *const c_void {
+    std::ptr::null()
+}
+
+/// No property is ever found, so no caller holds one to ask about.
+extern "C" fn system_property_serial(_property: *const c_void) -> u32 {
+    0
+}
+
+/// The serial of the property area, which never changes: nothing is ever set.
+const PROPERTY_AREA_SERIAL: u32 = 0;
+
+extern "C" fn system_property_area_serial() -> u32 {
+    PROPERTY_AREA_SERIAL
+}
+
+/// There is no property service to take the value, as when bionic cannot reach it.
+extern "C" fn system_property_set(_name: *const c_char, _value: *const c_char) -> c_int {
+    -1
+}
+
+/// Waits for the area's serial, or a property's, to differ from `old_serial`. Nothing changes, so
+/// a serial that already differs returns at once and any other waits out the relative timeout,
+/// forever without one, as bionic's futex wait would.
+unsafe extern "C" fn system_property_wait(
+    property: *const c_void,
+    old_serial: u32,
+    new_serial: *mut u32,
+    timeout: *const libc::timespec,
+) -> bool {
+    let serial = match property.is_null() {
+        true => PROPERTY_AREA_SERIAL,
+        false => 0,
+    };
+    if serial != old_serial {
+        if !new_serial.is_null() {
+            // SAFETY: bionic's contract makes a non-null `new_serial` writable.
+            unsafe { *new_serial = serial };
+        }
+        return true;
+    }
+    // SAFETY: a non-null timeout is the caller's valid timespec.
+    sleep_out(unsafe { timeout.as_ref() });
+    false
+}
+
+/// The deprecated form: waits for the area's serial to differ from `old_serial`, with no timeout.
+extern "C" fn system_property_wait_any(old_serial: u32) -> u32 {
+    if old_serial != PROPERTY_AREA_SERIAL {
+        return PROPERTY_AREA_SERIAL;
+    }
+    sleep_out(None);
+    unreachable!("an endless wait returned")
+}
+
+/// Sleeps for `timeout`, through signals, or forever with none.
+fn sleep_out(timeout: Option<&libc::timespec>) {
+    let Some(timeout) = timeout else {
+        loop {
+            // SAFETY: pause has no preconditions.
+            unsafe { libc::pause() };
+        }
+    };
+    let mut left = *timeout;
+    // SAFETY: both pointers are to this frame's timespec, which nanosleep reads and updates.
+    while unsafe { libc::nanosleep(&left, &mut left) } != 0 && errno() == libc::EINTR {}
+}
+
+fn errno() -> c_int {
+    // SAFETY: errno is this thread's.
+    unsafe { *libc::__errno_location() }
+}
+
 // --- BSD ctype ---
 
 const CTYPE_U: u8 = 0x01;
@@ -2127,6 +2220,23 @@ unsafe extern "C" fn epoll_pwait(
 
 // --- Threads ---
 
+/// glibc's object for a bionic condition variable: the caller's own on x86_64, where both libcs
+/// align it alike, and on AArch64 the one `misaligned` keeps for a 4-mod-8 object.
+fn host_cond(cond: *mut c_void) -> *mut libc::pthread_cond_t {
+    #[cfg(target_arch = "aarch64")]
+    return misaligned::host(cond);
+    #[cfg(target_arch = "x86_64")]
+    return cond.cast();
+}
+
+/// glibc's object for a bionic semaphore, as `host_cond` finds a condition variable's.
+fn host_sem(sem: *mut c_void) -> *mut libc::sem_t {
+    #[cfg(target_arch = "aarch64")]
+    return misaligned::host(sem);
+    #[cfg(target_arch = "x86_64")]
+    return sem.cast();
+}
+
 /// bionic's `pthread_cond_t` and `sem_t` are 4-aligned and glibc's 8-aligned on AArch64, where
 /// glibc updates their 64-bit sequence words with atomics that fault at an address 4 mod 8, as a
 /// condition variable after a mutex in a struct lands. An 8-aligned object is glibc's own, so
@@ -2157,7 +2267,7 @@ mod misaligned {
     }
 
     /// The glibc object for `object`, made zeroed on first use.
-    fn host<T: 'static>(object: *mut c_void) -> *mut T {
+    pub(super) fn host<T: 'static>(object: *mut c_void) -> *mut T {
         let Some(slot) = slot::<T>(object) else {
             return object.cast();
         };

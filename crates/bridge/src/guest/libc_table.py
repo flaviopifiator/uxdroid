@@ -21,10 +21,10 @@ import threading
 NDK = os.environ["ANDROID_NDK_ROOT"]
 PREBUILT = f"{NDK}/toolchains/llvm/prebuilt/linux-x86_64"
 SYSROOT = f"{PREBUILT}/sysroot"
-API = 35
+API = 37
 GUEST = f"aarch64-linux-android{API}"
 HOST = f"x86_64-linux-android{API}"
-HEADER_DIRS = ["", "sys/", "arpa/", "netinet/", "net/"]
+HEADER_DIRS = ["", "sys/", "arpa/", "netinet/", "net/", "android/"]
 # Headers that only make sense in C++ or pull in kernel internals.
 SKIP_HEADERS = {"sys/user.h", "sys/ucontext.h", "sys/reg.h", "sys/procfs.h", "threads.h"}
 
@@ -42,7 +42,7 @@ BY_HAND = {
         "feenableexcept", "fedisableexcept", "fegetexcept"]},
     **{name: "returns addresses guest code calls" for name in [
         "dlopen", "dlsym", "dlvsym", "dlerror", "dladdr", "dlclose", "dl_iterate_phdr",
-        "android_dlopen_ext", "android_get_application_target_sdk_version", "dl_unwind_find_exidx"]},
+        "android_dlopen_ext", "dl_unwind_find_exidx"]},
     "ioctl": "request numbers point at structs of any layout",
     "syscall": "system call numbers differ on arm64",
     "getauxval": "reports the guest CPU",

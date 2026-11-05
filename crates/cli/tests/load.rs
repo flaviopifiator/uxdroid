@@ -935,3 +935,120 @@ fn an_x86_64_library_on_an_arm64_host_is_refused_by_name() {
          an arm64 host has no translator for x86_64 code yet\n"
     );
 }
+
+/// The API level `gaps.c` is built for: the newest, as its newest calls need.
+const GAPS_SDK: &str = "37";
+
+/// The NDK's `libstdc++.so` for `triple` at `GAPS_SDK`, named by path: `-lstdc++` would find the
+/// static archive, which brings in libc++.
+fn stdcxx_stub(triple: &str) -> String {
+    toolchain()
+        .join(format!("sysroot/usr/lib/{triple}/{GAPS_SDK}/libstdc++.so"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Link flags for a group's library, given the target's NDK triple.
+type GapFlags = fn(&str) -> Vec<String>;
+
+fn no_flags(_triple: &str) -> Vec<String> {
+    Vec::new()
+}
+
+/// `gaps.c`'s group `group` (`-DGAP_<GROUP>`) as its own library, for this host's CPU.
+fn gap_library(group: &str, flags: GapFlags) -> PathBuf {
+    let dir = build_root().join(format!("gaps-{group}"));
+    let mut all_flags = vec![format!("-DGAP_{}", group.to_ascii_uppercase())];
+    all_flags.extend(flags(HOST_TRIPLE));
+    let all_flags: Vec<&str> = all_flags.iter().map(String::as_str).collect();
+    let name = format!("libgap{group}.so");
+    ndk_build(&dir, &name, GAPS_SDK, &["gaps.c"], &all_flags);
+    dir.join(name)
+}
+
+/// The same group built for arm64-v8a, which runs through the translator on an x86_64 host.
+#[cfg(target_arch = "x86_64")]
+fn arm64_gap_library(group: &str, flags: GapFlags) -> PathBuf {
+    let dir = build_root().join(format!("arm64-gaps-{group}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = dir.join(format!("libgap{group}.so"));
+    let status =
+        Command::new(toolchain().join(format!("bin/aarch64-linux-android{GAPS_SDK}-clang")))
+            .arg(fixture("gaps.c"))
+            .arg(format!("-DGAP_{}", group.to_ascii_uppercase()))
+            .args(["-shared", "-fPIC", "-O1", "-D_FORTIFY_SOURCE=2"])
+            .args(flags("aarch64-linux-android"))
+            .arg("-o")
+            .arg(&output)
+            .status()
+            .unwrap();
+    assert!(status.success(), "failed to build {}", output.display());
+    output
+}
+
+/// Calls `test_<group>` in the group's library, which returns 0 when every check holds, for host
+/// code and, where the translator is, for arm64 code.
+fn assert_gap_passes(group: &str, flags: GapFlags) {
+    let check = format!("test_{group}");
+    assert_check_passes(&gap_library(group, flags), &check);
+    #[cfg(target_arch = "x86_64")]
+    if std::env::var_os("UXDROID_TRANSLATOR").is_some() {
+        assert_check_passes(&arm64_gap_library(group, flags), &check);
+    }
+}
+
+/// Data cannot stop the program when read, so bionic's data symbols are bionic's objects.
+#[test]
+fn bionic_data_symbols_have_bionic_layouts_and_values() {
+    assert_gap_passes("data", |triple| vec![stdcxx_stub(triple)]);
+}
+
+#[test]
+fn fdsan_works_as_bionic_s_with_its_checks_off() {
+    assert_gap_passes("fdsan", no_flags);
+}
+
+#[test]
+fn system_properties_are_an_area_that_never_changes() {
+    assert_gap_passes("properties", no_flags);
+}
+
+#[test]
+fn fortified_calls_work_within_their_object() {
+    assert_gap_passes("fortify", no_flags);
+}
+
+#[test]
+fn a_fortified_call_past_its_object_stops_the_program() {
+    let output = load_and_call(&gap_library("fortify", no_flags), "test_fortify_overflow");
+
+    assert_eq!(output.status.code(), None, "must die from abort");
+    assert!(
+        stderr(&output).starts_with("uxdroid: memchr: prevented buffer overflow\n"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn sigset64_calls_take_bionic_s_signal_sets() {
+    assert_gap_passes("sigset64", no_flags);
+}
+
+#[test]
+fn monotonic_waits_time_out_on_the_monotonic_clock() {
+    assert_gap_passes("monotonic", no_flags);
+}
+
+/// Firefox's libmegazord reads `h_errno` through `__get_h_errno`; the rest are as small.
+#[test]
+fn small_bionic_calls_work() {
+    let library = gap_library("misc", no_flags);
+    assert_gap_passes("misc", no_flags);
+    let output = load_and_call(&library, "test_misc");
+    assert!(
+        !stdout(&output).contains("never written"),
+        "fpurge kept the buffer: {}",
+        stdout(&output)
+    );
+}

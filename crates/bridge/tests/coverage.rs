@@ -133,7 +133,7 @@ fn a_listed_function_of_a_needed_ndk_library_binds_to_a_stub_naming_both() {
     );
     // A function of a table that lacks it, such as libandroid's.
     assert_eq!(
-        host_binding("ATrace_beginSection", &[], &["libandroid.so"], false),
+        host_binding("AThermal_acquireManager", &[], &["libandroid.so"], false),
         HostBinding::Unimplemented("libandroid.so")
     );
 }
@@ -182,11 +182,42 @@ fn the_planner_stubs_listed_functions_of_ndk_libraries_uxdroid_lacks() {
 #[test]
 fn the_planner_stubs_a_signed_libc_function_the_host_lacks_as_the_loader_does() {
     assert_eq!(
-        host_binding("fgetln", &[], &["libc.so"], false),
+        host_binding("android_crash_detail_register", &[], &["libc.so"], false),
         HostBinding::Unimplemented("libc.so")
     );
     assert_eq!(
-        guest_bindings("libc.so", &[("fgetln", false)], &[]),
+        guest_bindings("libc.so", &[("android_crash_detail_register", false)], &[]),
         [Binding::Unimplemented("libc.so")]
+    );
+}
+
+/// bionic's data symbols, which cannot trap, are objects of the bridge on both paths.
+#[test]
+fn bionic_data_symbols_bind_on_both_paths() {
+    let data = [
+        "sys_signame",
+        "sys_siglist",
+        "optreset",
+        "__stack_chk_guard",
+        "error_message_count",
+        "error_one_per_line",
+        "error_print_progname",
+        "__p_class_syms",
+        "__p_type_syms",
+        "_ctype_",
+        "__fe_dfl_env",
+        "_ZSt7nothrow",
+    ];
+    for name in data {
+        assert_eq!(
+            host_binding(name, &[], &["libc.so"], true),
+            HostBinding::Shim,
+            "{name}"
+        );
+    }
+    let names: Vec<(&str, bool)> = data.iter().map(|&name| (name, true)).collect();
+    assert_eq!(
+        guest_bindings("libc.so", &names, &[]),
+        vec![Binding::Libc; data.len()]
     );
 }

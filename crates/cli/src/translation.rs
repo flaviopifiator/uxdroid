@@ -8,6 +8,10 @@
 //! a function on the NDK's official list of a library the app needs that uxdroid does not have yet,
 //! and the install warns, naming those per library. Any other import found nowhere would fail the
 //! load, so it fails the install instead, naming it.
+//!
+//! Only ELF files are planned. Android's installer extracts every file under `lib/<abi>/` but only
+//! ever loads libraries, and apps ship other files there under a library's name, such as Facebook's
+//! `libhelium_standalone.dex.so`, a DEX file; those stay extracted and are not read as code.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -114,20 +118,25 @@ fn library_json(plan: &LibraryPlan) -> Value {
 /// Plans the libraries extracted into `directory` and writes the plan there.
 pub(crate) fn prepare(directory: &Path, package: &str) -> Result<Summary, String> {
     let cannot = |what: String| format!("cannot translate {}: {what}", package.escape_debug());
-    let mut names: Vec<String> = std::fs::read_dir(directory)
+    let mut files: Vec<String> = std::fs::read_dir(directory)
         .map_err(|error| cannot(format!("{}: {error}", directory.display())))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".so"))
         .collect();
-    names.sort();
-    let mut libraries = Vec::with_capacity(names.len());
-    for name in &names {
-        let bytes = std::fs::read(directory.join(name))
+    files.sort();
+    let mut names = Vec::with_capacity(files.len());
+    let mut libraries = Vec::with_capacity(files.len());
+    for name in files {
+        let bytes = std::fs::read(directory.join(&name))
             .map_err(|error| cannot(format!("{}: {error}", name.escape_debug())))?;
-        let library = plan::read(name, &bytes)
+        if !bytes.starts_with(uxdroid_bridge::elf::MAGIC) {
+            continue;
+        }
+        let library = plan::read(&name, &bytes)
             .map_err(|error| cannot(format!("{}: {error}", name.escape_debug())))?;
         libraries.push(library);
+        names.push(name);
     }
     let tables: Vec<_> = uxdroid_ndk::tables().into_iter().collect();
     for library in &libraries {
