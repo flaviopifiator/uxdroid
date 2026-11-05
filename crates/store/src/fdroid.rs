@@ -79,6 +79,8 @@ struct Metadata {
     summary: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_updated: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    license: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -109,6 +111,46 @@ struct VersionManifest {
     nativecode: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signer: Option<Signer>,
+    /// Read with the whole index and moved to `permissions.json`; never kept in `index.json`.
+    #[serde(default, skip_serializing)]
+    uses_permission: Option<Vec<Permission>>,
+}
+
+// The permissions each version requests, kept in `permissions.json` beside the cached index in the
+// same shape, so a diff applies to both. They are a third of the index, and only the terminal UI's
+// details show them, so commands that read the index never read them.
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PermissionIndex {
+    #[serde(default)]
+    packages: BTreeMap<String, PermissionPackage>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PermissionPackage {
+    #[serde(default)]
+    versions: BTreeMap<String, PermissionVersion>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PermissionVersion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<PermissionManifest>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version_code: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uses_permission: Option<Vec<Permission>>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Permission {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -133,7 +175,15 @@ struct State {
     timestamp: u64,
     /// When the repository was last asked for a newer entry, in seconds since the epoch.
     checked: u64,
+    /// Which fields the cache keeps: [`FIELDS`], or 0 for a cache kept before licenses and
+    /// `permissions.json`, which a diff cannot complete.
+    #[serde(default)]
+    fields: u32,
 }
+
+/// The fields a cache keeps now: names, summaries, dates, files and manifests (1), and licenses and
+/// permissions (2). A cache with fewer is read, and its next refresh fetches the whole index.
+const FIELDS: u32 = 2;
 
 /// An F-Droid repository and its cache.
 pub struct Fdroid {
@@ -172,6 +222,31 @@ pub(crate) fn valid_file_name(name: &str) -> bool {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Moves the permissions out of `index`, read whole, into the shape of `permissions.json`.
+fn take_permissions(index: &mut Index) -> PermissionIndex {
+    let mut permissions = PermissionIndex::default();
+    for (package, entry) in &mut index.packages {
+        let mut versions = BTreeMap::new();
+        for (key, version) in &mut entry.versions {
+            if let Some(manifest) = &mut version.manifest {
+                versions.insert(
+                    key.clone(),
+                    PermissionVersion {
+                        manifest: Some(PermissionManifest {
+                            version_code: manifest.version_code,
+                            uses_permission: manifest.uses_permission.take(),
+                        }),
+                    },
+                );
+            }
+        }
+        permissions
+            .packages
+            .insert(package.clone(), PermissionPackage { versions });
+    }
+    permissions
 }
 
 /// RFC 7386: objects merge key by key, `null` removes a key, anything else replaces.
@@ -297,13 +372,16 @@ impl Fdroid {
             .map_err(|error| self.untrusted(format!("entry.json is malformed: {error}")))
     }
 
-    fn read_cache(&self) -> Option<(State, Index)> {
+    /// The state of the cache, when it is this source's: one made for another address or key is not.
+    fn read_state(&self) -> Option<State> {
         let state: State =
             serde_json::from_slice(&std::fs::read(self.cache.join("state.json")).ok()?).ok()?;
-        // A cache made for another address or key is not this source's.
-        if state.url != self.config.url || state.fingerprint != self.config.fingerprint {
-            return None;
-        }
+        (state.url == self.config.url && state.fingerprint == self.config.fingerprint)
+            .then_some(state)
+    }
+
+    fn read_cache(&self) -> Option<(State, Index)> {
+        let state = self.read_state()?;
         let index: Index =
             serde_json::from_slice(&std::fs::read(self.cache.join("index.json")).ok()?).ok()?;
         Some((state, index))
@@ -315,6 +393,7 @@ impl Fdroid {
             fingerprint: self.config.fingerprint.clone(),
             timestamp,
             checked: now(),
+            fields: FIELDS,
         };
         let bytes = serde_json::to_vec(&state).map_err(|error| Error::new(error.to_string()))?;
         write_atomically(&self.cache.join("state.json"), &bytes)
@@ -335,11 +414,17 @@ impl Fdroid {
                     entry.timestamp, state.timestamp
                 )));
             }
-            if entry.timestamp == state.timestamp {
+            // A diff, or no change, keeps the fields an older cache lacks missing.
+            let complete = state.fields >= FIELDS;
+            if complete && entry.timestamp == state.timestamp {
                 self.write_state(entry.timestamp)?;
                 return Ok(index);
             }
-            if let Some(diff) = entry.diffs.get(&state.timestamp.to_string()) {
+            if let Some(diff) = entry
+                .diffs
+                .get(&state.timestamp.to_string())
+                .filter(|_| complete)
+            {
                 progress(&format!(
                     "fetching the changes to the index of {} ({} bytes)",
                     self.config.name,
@@ -351,11 +436,18 @@ impl Fdroid {
                 let mut value =
                     serde_json::to_value(&index).map_err(|error| Error::new(error.to_string()))?;
                 drop(index);
-                merge(&mut value, patch);
+                merge(&mut value, patch.clone());
                 let index: Index = serde_json::from_value(value).map_err(|error| {
                     self.untrusted(format!("its diff makes a malformed index: {error}"))
                 })?;
-                self.write(&index, entry.timestamp)?;
+                let mut value = serde_json::to_value(self.read_permissions().unwrap_or_default())
+                    .map_err(|error| Error::new(error.to_string()))?;
+                merge(&mut value, patch);
+                let permissions: PermissionIndex =
+                    serde_json::from_value(value).map_err(|error| {
+                        self.untrusted(format!("its diff makes a malformed index: {error}"))
+                    })?;
+                self.write(&index, &permissions, entry.timestamp)?;
                 return Ok(index);
             }
         }
@@ -365,17 +457,64 @@ impl Fdroid {
             entry.index.size.unwrap_or(0)
         ));
         let bytes = self.fetch_signed(fetch, &entry.index, "index")?;
-        let index: Index = serde_json::from_slice(&bytes)
-            .map_err(|error| self.untrusted(format!("its index is malformed: {error}")))?;
+        let malformed =
+            |error: serde_json::Error| self.untrusted(format!("its index is malformed: {error}"));
+        let mut index: Index = serde_json::from_slice(&bytes).map_err(malformed)?;
         drop(bytes);
-        self.write(&index, entry.timestamp)?;
+        let permissions = take_permissions(&mut index);
+        self.write(&index, &permissions, entry.timestamp)?;
         Ok(index)
     }
 
-    fn write(&self, index: &Index, timestamp: u64) -> Result<(), Error> {
+    /// Replaces the cache: the permissions, then the index, then the state that makes both current.
+    /// A merge patch applied twice gives what it gives once, so permissions written for an index
+    /// that was not are made right by the next refresh.
+    fn write(
+        &self,
+        index: &Index,
+        permissions: &PermissionIndex,
+        timestamp: u64,
+    ) -> Result<(), Error> {
+        let bytes =
+            serde_json::to_vec(permissions).map_err(|error| Error::new(error.to_string()))?;
+        write_atomically(&self.cache.join("permissions.json"), &bytes)?;
         let bytes = serde_json::to_vec(index).map_err(|error| Error::new(error.to_string()))?;
         write_atomically(&self.cache.join("index.json"), &bytes)?;
         self.write_state(timestamp)
+    }
+
+    fn read_permissions(&self) -> Option<PermissionIndex> {
+        serde_json::from_slice(&std::fs::read(self.cache.join("permissions.json")).ok()?).ok()
+    }
+
+    /// The permissions each cached version of each app requests, by package and version code, from
+    /// the cache as it is; nothing when there is no cache of this source or it keeps none.
+    pub fn permissions(&self) -> BTreeMap<(String, u64), Vec<String>> {
+        let mut found = BTreeMap::new();
+        if self.read_state().is_none() {
+            return found;
+        }
+        let Some(permissions) = self.read_permissions() else {
+            return found;
+        };
+        for (package, entry) in permissions.packages {
+            for version in entry.versions.into_values() {
+                let Some(manifest) = version.manifest else {
+                    continue;
+                };
+                let Some(code) = manifest.version_code else {
+                    continue;
+                };
+                let names = manifest
+                    .uses_permission
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|permission| permission.name)
+                    .collect();
+                found.insert((package.clone(), code), names);
+            }
+        }
+        found
     }
 
     /// The repository's apps, from the cache, refreshed first as `refresh` says. A failed refresh
@@ -518,6 +657,7 @@ impl Fdroid {
                 summary: localized(metadata.summary.as_ref()).unwrap_or_default(),
                 package,
                 updated: metadata.last_updated,
+                license: metadata.license,
                 releases,
             });
         }

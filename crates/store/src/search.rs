@@ -7,6 +7,8 @@ use crate::{App, Device, Release};
 #[derive(Debug, Clone)]
 pub struct Hit<'a> {
     pub app: &'a App,
+    /// Where `app` is in the apps searched.
+    pub index: usize,
     pub release: &'a Release,
     pub score: u32,
 }
@@ -65,13 +67,14 @@ pub fn search<'a>(apps: &'a [App], text: &str, device: &Device) -> Matches<'a> {
     if words.is_empty() {
         return matches;
     }
-    for app in apps {
+    for (index, app) in apps.iter().enumerate() {
         let Some(score) = score(app, &words) else {
             continue;
         };
         match app.newest(device) {
             Some(release) => matches.hits.push(Hit {
                 app,
+                index,
                 release,
                 score,
             }),

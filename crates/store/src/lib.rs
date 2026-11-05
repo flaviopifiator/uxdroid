@@ -1,9 +1,9 @@
 //! uxdroid's store: the sources apps install from, what they offer, and verified downloads of it.
 //!
-//! The command line (`uxdroid search`, `install <package>`, `update`, `sources`) and later the
-//! terminal UI are thin layers over this crate. A source is anything that can list apps with their
-//! releases and serve a release's APK with a size and SHA-256 known in advance: F-Droid repositories
-//! today; Google Play and direct URLs are meant to become other kinds of source behind the same
+//! The command line (`uxdroid search`, `install <package>`, `update`, `sources`) and the terminal
+//! UI (`uxdroid tui`) are thin layers over this crate. A source is anything that can list apps with
+//! their releases and serve a release's APK with a size and SHA-256 known in advance: F-Droid
+//! repositories today; Google Play and direct URLs are meant to become other kinds of source behind the same
 //! [`App`] and [`Release`] model. Installing stays the installer's job: this crate hands it a file
 //! whose bytes matched what the source signed, and the installer checks them again as it copies.
 
@@ -42,6 +42,9 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Permissions by source, package and version code.
+pub type Permissions = std::collections::BTreeMap<(String, String, u64), Vec<String>>;
+
 /// When an index is fetched again before it is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {
@@ -77,6 +80,8 @@ pub struct App {
     pub summary: String,
     /// When the source last changed the app, in milliseconds since the epoch.
     pub updated: Option<u64>,
+    /// Its license as the source gives it, usually an SPDX expression.
+    pub license: Option<String>,
     /// Newest first.
     pub releases: Vec<Release>,
 }
@@ -218,6 +223,7 @@ pub struct Store {
     config: Config,
     fetch: Box<dyn Fetch>,
     progress: Box<dyn Fn(&str)>,
+    transfer: Box<dyn Fn(u64, u64) -> bool>,
 }
 
 impl Store {
@@ -234,12 +240,19 @@ impl Store {
             config,
             fetch,
             progress: Box::new(|_| {}),
+            transfer: Box::new(|_, _| true),
         })
     }
 
     /// Calls `progress` with a line about each long download before it starts.
     pub fn on_progress(&mut self, progress: Box<dyn Fn(&str)>) {
         self.progress = progress;
+    }
+
+    /// Calls `transfer` with the bytes of an APK downloaded so far and its size as each part
+    /// arrives; when it returns `false`, the download stops and fails as cancelled.
+    pub fn on_transfer(&mut self, transfer: Box<dyn Fn(u64, u64) -> bool>) {
+        self.transfer = transfer;
     }
 
     pub fn config(&self) -> &Config {
@@ -329,6 +342,22 @@ impl Store {
         Ok((apps, notes))
     }
 
+    /// The permissions each version of each app of the enabled sources requests, as their cached
+    /// indexes list them, by source, package and version code. A version missing from it has none
+    /// known, as with a cache kept before uxdroid kept permissions, until its next refresh.
+    pub fn permissions(&self) -> Permissions {
+        let mut found = Permissions::new();
+        for source in self.config.sources.iter().filter(|source| source.enabled) {
+            let listed = match source.kind {
+                Kind::Fdroid => Fdroid::new(source.clone(), &self.root).permissions(),
+            };
+            for ((package, code), names) in listed {
+                found.insert((source.name.clone(), package, code), names);
+            }
+        }
+        found
+    }
+
     /// Downloads `release` into `<data>/store/downloads`, refusing more bytes than it has or other
     /// contents than its SHA-256.
     pub fn download(&self, app: &App, release: &Release) -> Result<Download, Error> {
@@ -373,8 +402,19 @@ impl Store {
         let mut hashing = Hashing {
             inner: &mut file,
             hash: Sha256::new(),
+            done: 0,
+            total: release.size,
+            transfer: self.transfer.as_ref(),
+            cancelled: false,
         };
-        let size = self.fetch.copy(&release.url, release.size, &mut hashing).map_err(|error| {
+        let copied = self.fetch.copy(&release.url, release.size, &mut hashing);
+        if hashing.cancelled {
+            return Err(Error::new(format!(
+                "the download of {} from {} was cancelled",
+                app.package, app.source
+            )));
+        }
+        let size = copied.map_err(|error| {
             if error.0.contains("is larger than") {
                 Error::new(format!(
                     "the APK of {} from {} is larger than the {} bytes its index gives, so it is refused",
@@ -419,15 +459,28 @@ fn sweep_downloads(directory: &Path) {
     }
 }
 
+/// Writes a download to its file, hashing it and reporting its progress.
 struct Hashing<'a> {
     inner: &'a mut File,
     hash: Sha256,
+    done: u64,
+    total: u64,
+    transfer: &'a dyn Fn(u64, u64) -> bool,
+    cancelled: bool,
 }
 
 impl Write for Hashing<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.cancelled {
+            return Err(std::io::Error::other("cancelled"));
+        }
         let written = self.inner.write(bytes)?;
         self.hash.update(&bytes[..written]);
+        self.done += written as u64;
+        if !(self.transfer)(self.done, self.total) {
+            self.cancelled = true;
+            return Err(std::io::Error::other("cancelled"));
+        }
         Ok(written)
     }
 
