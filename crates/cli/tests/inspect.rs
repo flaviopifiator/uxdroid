@@ -286,6 +286,7 @@ const ALL_COMMANDS_USAGE: &str = "usage: uxdroid inspect <apk>\n       \
      uxdroid remove <package> [--data <dir>]\n       \
      uxdroid list [--data <dir>]\n       \
      uxdroid sources [add|enable|disable|refresh-after ...] [--data <dir>]\n       \
+     uxdroid tui [--data <dir>]\n       \
      uxdroid service enable|disable|status|run <package> [<options>]\n       \
      uxdroid mcp\n       \
      uxdroid app <package> status|start|intent|stop [<options>]\n       \

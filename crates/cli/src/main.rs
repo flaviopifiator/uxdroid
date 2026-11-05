@@ -20,6 +20,7 @@ const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
                      uxdroid remove <package> [--data <dir>]\n       \
                      uxdroid list [--data <dir>]\n       \
                      uxdroid sources [add|enable|disable|refresh-after ...] [--data <dir>]\n       \
+                     uxdroid tui [--data <dir>]\n       \
                      uxdroid service enable|disable|status|run <package> [<options>]\n       \
                      uxdroid mcp\n       \
                      uxdroid app <package> status|start|intent|stop [<options>]\n       \
@@ -44,6 +45,7 @@ fn main() -> ExitCode {
         Some((command, rest)) if command == "remove" => store::run_remove(rest),
         Some((command, rest)) if command == "list" => store::run_list(rest),
         Some((command, rest)) if command == "sources" => store::run_sources(rest),
+        Some((command, rest)) if command == "tui" => tui::run_tui(rest),
         Some((command, rest)) if command == "app" => app_command(rest),
         Some((command, rest)) if command == "service" => service_command(rest),
         Some((command, rest)) if command == "mcp" => mcp_command(rest),
@@ -60,6 +62,7 @@ mod runtime;
 #[cfg(target_os = "linux")]
 mod service;
 mod store;
+mod tui;
 
 #[cfg(target_os = "linux")]
 fn mcp_command(args: &[OsString]) -> ExitCode {

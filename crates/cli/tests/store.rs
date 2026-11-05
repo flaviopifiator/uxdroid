@@ -1410,3 +1410,20 @@ fn a_plain_http_repository_that_redirects_is_refused() {
     );
     assert_eq!(fixture.server.take(), ["/repo/entry.jar"]);
 }
+
+#[test]
+fn the_terminal_ui_prints_its_usage_and_needs_a_terminal() {
+    let data = scratch("tui").join("data");
+    let output = uxdroid(&data, &["tui", "extra"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(text(&output.stderr), "usage: uxdroid tui [--data <dir>]\n");
+    // Output captured by a pipe, as an agent or a script runs it.
+    let output = uxdroid(&data, &["tui"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(text(&output.stdout), "");
+    assert_eq!(
+        text(&output.stderr),
+        "error: uxdroid tui needs a terminal; uxdroid search, install, update, remove, list and sources work without one\n"
+    );
+    assert!(!data.exists(), "nothing was written");
+}

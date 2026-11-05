@@ -532,6 +532,8 @@ pub(crate) struct Listed {
     /// The source it came from, `file`, or `unknown` when its record cannot be read.
     pub source: String,
     pub version: String,
+    /// Its record when it came from a source.
+    pub record: Option<Installed>,
 }
 
 /// The apps installed in `data`, by package name.
@@ -539,18 +541,20 @@ pub(crate) fn list(data: &Path) -> Vec<Listed> {
     installed_packages(data)
         .into_iter()
         .map(|package| {
-            let (source, installed_version) = match Installed::read(data, &package) {
+            let (source, installed_version, record) = match Installed::read(data, &package) {
                 Ok(Some(record)) => (
                     record.source.clone(),
                     version(&record.version_name, record.version_code),
+                    Some(record),
                 ),
-                Ok(None) => ("file".to_string(), apk_version(data, &package)),
-                Err(error) => ("unknown".to_string(), clean(&error.0)),
+                Ok(None) => ("file".to_string(), apk_version(data, &package), None),
+                Err(error) => ("unknown".to_string(), clean(&error.0), None),
             };
             Listed {
                 package,
                 source,
                 version: installed_version,
+                record,
             }
         })
         .collect()
