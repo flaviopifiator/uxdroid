@@ -1,7 +1,6 @@
 //! Builds synthetic APKs so tests do not depend on binary samples or the Android SDK.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
@@ -13,6 +12,10 @@ pub const ATTR_VERSION_CODE: u32 = 0x0101_021b;
 pub const ATTR_VERSION_NAME: u32 = 0x0101_021c;
 pub const ATTR_MIN_SDK: u32 = 0x0101_020c;
 pub const ATTR_TARGET_SDK: u32 = 0x0101_0270;
+pub const ATTR_IS_FEATURE_SPLIT: u32 = 0x0101_055b;
+pub const ATTR_IS_SPLIT_REQUIRED: u32 = 0x0101_0591;
+pub const ATTR_REQUIRED_SPLIT_TYPES: u32 = 0x0101_064e;
+pub const ATTR_SPLIT_TYPES: u32 = 0x0101_064f;
 
 const ANDROID_NS: &str = "http://schemas.android.com/apk/res/android";
 const NONE: u32 = 0xFFFF_FFFF;
@@ -273,17 +276,117 @@ impl Apk {
         self
     }
 
+    /// Changes the contents of an entry already added, as tampering after signing does.
+    pub fn replace(mut self, name: &str, bytes: &[u8]) -> Self {
+        for entry in self.entries.iter_mut().filter(|(entry, _)| entry == name) {
+            entry.1 = bytes.to_vec();
+        }
+        self
+    }
+
     pub fn write(&self, path: &Path) {
-        let mut archive = zip::ZipWriter::new(File::create(path).unwrap());
+        std::fs::write(path, self.bytes()).unwrap();
+    }
+
+    /// The archive, unsigned.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (name, bytes) in &self.entries {
             archive
                 .start_file(name.as_str(), SimpleFileOptions::default())
                 .unwrap();
             archive.write_all(bytes).unwrap();
         }
-        archive.finish().unwrap();
+        archive.finish().unwrap().into_inner()
+    }
+
+    /// The archive signed with APK Signature Scheme v2 by `key`, as apksigner signs it.
+    pub fn signed_bytes(&self, key: &Key) -> Vec<u8> {
+        signing::sign_v2(&self.bytes(), key)
+    }
+
+    pub fn write_signed(&self, path: &Path, key: &Key) {
+        std::fs::write(path, self.signed_bytes(key)).unwrap();
+    }
+
+    /// Adds a JAR signature (v1) by `key`. `apk_signed` is the `X-Android-APK-Signed` value of the
+    /// signature file, which names the stronger schemes the APK was also signed with.
+    pub fn with_v1_signature(self, key: &Key, apk_signed: Option<&str>) -> Self {
+        signing::sign_v1(self, key, apk_signed)
     }
 }
+
+pub use signing::Key;
+
+/// The manifest of a split APK of `package`: `split` names it, `config_for` is the feature split
+/// a configuration split belongs to.
+pub fn split_manifest(
+    package: &'static str,
+    version_code: u32,
+    split: &'static str,
+    config_for: Option<&'static str>,
+    feature: bool,
+) -> Axml {
+    let mut attrs = vec![
+        plain("package", Value::Str(package)),
+        android("versionCode", ATTR_VERSION_CODE, Value::Int(version_code)),
+        plain("split", Value::Str(split)),
+    ];
+    if let Some(feature) = config_for {
+        attrs.push(plain("configForSplit", Value::Str(feature)));
+    }
+    if feature {
+        attrs.push(android(
+            "isFeatureSplit",
+            ATTR_IS_FEATURE_SPLIT,
+            Value::Int(0xffff_ffff),
+        ));
+    }
+    Axml::new()
+        .start("manifest", &attrs)
+        .start("application", &[])
+        .end("application")
+        .end("manifest")
+}
+
+/// bundletool's table of contents, `toc.pb`: one variant per `(minimum SDK, APK paths)`, encoded as
+/// its `BuildApksResult` message is (variant 1, targeting 1, SDK targeting 1, value 1, min 1;
+/// APK set 2, APK description 2, path 2).
+pub fn apks_table(package: &str, variants: &[(u32, Vec<String>)]) -> Vec<u8> {
+    fn field(number: u32, content: &[u8]) -> Vec<u8> {
+        let mut out = varint(u64::from(number << 3 | 2));
+        out.extend(varint(content.len() as u64));
+        out.extend_from_slice(content);
+        out
+    }
+    fn varint(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    let mut table = Vec::new();
+    for (min_sdk, paths) in variants {
+        let mut min = varint(1 << 3);
+        min.extend(varint(u64::from(*min_sdk)));
+        let targeting = field(1, &field(1, &field(1, &field(1, &min))));
+        let descriptions: Vec<u8> = paths
+            .iter()
+            .flat_map(|path| field(2, &field(2, path.as_bytes())))
+            .collect();
+        table.extend(field(1, &[targeting, field(2, &descriptions)].concat()));
+    }
+    table.extend(field(4, package.as_bytes()));
+    table
+}
+
+mod signing;
 
 fn push_u16(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(&value.to_le_bytes());

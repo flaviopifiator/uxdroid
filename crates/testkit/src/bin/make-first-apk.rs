@@ -1,9 +1,12 @@
-//! Writes the APK that the first Activity smoke test runs.
+//! Writes the APK that the first Activity smoke test runs, signed with the testkit's test key, since
+//! uxdroid installs only signed APKs.
 //! usage: make-first-apk <classes.dex> <libfirstnative.so | -> <output.apk> [extra entry name]
 
 use std::path::Path;
 
-use uxdroid_testkit::{ATTR_MIN_SDK, ATTR_NAME, ATTR_TARGET_SDK, Apk, Axml, Value, android, plain};
+use uxdroid_testkit::{
+    ATTR_MIN_SDK, ATTR_NAME, ATTR_TARGET_SDK, Apk, Axml, Key, Value, android, plain,
+};
 
 fn manifest() -> Axml {
     Axml::new()
@@ -73,5 +76,5 @@ fn main() {
     if let Some(extra) = extra {
         apk = apk.file(extra, b"not a library");
     }
-    apk.write(Path::new(output));
+    apk.write_signed(Path::new(output), &Key::test());
 }
