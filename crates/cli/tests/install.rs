@@ -123,7 +123,7 @@ fn wrong_usage_exits_2() {
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert_eq!(
             text(&output.stderr),
-            "usage: uxdroid install <apk>... --data <dir>\n",
+            "usage: uxdroid install <apk>... --data <dir>\n       uxdroid install <package> [--from <source>] [--refresh] [--data <dir>]\n",
             "{args:?}"
         );
     }

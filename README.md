@@ -169,7 +169,9 @@ Every APK is verified before anything is installed, as Android's installer does:
 | `<apk>: it targets SDK <n>, which needs a v2 or later signature, and it has only v1` | Android 11 and later refuse it too |
 | `<package> is installed signed by a different certificate, so this update is refused: installed <sha256>, update <sha256>` | The installed app stays as it was |
 
-An app delivered as a base APK plus split APKs, as Google Play delivers App Bundles, installs from its files or from one bundle: a `.apks` written by bundletool or exported by an installer, or an `.xapk`. Inside a bundle, an APK is any entry ending in `.apk`; with bundletool's table of contents, `toc.pb`, only the variant for the highest minimum SDK up to 36 is used, and standalone APKs for old systems are ignored when splits are there. Other files, such as an `.xapk`'s OBB expansion files, are not installed. Bundles are unpacked into `<data>/app/.unpack-*` and removed after the install.
+An app delivered as a base APK plus split APKs, as Google Play delivers App Bundles, installs from its files or from one bundle: a `.apks` written by bundletool or exported by an installer, or an `.xapk`. Inside a bundle, an APK is any entry ending in `.apk`; with bundletool's table of contents, `toc.pb`, only the variant for the highest minimum SDK up to 36 is used, and standalone APKs for old systems are ignored when splits are there. Other files, such as an `.xapk`'s OBB expansion files, are not installed.
+
+Every file given, APK or bundle, is first copied into a directory of the install's own, `<data>/app/.unpack-*` (mode 0700), and only that copy is verified, read and installed, so the bytes verified are the bytes installed even if the file given changes meanwhile; bundles are unpacked there too, and the directory is removed after the install. A refused install leaves nothing behind, not even a data directory it had to create.
 
 ```sh
 uxdroid install base.apk split_config.x86_64.apk split_config.en.apk --data /path/to/android-data
@@ -204,6 +206,58 @@ prepared com.example.app in /data/app/com.example.app: code compiled (verify), m
 ```
 
 The `verify` filter was chosen by measurement, in [benches/framework](benches/framework/README.md). The record and the library are valid only for the runtime and the `base.apk` they were made with: if either changes, the launcher says so on stderr and parses the APK and makes the default bodies itself, and ART ignores compiled code that no longer matches. On a file system mounted `noexec`, `defaults.so` cannot be mapped and the bodies are made at start. If preparing fails, the install fails with `error: cannot prepare <package> for the framework: ...` and the previous install stays. Without a framework, only the libraries are installed, an older preparation is removed, and stderr says `note: no framework in <runtime>, so <package> is not prepared: ...`; the launcher then works from the APK as before. The install runs the framework's parser on the manifest, not the app's code.
+
+### Install from app sources
+
+`uxdroid search`, `install <package>`, `update`, `remove`, `list` and `sources` find apps in app sources and keep them installed. The only kind of source so far is an F-Droid repository, and F-Droid's official one, `fdroid`, is there from the start. Every command takes `--data <dir>`, the data directory to work on; without it they use `$XDG_DATA_HOME/uxdroid/data`, where `uxdroid app` starts apps from.
+
+```sh
+uxdroid search markor
+uxdroid install net.gsantner.markor
+uxdroid list
+uxdroid update
+uxdroid remove net.gsantner.markor
+```
+
+```text
+NAME    PACKAGE              SOURCE  VERSION    UPDATED
+Markor  net.gsantner.markor  fdroid  2026.10.0  2026-10-29
+downloaded net.gsantner.markor 2026.10.0 (164) from fdroid: 11849016 bytes, SHA-256 c29412e02d03e4f0511746a1bcef48c6b73fc1f70c1024fbf04903b0b3f4c485
+installed net.gsantner.markor: 0 native libraries for x86_64 in /home/me/.local/share/uxdroid/data/data/net.gsantner.markor/lib
+prepared net.gsantner.markor in /home/me/.local/share/uxdroid/data/app/net.gsantner.markor: code compiled (verify), manifest recorded with launcher net.gsantner.markor.activity.MainActivity, 5207 default bodies
+PACKAGE              SOURCE  VERSION
+net.gsantner.markor  fdroid  2026.10.0 (164)
+net.gsantner.markor 2026.10.0 (164) from fdroid is up to date
+removed net.gsantner.markor: its code, data, signer record and component settings
+```
+
+| Command | What it does |
+|---------|--------------|
+| `search <text>... [--refresh] [--limit <n>]` | Apps of the enabled sources whose name, package or summary holds every word, best first: a word that is the name or the package counts most, then the start of the name, a word of the name, the name, the package, and the summary. Each row has the app's name, package, source, the version that would be installed and the day the source last changed the app (UTC). At most 20 rows unless `--limit` says otherwise; how many more matched, and how many matched with no version for this machine, go to stderr as notes. Nothing found exits 1 |
+| `install <package> [--from <source>] [--refresh]` | Installs the newest version for this machine: stable (no beta channel), native code for this CPU or none, and `minSdkVersion` up to 36 and `maxSdkVersion` from 36. The source is `--from`, else the one the app was installed from, else the first enabled source that has it, in `sources` order. The APK is downloaded into `<data>/store/downloads`, refused if it is larger than the index says or does not have its SHA-256, and handed to the installer above, which checks the SHA-256 again on its own copy, then that its package, `versionCode` and signer certificates are those the index gives, then its signature and the installed app's signer as for any APK. The source is recorded in `<data>/app/.<package>.source`. The same version from the same source is not installed again, and an older one than the installed is refused |
+| `update [<package>] [--refresh]` | For each app installed from a source, or the one named, installs the newest version for this machine from that source when it is newer, as `install` does; an update signed by another certificate is refused and the app stays. Apps installed from a file are left alone; naming one is an error. Exits 1 when any app failed |
+| `remove <package>` | Removes the app's code directory, its data directory `<data>/data/<package>`, its signer and source records and its component settings `<data>/system/components/<package>`. A running app is refused: stop it first. The lock files stay |
+| `list` | Installed apps with their source (`file` for an APK given as a file) and version |
+| `sources` | The sources, with kind, whether enabled, address and the SHA-256 of the certificate their index must be signed with |
+| `sources add <name> <url> --fingerprint <sha256>` | Adds an F-Droid repository: a name of lowercase letters, digits and `-`, its address and its signing certificate's SHA-256, as the repository publishes it (colons and case do not matter) |
+| `sources enable\|disable <name>` | Uses a source, or stops using it, for `search`, `install` and `update`; `--from` cannot name a disabled source |
+| `sources refresh-after <hours>` | How old an index may be before it is fetched again, 24 hours by default |
+
+Exit codes: `0` success, also for `install` of the version already installed and for `update` with nothing newer; `1` the command failed, with its reason, or `search` found nothing; `2` wrong usage. Notes, such as an index fetched or read stale, go to stderr.
+
+`install` takes a package when it is given one word that is a package name, does not end in `.apk`, `.apks` or `.xapk`, and names no existing file, or when `--from` or `--refresh` is given; anything else is installed from files, as above. `install <package>` without `--data` uses the default data directory, where `install <apk>` still needs `--data`.
+
+An F-Droid repository's index is trusted only as far as it is signed. `entry.jar` must carry a JAR signature by one certificate with the pinned SHA-256, `43238d512c1e5eb2d6569f4a3afbf5523418b82e0a3ed1552770abb9a9c9ccab` for F-Droid's own as F-Droid publishes it, and its `entry.json` names the index and diffs by size and SHA-256. An entry older than the index already read is refused as a replay. The index is fetched again when it is older than the interval or with `--refresh`: a diff from the cached index when the entry offers one, else all of `index-v2.json` (72 MB, 23 MB compressed in transfer, for F-Droid in November 2026). Only what the commands read is kept, about 10 MB in `<data>/store/sources/<name>/index.json`. When an index cannot be fetched, the cached one is used and stderr says how old it is. Names from the index are checked before use: an entry with a package name that is not one, or a file name that is not a plain path inside the repository, is ignored. Fetching uses HTTP or HTTPS with the system's certificates and proxy variables.
+
+| Error | Meaning |
+|-------|---------|
+| `the index of <source> (<url>) is refused: entry.jar does not verify: <reason>` | Damaged, or changed after signing |
+| `the index of <source> (<url>) is refused: entry.jar is signed by <sha256>, not by the certificate pinned for the source, <sha256>` | Another key signed it: a wrong fingerprint, or someone else's repository |
+| `the index of <source> (<url>) is refused: its index does not have the SHA-256 its signed entry gives, so it was changed after signing` | The index, or a diff, is not the signed one; `is larger than its signed entry says` when it is longer |
+| `the APK of <package> from <source> does not match its index (SHA-256 <sha256>, <n> bytes; the index gives <sha256>, <n> bytes), so it is refused` | The download is not the APK the index signed; `is larger than the <n> bytes its index gives` when it is longer |
+| `the APK of <package> from <source> is the package <name>` / `has version code <n>` / `is signed by <sha256>, and its index says <sha256>` | The APK is not the release the index describes |
+
+Not yet: Google Play and direct URLs as sources, beta channels, a source's own mirrors, removing a source, and checking `entry.json`'s `maxAge`. `uxdroid tui` will drive the same store.
 
 ### Control a running app
 

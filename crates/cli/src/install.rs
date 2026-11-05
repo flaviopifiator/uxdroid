@@ -6,9 +6,15 @@
 //! directory, `<data>/app/<package>`. With the framework's runtime at hand it also prepares that
 //! directory as Android's installer does: the DEX compiled beside the APKs, the framework's parse of
 //! the manifest, and the library of default bodies. A start then only maps what is there.
+//!
+//! Every APK or bundle given is first copied into a directory of the install's own, and only that
+//! copy is verified, read and installed, so the bytes verified are the bytes installed even when the
+//! file given changes meanwhile. An app from a store source also has its copy checked against the
+//! SHA-256, package, version and signers its source gave, and its source recorded.
 
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -17,6 +23,9 @@ use uxdroid_apk::{
     ExecutionPath, Host, Kind, Part, Plan, Scheme, bundle_entries, extract_bundled,
     extract_native_libs, host_abi, inspect, plan_splits, verify_signature,
 };
+
+use sha2::{Digest, Sha256};
+use uxdroid_store::Installed;
 
 use crate::runtime::{boot_class_path, default_runtime, failure, runtime_environment};
 use crate::{EXIT_FAILURE, EXIT_USAGE, INSTALL_USAGE, fail, print};
@@ -117,7 +126,7 @@ pub fn run_install(args: &[OsString]) -> ExitCode {
     let Some((apks, data)) = parse(args) else {
         return fail(INSTALL_USAGE, EXIT_USAGE);
     };
-    match install(&apks, data) {
+    match install(&apks, data, &Origin::File) {
         Ok((report, note)) => {
             if let Some(note) = note {
                 let _ = fail(&format!("note: {note}"), 0);
@@ -134,7 +143,7 @@ fn cannot(path: &Path, error: std::io::Error) -> String {
 
 /// Installs of one package take turns, whichever process and PID namespace they run in: the lock is
 /// on a file of the data directory, released when the returned file closes.
-fn lock_package(data: &Path, package: &str) -> Result<std::fs::File, String> {
+pub(crate) fn lock_package(data: &Path, package: &str) -> Result<std::fs::File, String> {
     let locks = data.join("app");
     std::fs::create_dir_all(&locks).map_err(|error| cannot(&locks, error))?;
     let path = locks.join(format!(".{package}.lock"));
@@ -203,6 +212,11 @@ fn framework_runtime() -> Framework {
     }
 }
 
+/// Moves this install's own copy `from` to `to`, or copies it where it cannot move.
+fn move_apk(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::rename(from, to).or_else(|_| copy_apk(from, to))
+}
+
 /// Copies `from` to `to`. A read-only APK must not make its copy impossible to replace, so contents
 /// are copied, not mode.
 fn copy_apk(from: &Path, to: &Path) -> Result<(), String> {
@@ -218,11 +232,11 @@ fn copy_apk(from: &Path, to: &Path) -> Result<(), String> {
 /// lists them.
 fn stage_code(staged: &Path, parts: &[Part], plan: &Plan) -> Result<(), String> {
     std::fs::create_dir_all(staged).map_err(|error| cannot(staged, error))?;
-    copy_apk(&parts[plan.base].path, &staged.join("base.apk"))?;
+    move_apk(&parts[plan.base].path, &staged.join("base.apk"))?;
     let mut record = String::new();
     for (index, _) in &plan.chosen {
         let name = split_name(&parts[*index]);
-        copy_apk(
+        move_apk(
             &parts[*index].path,
             &staged.join(format!("split_{name}.apk")),
         )?;
@@ -353,16 +367,23 @@ fn prepare(
     Ok((launcher, defaults))
 }
 
-/// A directory of `<data>/app` that holds APKs unpacked from bundles while this install runs. The
-/// lock on its `lock` file says it is in use, so an install can tell what a dead one left.
+/// A directory of `<data>/app` that holds this install's copies of the APKs and bundles given, and
+/// the APKs unpacked from bundles, while it runs. The lock on its `lock` file says it is in use, so
+/// an install can tell what a dead one left.
 struct Unpacked {
     directory: PathBuf,
+    /// `<data>` and `<data>/app` when this install made them: a refused install leaves no trace.
+    created: Vec<PathBuf>,
     _lock: std::fs::File,
 }
 
 impl Unpacked {
     fn new(data: &Path) -> Result<Self, String> {
         let apps = data.join("app");
+        let created: Vec<PathBuf> = [data.to_path_buf(), apps.clone()]
+            .into_iter()
+            .filter(|directory| !directory.exists())
+            .collect();
         std::fs::create_dir_all(&apps).map_err(|error| cannot(&apps, error))?;
         if let Ok(entries) = std::fs::read_dir(&apps) {
             for entry in entries.flatten() {
@@ -385,7 +406,11 @@ impl Unpacked {
         // sees it unlocked.
         let name = format!("unpack-{}-{stamp}", std::process::id());
         let staging = apps.join(format!(".staging-{name}"));
-        std::fs::create_dir(&staging).map_err(|error| cannot(&staging, error))?;
+        // Only this user may change the copies while they are verified and installed.
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&staging)
+            .map_err(|error| cannot(&staging, error))?;
         let path = staging.join("lock");
         let lock = std::fs::File::create(&path).map_err(|error| cannot(&path, error))?;
         lock.lock()
@@ -394,6 +419,7 @@ impl Unpacked {
         std::fs::rename(&staging, &directory).map_err(|error| cannot(&directory, error))?;
         Ok(Self {
             directory,
+            created,
             _lock: lock,
         })
     }
@@ -402,14 +428,58 @@ impl Unpacked {
 impl Drop for Unpacked {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.directory);
+        // Only when still empty, that is when the install was refused before it wrote anything.
+        for directory in self.created.iter().rev() {
+            let _ = std::fs::remove_dir(directory);
+        }
     }
 }
 
-/// Reads and verifies every APK given, unpacking bundles into `unpacked`.
+/// Opens each APK given, so one that cannot be read is reported before anything is written.
+fn open_all(apks: &[&Path]) -> Result<Vec<std::fs::File>, String> {
+    apks.iter()
+        .map(|apk| {
+            std::fs::File::open(apk)
+                .map_err(|error| format!("cannot read APK {}: {error}", apk.display()))
+        })
+        .collect()
+}
+
+/// Copies `source`, opened from `from`, to the new file `to` and returns the SHA-256 of what was
+/// copied.
+fn copy_hashing(mut source: std::fs::File, from: &Path, to: &Path) -> Result<String, String> {
+    let mut copy = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)
+        .map_err(|error| cannot(to, error))?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0; 256 * 1024];
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot read APK {}: {error}", from.display()))?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+        copy.write_all(&buffer[..read])
+            .map_err(|error| cannot(to, error))?;
+    }
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Copies every APK given into `unpacked`, then reads and verifies the copies, unpacking bundles
+/// there too. An app from a source must be one file with the SHA-256 the source gave.
 fn gather(
     apks: &[&Path],
-    data: &Path,
-    unpacked: &mut Option<Unpacked>,
+    files: Vec<std::fs::File>,
+    unpacked: &Unpacked,
+    origin: &Origin,
 ) -> Result<Vec<Part>, String> {
     let read = |origin: String, path: PathBuf| -> Result<Part, String> {
         // As Android does, the signature is checked before anything of the APK is parsed.
@@ -441,29 +511,104 @@ fn gather(
         })
     };
     let mut parts = Vec::new();
-    for apk in apks {
-        let Some(entries) = bundle_entries(apk).map_err(|error| match error {
+    let directory = &unpacked.directory;
+    for (number, (apk, file)) in apks.iter().zip(files).enumerate() {
+        let copy = directory.join(format!("given-{number}"));
+        let sha256 = copy_hashing(file, apk, &copy)?;
+        if let Origin::Store(from) = origin
+            && sha256 != from.sha256
+        {
+            return Err(format!(
+                "the APK of {} from {} changed after it was downloaded (SHA-256 {sha256}, the index gives {}), so it is refused",
+                from.package, from.record.source, from.sha256
+            ));
+        }
+        let Some(entries) = bundle_entries(&copy).map_err(|error| match error {
             uxdroid_apk::Error::Splits(reason) => format!("{}: {reason}", apk.display()),
+            uxdroid_apk::Error::Unreadable(_, source) => {
+                format!("cannot read APK {}: {source}", apk.display())
+            }
             other => other.to_string(),
         })?
         else {
-            parts.push(read(apk.display().to_string(), apk.to_path_buf())?);
+            parts.push(read(apk.display().to_string(), copy)?);
             continue;
-        };
-        let directory = match unpacked {
-            Some(unpacked) => unpacked.directory.clone(),
-            None => unpacked.insert(Unpacked::new(data)?).directory.clone(),
         };
         for entry in entries {
             let path = directory.join(format!("{}.apk", parts.len()));
-            extract_bundled(apk, &entry, &path).map_err(|error| error.to_string())?;
+            extract_bundled(&copy, &entry, &path).map_err(|error| error.to_string())?;
             parts.push(read(
                 format!("{}!{}", apk.display(), entry.escape_debug()),
                 path,
             )?);
         }
+        let _ = std::fs::remove_file(&copy);
     }
     Ok(parts)
+}
+
+/// What an app from a store source must be, as its source signed it.
+pub(crate) struct FromStore<'a> {
+    pub package: &'a str,
+    pub sha256: &'a str,
+    /// The SHA-256 of each certificate the source says signs it; none when it does not say.
+    pub signers: &'a [String],
+    pub record: &'a Installed,
+}
+
+/// Where the APKs installed come from.
+pub(crate) enum Origin<'a> {
+    /// Files the user gave.
+    File,
+    /// A download from a store source, recorded with the install.
+    Store(FromStore<'a>),
+}
+
+/// Checks the app the parts make is the one the source described.
+fn check_origin(base: &Part, origin: &Origin) -> Result<(), String> {
+    let Origin::Store(from) = origin else {
+        return Ok(());
+    };
+    let manifest = &base.apk.manifest;
+    let source = &from.record.source;
+    if manifest.package != from.package {
+        return Err(format!(
+            "the APK of {} from {source} is the package {}, so it is refused",
+            from.package,
+            manifest.package.escape_debug()
+        ));
+    }
+    let code = manifest
+        .version_code
+        .as_deref()
+        .and_then(|code| code.parse::<u64>().ok());
+    if code != Some(from.record.version_code) {
+        return Err(format!(
+            "the APK of {} from {source} has version code {}, and its index gives {}, so it is refused",
+            from.package,
+            manifest
+                .version_code
+                .as_deref()
+                .unwrap_or("none")
+                .escape_debug(),
+            from.record.version_code
+        ));
+    }
+    if !from.signers.is_empty() {
+        let mut expected: Vec<String> = from.signers.to_vec();
+        expected.sort();
+        expected.dedup();
+        let actual = base.signature.fingerprints();
+        if actual != expected {
+            return Err(format!(
+                "the APK of {} from {source} is signed by {}, and its index says {}, so it is refused",
+                from.package,
+                actual.join(", "),
+                expected.join(", ")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The languages of this user's locale, as `LANGUAGE` and the locale variables name them; English
@@ -506,15 +651,16 @@ fn describe(list: &[(String, Kind)]) -> String {
 
 type Report = (String, Option<String>);
 
-fn install(apks: &[&Path], data: &Path) -> Result<Report, String> {
+pub(crate) fn install(apks: &[&Path], data: &Path, origin: &Origin) -> Result<Report, String> {
     if !data.is_absolute() {
         return Err(format!(
             "the data directory must be absolute, not {}",
             data.display()
         ));
     }
-    let mut unpacked = None;
-    let parts = gather(apks, data, &mut unpacked)?;
+    let files = open_all(apks)?;
+    let unpacked = Unpacked::new(data)?;
+    let parts = gather(apks, files, &unpacked, origin)?;
     let abi = host_abi();
     let host = Host {
         abi: abi.to_string(),
@@ -527,6 +673,7 @@ fn install(apks: &[&Path], data: &Path) -> Result<Report, String> {
     if !valid_package(package) {
         return Err(format!("bad package name {}", package.escape_debug()));
     }
+    check_origin(base, origin)?;
     let abi_split = plan
         .chosen
         .iter()
@@ -545,6 +692,7 @@ fn install(apks: &[&Path], data: &Path) -> Result<Report, String> {
     let apps = data.join("app");
     let code = apps.join(package);
     let signer = apps.join(format!(".{package}.signer"));
+    let source = Installed::path(data, package);
     let fingerprints = base.signature.fingerprints();
     match std::fs::read_to_string(&signer) {
         Ok(installed) => {
@@ -578,6 +726,8 @@ fn install(apks: &[&Path], data: &Path) -> Result<Report, String> {
     let old_libraries = app_dir.join(format!(".old-lib-{pid}"));
     let old_code = apps.join(format!(".{package}.old-{pid}"));
     let old_signer = apps.join(format!(".{package}.old-signer-{pid}"));
+    let staged_source = apps.join(format!(".{package}.new-source-{pid}"));
+    let old_source = apps.join(format!(".{package}.old-source-{pid}"));
     let record = app_dir.join("abi");
     let runtime = framework_runtime();
     let with_code: Vec<&str> = plan
@@ -616,6 +766,10 @@ fn install(apks: &[&Path], data: &Path) -> Result<Report, String> {
         fingerprint_record.push('\n');
         std::fs::write(&staged_signer, fingerprint_record)
             .map_err(|error| cannot(&staged_signer, error))?;
+        if let Origin::Store(from) = origin {
+            std::fs::write(&staged_source, from.record.to_bytes())
+                .map_err(|error| cannot(&staged_source, error))?;
+        }
 
         let mut renames = Renames::default();
         let swap = (|| {
@@ -634,6 +788,13 @@ fn install(apks: &[&Path], data: &Path) -> Result<Report, String> {
                 renames.rename(&signer, &old_signer)?;
             }
             renames.rename(&staged_signer, &signer)?;
+            // An app installed from a file no longer comes from the source it came from.
+            if source.exists() {
+                renames.rename(&source, &old_source)?;
+            }
+            if let Origin::Store(_) = origin {
+                renames.rename(&staged_source, &source)?;
+            }
             renames.rename(&pending, &record)
         })();
         if let Err(error) = swap {
@@ -645,6 +806,8 @@ fn install(apks: &[&Path], data: &Path) -> Result<Report, String> {
     let _ = std::fs::remove_file(&pending);
     let _ = std::fs::remove_file(&staged_signer);
     let _ = std::fs::remove_file(&old_signer);
+    let _ = std::fs::remove_file(&staged_source);
+    let _ = std::fs::remove_file(&old_source);
     for leftover in [&staging, &staged_code, &old_libraries, &old_code] {
         let _ = std::fs::remove_dir_all(leftover);
     }
