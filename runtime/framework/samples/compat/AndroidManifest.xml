@@ -3,9 +3,21 @@
      system services. Each answer is printed for compat_smoke.sh. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.compat">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
+    <!-- As app stores do, so canRequestPackageInstalls answers true. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application android:name=".CompatApplication" android:label="@string/app_name"
         android:appComponentFactory="com.example.compat.CompatFactory" android:appCategory="game"
         android:theme="@android:style/Theme.Material.Light">
+        <!-- Read with GET_META_DATA, as Sentry reads io.sentry.auto-init. -->
+        <meta-data android:name="com.example.compat.auto-init" android:value="false" />
+        <!-- A launcher activity the manifest turns off, before the real one, as F-Droid's disguise:
+             never launched. No class backs it. -->
+        <activity android:name=".DisguiseActivity" android:exported="true" android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
         <activity android:name=".CompatActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -19,11 +31,38 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+        <!-- Turned off by the app itself through setComponentEnabledSetting; never started. -->
+        <activity android:name=".ToggledActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="com.example.compat.TOGGLED" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <receiver android:name=".CompatReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="com.example.compat.REMIND" />
             </intent-filter>
         </receiver>
-        <activity android:name=".ResultActivity" android:exported="false" />
+        <activity android:name=".ResultActivity" android:exported="false">
+            <!-- A web link, which domain verification lists by host. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="links.example.com" />
+            </intent-filter>
+        </activity>
+        <!-- Installed at start, before Application.onCreate, reading its meta-data as androidx-startup's
+             InitializationProvider does. -->
+        <provider android:name=".CompatProvider" android:authorities="com.example.compat.provider"
+            android:exported="false">
+            <meta-data android:name="com.example.compat.Initializer" android:value="startup" />
+        </provider>
+        <!-- Never installed: disabled in the manifest, as libraries ship providers an app turns off. -->
+        <provider android:name=".DisabledProvider" android:authorities="com.example.compat.disabled"
+            android:exported="false" android:enabled="false" />
+        <!-- Declared for another process, which uxdroid does not start: made when first queried. -->
+        <provider android:name=".RemoteProvider" android:authorities="com.example.compat.remote"
+            android:exported="false" android:process=":remote" />
     </application>
 </manifest>

@@ -25,6 +25,10 @@ const ATTR_VERSION_CODE: u32 = 0x0101_021b;
 const ATTR_VERSION_NAME: u32 = 0x0101_021c;
 const ATTR_MIN_SDK: u32 = 0x0101_020c;
 const ATTR_TARGET_SDK: u32 = 0x0101_0270;
+const ATTR_IS_FEATURE_SPLIT: u32 = 0x0101_055b;
+const ATTR_IS_SPLIT_REQUIRED: u32 = 0x0101_0591;
+const ATTR_REQUIRED_SPLIT_TYPES: u32 = 0x0101_064e;
+const ATTR_SPLIT_TYPES: u32 = 0x0101_064f;
 
 const ACTION_MAIN: &str = "android.intent.action.MAIN";
 const CATEGORY_LAUNCHER: &str = "android.intent.category.LAUNCHER";
@@ -37,6 +41,16 @@ pub struct Manifest {
     pub min_sdk: Option<String>,
     pub target_sdk: Option<String>,
     pub launcher: Option<String>,
+    /// The split's name, for a split APK; a base APK has none.
+    pub split: Option<String>,
+    /// The feature split a configuration split belongs to; none for the base's own.
+    pub config_for_split: Option<String>,
+    pub feature_split: bool,
+    /// The base says it cannot run without its splits (`android:isSplitRequired`).
+    pub split_required: bool,
+    /// `android:requiredSplitTypes` of a base, `android:splitTypes` of a split: comma separated.
+    pub required_split_types: Option<String>,
+    pub split_types: Option<String>,
 }
 
 /// Extracts what uxdroid needs from a compiled `AndroidManifest.xml`.
@@ -127,6 +141,12 @@ struct Walker {
     min_sdk: Option<AttrValue>,
     target_sdk: Option<AttrValue>,
     launcher: Option<AttrValue>,
+    split: Option<AttrValue>,
+    config_for_split: Option<AttrValue>,
+    feature_split: Option<AttrValue>,
+    split_required: Option<AttrValue>,
+    required_split_types: Option<AttrValue>,
+    split_types: Option<AttrValue>,
     component: Option<AttrValue>,
     has_main_action: bool,
     has_launcher_category: bool,
@@ -142,6 +162,18 @@ impl Walker {
             self.package = attrs.plain("package")?;
             self.version_code = attrs.android(ATTR_VERSION_CODE, "versionCode")?;
             self.version_name = attrs.android(ATTR_VERSION_NAME, "versionName")?;
+            self.split = attrs.plain("split")?;
+            self.config_for_split = attrs.plain("configForSplit")?;
+            self.feature_split = attrs.android(ATTR_IS_FEATURE_SPLIT, "isFeatureSplit")?;
+            self.split_required = attrs.android(ATTR_IS_SPLIT_REQUIRED, "isSplitRequired")?;
+            self.required_split_types =
+                attrs.android(ATTR_REQUIRED_SPLIT_TYPES, "requiredSplitTypes")?;
+            self.split_types = attrs.android(ATTR_SPLIT_TYPES, "splitTypes")?;
+        } else if pool.is(name, "application")? {
+            // Build tools have put it on either element.
+            if let Some(required) = attrs.android(ATTR_IS_SPLIT_REQUIRED, "isSplitRequired")? {
+                self.split_required = Some(required);
+            }
         } else if pool.is(name, "uses-sdk")? {
             self.min_sdk = attrs.android(ATTR_MIN_SDK, "minSdkVersion")?;
             self.target_sdk = attrs.android(ATTR_TARGET_SDK, "targetSdkVersion")?;
@@ -189,6 +221,16 @@ impl Walker {
 
         let package = package.decode(pool)?;
         let launcher = decode(self.launcher)?.map(|name| qualify_class(&package, &name));
+        // A boolean is a number, `0` for false; a string `true` also counts, as aapt1 wrote some.
+        let truth = |value: Option<AttrValue>| -> Result<bool, Error> {
+            Ok(match value {
+                Some(AttrValue::Number(number)) => number != 0,
+                Some(value @ AttrValue::Text(_)) => value.is_text(pool, "true")?,
+                _ => false,
+            })
+        };
+        let split = decode(self.split)?.filter(|name| !name.is_empty());
+        let config_for_split = decode(self.config_for_split)?.filter(|name| !name.is_empty());
         Ok(Manifest {
             package,
             version_code: decode(self.version_code)?,
@@ -196,6 +238,12 @@ impl Walker {
             min_sdk: decode(self.min_sdk)?,
             target_sdk: decode(self.target_sdk)?,
             launcher,
+            split,
+            config_for_split,
+            feature_split: truth(self.feature_split)?,
+            split_required: truth(self.split_required)?,
+            required_split_types: decode(self.required_split_types)?,
+            split_types: decode(self.split_types)?,
         })
     }
 }

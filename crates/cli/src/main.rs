@@ -9,11 +9,19 @@ const INSPECT_USAGE: &str = "usage: uxdroid inspect <apk>";
 const LOAD_USAGE: &str = "usage: uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]";
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // `run` needs ART for the host
 const RUN_USAGE: &str = "usage: uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]";
-const INSTALL_USAGE: &str = "usage: uxdroid install <apk> --data <dir>";
+const INSTALL_USAGE: &str = "usage: uxdroid install <apk>... --data <dir>\n       \
+                             uxdroid install <package> [--from <source>] [--refresh] [--data <dir>]";
 const USAGE: &str = "usage: uxdroid inspect <apk>\n       \
                      uxdroid load <lib.so> [--search-dir <dir>]... [--call <symbol>]\n       \
                      uxdroid run <apk> [--runtime <dir>] [--exit-after-first-frame]\n       \
-                     uxdroid install <apk> --data <dir>\n       \
+                     uxdroid install <apk>... --data <dir>\n       \
+                     uxdroid install <package> [--from <source>] [--refresh] [--data <dir>]\n       \
+                     uxdroid search <text>... [--refresh] [--limit <n>] [--data <dir>]\n       \
+                     uxdroid update [<package>] [--refresh] [--data <dir>]\n       \
+                     uxdroid remove <package> [--data <dir>]\n       \
+                     uxdroid list [--data <dir>]\n       \
+                     uxdroid sources [add|enable|disable|refresh-after ...] [--data <dir>]\n       \
+                     uxdroid tui [--data <dir>]\n       \
                      uxdroid service enable|disable|status|run <package> [<options>]\n       \
                      uxdroid mcp\n       \
                      uxdroid app <package> status|start|intent|stop [<options>]\n       \
@@ -29,7 +37,16 @@ fn main() -> ExitCode {
         Some((command, rest)) if command == "inspect" => run_inspect(rest),
         Some((command, rest)) if command == "load" => native::run_load(rest),
         Some((command, rest)) if command == "run" => run_command(rest),
+        Some((command, rest)) if command == "install" && store::names_a_package(rest) => {
+            store::run_install_package(rest)
+        }
         Some((command, rest)) if command == "install" => install::run_install(rest),
+        Some((command, rest)) if command == "search" => store::run_search(rest),
+        Some((command, rest)) if command == "update" => store::run_update(rest),
+        Some((command, rest)) if command == "remove" => store::run_remove(rest),
+        Some((command, rest)) if command == "list" => store::run_list(rest),
+        Some((command, rest)) if command == "sources" => store::run_sources(rest),
+        Some((command, rest)) if command == "tui" => tui::run_tui(rest),
         Some((command, rest)) if command == "app" => app_command(rest),
         Some((command, rest)) if command == "service" => service_command(rest),
         Some((command, rest)) if command == "mcp" => mcp_command(rest),
@@ -45,6 +62,8 @@ mod mcp;
 mod runtime;
 #[cfg(target_os = "linux")]
 mod service;
+mod store;
+mod tui;
 
 #[cfg(target_os = "linux")]
 fn mcp_command(args: &[OsString]) -> ExitCode {

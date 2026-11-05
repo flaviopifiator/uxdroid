@@ -26,7 +26,14 @@ final class Record {
     private Record() {}
 
     static final String FILE = "package.record";
-    private static final String MAGIC = "uxdroid package record 1";
+    private static final String MAGIC = "uxdroid package record 3";
+    /**
+     * Bounds of a record another app may have left, checked before anything is allocated: microG's,
+     * the largest seen, is 157 KB, and a framework object nests a few values deep. Past either, the
+     * record is refused and the APK parsed.
+     */
+    static final int MAX_BYTES = 4 << 20;
+    static final int MAX_DEPTH = 64;
     /** Files of the runtime a record depends on: the classes it holds and the natives its library lists. */
     private static final String[] RUNTIME_FILES = {
         "framework/framework.jar", "framework/uxdroid-system.jar", "framework/natives.txt",
@@ -36,13 +43,19 @@ final class Record {
     static final class Contents {
         final android.content.pm.ApplicationInfo application;
         final android.content.pm.ActivityInfo activity;
+        /** The application's meta-data, which getApplicationInfo gives with GET_META_DATA; null if none. */
+        final Bundle metaData;
+        /** Every component the manifest declares, with its meta-data and intent filters. */
+        final Components components;
         /** PackageManager.getPackageInfo with flags 0, decoded again for each caller. */
         final byte[] packageInfo;
 
         Contents(android.content.pm.ApplicationInfo application, android.content.pm.ActivityInfo activity,
-                byte[] packageInfo) {
+                Bundle metaData, Components components, byte[] packageInfo) {
             this.application = application;
             this.activity = activity;
+            this.metaData = metaData;
+            this.components = components;
             this.packageInfo = packageInfo;
         }
 
@@ -55,19 +68,33 @@ final class Record {
         }
     }
 
-    /** The runtime and the APK, by path, size and modification time. Changing either makes a record stale. */
+    /**
+     * The runtime, the APK and its splits, by path, size and modification time. Changing any makes a
+     * record stale. An APK without splits has the identity it always had, so its record stays valid.
+     */
     static String identity(String root, File apk) {
         StringBuilder text = new StringBuilder(new File(root).getAbsolutePath());
         for (String name : RUNTIME_FILES) {
             File file = new File(root, name);
             text.append('|').append(name).append(' ').append(file.length()).append(' ').append(file.lastModified());
         }
-        return text.append("|apk ").append(apk.length()).append(' ').append(apk.lastModified()).toString();
+        text.append("|apk ").append(apk.length()).append(' ').append(apk.lastModified());
+        for (String name : Launcher.App.splits(apk)) {
+            File split = Launcher.App.split(apk, name);
+            text.append("|split ").append(name).append(' ').append(split.length()).append(' ')
+                    .append(split.lastModified());
+        }
+        return text.toString();
     }
 
+    /**
+     * Writes a record. Components whose applicationInfo is {@code application} hold a reference to it,
+     * so a read gives them back the very ApplicationInfo the launcher places; the launcher activity is
+     * one of the components, so it is the same object as its entry there.
+     */
     static void write(File file, String identity, android.content.pm.ApplicationInfo application,
-            android.content.pm.ActivityInfo activity, android.content.pm.PackageInfo packageInfo)
-            throws IOException, ReflectiveOperationException {
+            android.content.pm.ActivityInfo activity, Bundle metaData, Components components,
+            android.content.pm.PackageInfo packageInfo) throws IOException, ReflectiveOperationException {
         Writer info = new Writer();
         info.value(packageInfo);
         Writer out = new Writer();
@@ -75,8 +102,21 @@ final class Record {
         out.data.writeUTF(identity);
         out.value(application);
         out.value(activity);
+        out.value(metaData);
+        out.value(components.activities);
+        out.value(components.activityFilters);
+        out.value(components.receivers);
+        out.value(components.receiverFilters);
+        out.value(components.services);
+        out.value(components.serviceFilters);
+        out.value(components.providers);
+        out.value(components.providerFilters);
         out.bytes(info.toByteArray());
-        java.nio.file.Files.write(file.toPath(), out.toByteArray());
+        byte[] record = out.toByteArray();
+        if (record.length > MAX_BYTES) {
+            throw new IllegalArgumentException("the record would be larger than " + MAX_BYTES + " bytes");
+        }
+        java.nio.file.Files.write(file.toPath(), record);
     }
 
     /** Whether a record was made for this identity, reading only its header: no framework class is touched. */
@@ -91,16 +131,23 @@ final class Record {
 
     /** Reads a record, or explains in the exception why it cannot be used. */
     static Contents read(File file, String identity) throws IOException, ReflectiveOperationException {
-        Reader in = new Reader(java.nio.file.Files.readAllBytes(file.toPath()));
+        Reader in = new Reader(bounded(file));
         if (!MAGIC.equals(in.data.readUTF())) throw new IOException("not a record of this version");
         if (!identity.equals(in.data.readUTF())) throw new IOException("the runtime or the APK changed since install");
         android.content.pm.ApplicationInfo application = (android.content.pm.ApplicationInfo) in.value();
         android.content.pm.ActivityInfo activity = (android.content.pm.ActivityInfo) in.value();
-        return new Contents(application, activity, in.bytes());
+        Bundle metaData = (Bundle) in.value();
+        Components components = new Components((android.content.pm.ActivityInfo[]) in.value(),
+                (android.content.IntentFilter[][]) in.value(), (android.content.pm.ActivityInfo[]) in.value(),
+                (android.content.IntentFilter[][]) in.value(), (android.content.pm.ServiceInfo[]) in.value(),
+                (android.content.IntentFilter[][]) in.value(), (android.content.pm.ProviderInfo[]) in.value(),
+                (android.content.IntentFilter[][]) in.value());
+        return new Contents(application, activity, metaData, components, in.bytes());
     }
 
     private static final byte NULL = 0, REFERENCE = 1, OBJECT = 2, STRING = 3, ARRAY = 4, BUNDLE = 5, LIST = 6,
-            BOOLEAN = 7, BYTE = 8, CHAR = 9, SHORT = 10, INT = 11, LONG = 12, FLOAT = 13, DOUBLE = 14, UUID = 15;
+            BOOLEAN = 7, BYTE = 8, CHAR = 9, SHORT = 10, INT = 11, LONG = 12, FLOAT = 13, DOUBLE = 14, UUID = 15,
+            SET = 16;
 
     /** Instance fields of a class and its superclasses, in a fixed order. */
     private static List<Field> fields(Class<?> type) {
@@ -205,6 +252,12 @@ final class Record {
                     data.writeByte(LIST);
                     data.writeInt(list.size());
                     for (Object element : list) value(element);
+                } else if (type == android.util.ArraySet.class) {
+                    // An IntentFilter's actions: its elements, since its own arrays hold Objects.
+                    android.util.ArraySet<?> set = (android.util.ArraySet<?>) value;
+                    data.writeByte(SET);
+                    data.writeInt(set.size());
+                    for (Object element : set) value(element);
                 } else if (type.getName().startsWith("android.")) {
                     data.writeByte(OBJECT);
                     string(type.getName());
@@ -216,9 +269,22 @@ final class Record {
         }
     }
 
+    /** The record's bytes, refused before they are read when there are more than a record holds. */
+    private static byte[] bounded(File file) throws IOException {
+        String tooLarge = "the record is larger than " + MAX_BYTES + " bytes";
+        if (file.length() > MAX_BYTES) throw new IOException(tooLarge);
+        try (java.io.InputStream in = new java.io.FileInputStream(file)) {
+            // The file may have grown since its length was read.
+            byte[] bytes = in.readNBytes(MAX_BYTES + 1);
+            if (bytes.length > MAX_BYTES) throw new IOException(tooLarge);
+            return bytes;
+        }
+    }
+
     private static final class Reader {
         final DataInputStream data;
         final List<Object> seen = new ArrayList<>();
+        private int depth;
 
         Reader(byte[] bytes) {
             data = new DataInputStream(new ByteArrayInputStream(bytes));
@@ -236,7 +302,17 @@ final class Record {
             return new String(bytes(), StandardCharsets.UTF_8);
         }
 
+        /** One value, refused when it nests deeper than any framework object, before the stack runs out. */
         Object value() throws IOException, ReflectiveOperationException {
+            if (++depth > MAX_DEPTH) throw new IOException("the record nests deeper than " + MAX_DEPTH + " values");
+            try {
+                return valueHere();
+            } finally {
+                depth--;
+            }
+        }
+
+        private Object valueHere() throws IOException, ReflectiveOperationException {
             byte tag = data.readByte();
             switch (tag) {
                 case NULL: return null;
@@ -279,9 +355,17 @@ final class Record {
                     for (int i = data.readInt(); i > 0; i--) list.add(value());
                     return list;
                 }
+                case SET: {
+                    android.util.ArraySet<Object> set = new android.util.ArraySet<>();
+                    seen.add(set);
+                    for (int i = data.readInt(); i > 0; i--) set.add(value());
+                    return set;
+                }
                 case OBJECT: {
-                    Class<?> type = Class.forName(string());
-                    if (!type.getName().startsWith("android.")) throw new IOException("unexpected class in record");
+                    // Only a framework class is ever looked up, and none is initialized by the lookup.
+                    String name = string();
+                    if (!name.startsWith("android.")) throw new IOException("unexpected class in record: " + name);
+                    Class<?> type = Class.forName(name, false, Record.class.getClassLoader());
                     Object object = newInstance(type);
                     seen.add(object);
                     for (Field field : fields(type)) field.set(object, value());
@@ -311,7 +395,7 @@ final class Record {
                         ? element.matches("[ZBCSIJFD]|Ljava\\.lang\\.String;|Landroid\\.[\\w.$]+;")
                         : name.startsWith("android.");
                 if (!allowed) throw new ClassNotFoundException("unexpected class in record: " + name);
-                return Class.forName(name);
+                return Class.forName(name, false, Record.class.getClassLoader());
         }
     }
 

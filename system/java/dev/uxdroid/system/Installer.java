@@ -10,7 +10,8 @@ import java.io.File;
 /**
  * The part of {@code uxdroid install} that needs the framework: it parses the manifest with the
  * framework's own parser and records the result, and writes the library of default bodies, so a start
- * does neither. Run on the staged APK, it records the paths the APK will have once installed.
+ * does neither. Run on the staged APK, it records the paths the APK will have once installed. With the
+ * splits uxdroid install staged beside it, it parses them with the base as one package, as Android does.
  *
  * <p>Prints {@code launcher <class>} (or {@code launcher none}) and {@code defaults <count>}.
  */
@@ -36,7 +37,10 @@ public final class Installer {
 
         PackageParser.Package parsed = Launcher.App.parsePackage(staged);
         ApplicationInfo application = Launcher.App.applicationInfo(parsed, installed, false);
+        Components components = Components.of(parsed, application);
+        // The launcher activity is its entry among the components, so the record holds it once.
         ActivityInfo activity = Launcher.App.activity(parsed, application, null);
+        if (activity != null) activity = Components.find(components.activities, activity.name);
         PackageInfo info = PackageParser.generatePackageInfo(parsed, new int[0], 0, 0, 0,
                 java.util.Collections.emptySet(), FrameworkPackageUserState.DEFAULT, 0);
         // The launcher gives the caller its own ApplicationInfo, so the record need not hold it twice.
@@ -44,7 +48,8 @@ public final class Installer {
         // A rename keeps the size and modification time the identity names.
         File record = new File(directory, Record.FILE);
         try {
-            Record.write(record, Record.identity(root, staged), application, activity, info);
+            Record.write(record, Record.identity(root, staged), application, activity, parsed.mAppMetaData,
+                    components, info);
         } catch (IllegalArgumentException e) {
             // Something the record cannot hold: the launcher parses the APK at each start instead.
             record.delete();

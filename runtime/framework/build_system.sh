@@ -53,6 +53,13 @@ compile parcel "$RUNTIME/samples/framework/parcel.jar" "PCL[$FRAMEWORK:$RUNTIME/
 # code against the framework jar. They know nothing about uxdroid. The native libraries of the NDK and audio
 # samples are built by their smokes in the dev service, which has the NDK.
 AAPT2=/aosp/prebuilts/sdk/tools/linux/bin/aapt2
+# uxdroid install takes only signed APKs, as Android does, so each sample is signed with the public test
+# key in runtime/keys by AOSP's apksigner (v2 and v3, and v1 for old minimum SDKs).
+sign_apk() {
+    "$JDK/bin/java" -jar /aosp/prebuilts/sdk/tools/linux/lib/apksigner.jar sign \
+        --key /work/runtime/keys/test.pk8 --cert /work/runtime/keys/test.x509.pem --out "$2" "$1"
+    rm -f "$2.idsig"
+}
 build_app() {
     local app=$1 out=$2 work="$W/$(basename "$1")"
     local assets=()
@@ -75,6 +82,8 @@ with zipfile.ZipFile(base) as src:
     entries = [(n, src.read(n)) for n in src.namelist()]
 assets.write_stored(out, entries + [("classes.dex", open(dex, "rb").read())])
 PY
+    mv "$out" "$work/unsigned.apk"
+    sign_apk "$work/unsigned.apk" "$out"
 }
 build_app /work/runtime/framework/samples/app "$RUNTIME/samples/framework/app.apk"
 build_app /work/runtime/framework/samples/ndk "$RUNTIME/samples/framework/ndk.apk"
@@ -82,5 +91,41 @@ build_app /work/runtime/framework/samples/audio "$RUNTIME/samples/framework/audi
 build_app /work/runtime/framework/samples/input "$RUNTIME/samples/framework/input.apk"
 build_app /work/runtime/framework/samples/compose "$RUNTIME/samples/framework/compose.apk"
 build_app /work/runtime/framework/samples/compat "$RUNTIME/samples/framework/compat.apk"
+build_app /work/runtime/framework/samples/peer "$RUNTIME/samples/framework/peer.apk"
+build_app /work/runtime/framework/samples/uidtwin "$RUNTIME/samples/framework/uidtwin.apk"
+
+# An app delivered as a base APK and a feature split, linked as bundletool links them: the split's
+# resources in a package of their own id, against the base's, and its code in its own classes.dex.
+build_split() {
+    local app=/work/runtime/framework/samples/split work="$W/split"
+    for part in base feature; do
+        mkdir -p "$work/$part/gen" "$work/$part/classes" "$work/$part/dex"
+        "$AAPT2" compile --dir "$app/$part/res" -o "$work/$part/res.zip"
+    done
+    "$AAPT2" link -I "$RUNTIME/framework/framework-res.apk" --manifest "$app/base/AndroidManifest.xml" \
+        --java "$work/base/gen" -o "$work/base/linked.apk" "$work/base/res.zip"
+    "$AAPT2" link -I "$RUNTIME/framework/framework-res.apk" -I "$work/base/linked.apk" \
+        --manifest "$app/feature/AndroidManifest.xml" --package-id 0x80 \
+        --custom-package com.example.split.feature --java "$work/feature/gen" \
+        -o "$work/feature/linked.apk" "$work/feature/res.zip"
+    for part in base feature; do
+        "$JDK/bin/javac" --release 11 -cp "$ALL" -d "$work/$part/classes" \
+            $(find "$app/$part" "$work/$part/gen" -name '*.java')
+        "${D8[@]}" --classpath "$FRAMEWORK" --output "$work/$part/dex" \
+            $(find "$work/$part/classes" -name '*.class') 2>&1 | { grep -v -i warning || true; }
+        PYTHONDONTWRITEBYTECODE=1 python3 - "$work/$part/linked.apk" "$work/$part/dex/classes.dex" \
+            "$work/$part/unsigned.apk" <<'PY'
+import sys, zipfile
+sys.path.insert(0, "/work/runtime/framework")
+import assets
+linked, dex, out = sys.argv[1:]
+with zipfile.ZipFile(linked) as src:
+    entries = [(n, src.read(n)) for n in src.namelist()]
+assets.write_stored(out, entries + [("classes.dex", open(dex, "rb").read())])
+PY
+        sign_apk "$work/$part/unsigned.apk" "$RUNTIME/samples/framework/split-$part.apk"
+    done
+}
+build_split
 ls -la "$RUNTIME/framework/uxdroid-system.jar" "$RUNTIME/samples/framework/smoke.jar" "$RUNTIME/samples/framework/app.apk" \
     "$RUNTIME/samples/framework/ndk.apk" "$RUNTIME/samples/framework/audio.apk" "$RUNTIME/samples/framework/input.apk"

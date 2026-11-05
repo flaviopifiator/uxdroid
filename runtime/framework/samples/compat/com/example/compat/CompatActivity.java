@@ -17,6 +17,9 @@ public class CompatActivity extends Activity {
         // first activities do; an intent no app takes fails as on Android.
         startActivity(new android.content.Intent(this, SecondActivity.class).putExtra("by", "class"));
         startActivity(new android.content.Intent("com.example.compat.SECOND").putExtra("by", "action"));
+        // A back stack at once, as TaskStackBuilder and Navigation's deep links start one.
+        startActivities(new android.content.Intent[] {
+                new android.content.Intent(this, SecondActivity.class).putExtra("by", "activities")});
         pendingIntents();
         // A result comes back to the activity that asked, as an app's picker or login screen answers.
         startActivityForResult(new android.content.Intent(this, ResultActivity.class).putExtra("question", 21), 7);
@@ -26,6 +29,14 @@ public class CompatActivity extends Activity {
             System.out.println("started an intent no activity takes");
         } catch (android.content.ActivityNotFoundException e) {
             System.out.println("no activity takes " + e.getMessage().replaceAll(" \\{.*", ""));
+        }
+        // Another installed app takes the intent, but runs in its own process: refused, by name.
+        try {
+            startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse("peer://open")));
+            System.out.println("packages start other app started");
+        } catch (android.content.ActivityNotFoundException e) {
+            System.out.println("packages start other app refused " + e.getMessage());
         }
         // From another thread, the answer still comes from the task, not a blind success.
         Thread start = new Thread(() -> {

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A package whose application uid is the compat sample's (14194: uids are 10000 plus FNV-1a of
+     the name modulo 10000), named to sort before it, so compat_smoke.sh checks that the PackageManager
+     still names the caller for its own uid. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.a11245">
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
+    <application android:label="@string/app_name">
+        <activity android:name="com.example.twin.TwinActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
