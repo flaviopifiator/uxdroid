@@ -17,6 +17,7 @@ public class CompatApplication extends Application {
         System.out.println("identity myUid " + Process.myUid() + " callingUid " + Binder.getCallingUid()
                 + " applicationInfo.uid " + getApplicationInfo().uid + " userId " + Process.myUserHandle()
                 + " isApplicationUid " + Process.isApplicationUid(Process.myUid()));
+        process();
         database();
         network();
         services();
@@ -381,6 +382,36 @@ public class CompatApplication extends Application {
         System.out.println("textservices " + (text != null) + " spell checker "
                 + (text != null && text.isSpellCheckerEnabled()));
 
+        // Instagram watches the SIM subscriptions; a desktop has none, and the registry says nothing.
+        String subscriptions;
+        try {
+            getSystemService(android.telephony.SubscriptionManager.class).addOnSubscriptionsChangedListener(
+                    Runnable::run, new android.telephony.SubscriptionManager.OnSubscriptionsChangedListener());
+            subscriptions = "listened";
+        } catch (RuntimeException e) {
+            subscriptions = "failed " + e;
+        }
+        System.out.println("telephony subscriptions " + subscriptions);
+
+        // Managers popular apps get on start: none may be null, even where the desktop has no such
+        // hardware, since apps cast them without checking (Instagram's KeyguardManager).
+        StringBuilder missing = new StringBuilder();
+        for (String name : new String[] {"keyguard", "vibrator", "vibrator_manager", "sensor", "location",
+                "media_session", "usagestats", "uimode", "wallpaper", "device_policy", "batterymanager",
+                "storagestats", "role", "statusbar", "biometric", "fingerprint", "media_projection",
+                "captioning", "accessibility", "print", "telecom", "phone", "carrier_config", "wifi",
+                "bluetooth", "usb", "nfc", "camera", "midi", "search", "credential", "autofill",
+                "restrictions", "app_hibernation", "blob_store", "companiondevice", "media_router",
+                "audio", "download", "jobscheduler", "clipboard", "input_method", "window", "display"}) {
+            try {
+                if (getSystemService(name) == null) missing.append(' ').append(name);
+            } catch (RuntimeException e) {
+                missing.append(' ').append(name).append("!").append(e.getClass().getSimpleName());
+                android.util.Log.w("compat", "manager " + name, e);
+            }
+        }
+        System.out.println("managers missing" + (missing.length() == 0 ? " none" : missing));
+
         // Mindustry's graphics setup asks for its game mode.
         android.app.GameManager games = getSystemService(android.app.GameManager.class);
         System.out.println("game mode " + (games == null ? "none" : games.getGameMode()));
@@ -423,6 +454,35 @@ public class CompatApplication extends Application {
                 + " connected " + (info != null && info.isConnected())
                 + " total received " + (android.net.TrafficStats.getTotalRxBytes() >= 0)
                 + " own received " + android.net.TrafficStats.getUidRxBytes(android.os.Process.myUid()));
+    }
+
+    /**
+     * Instagram initializes only in its main process, which it finds by name: in the running processes,
+     * in its own memory state and in /proc/self/cmdline, as Android's zygote rewrites it.
+     */
+    private void process() {
+        android.app.ActivityManager activities = getSystemService(android.app.ActivityManager.class);
+        StringBuilder running = new StringBuilder();
+        java.util.List<android.app.ActivityManager.RunningAppProcessInfo> processes = activities.getRunningAppProcesses();
+        if (processes != null) {
+            for (android.app.ActivityManager.RunningAppProcessInfo info : processes) {
+                running.append(running.length() == 0 ? "" : ",").append(info.processName).append(':')
+                        .append(info.pid == Process.myPid());
+            }
+        }
+        android.app.ActivityManager.RunningAppProcessInfo mine = new android.app.ActivityManager.RunningAppProcessInfo();
+        android.app.ActivityManager.getMyMemoryState(mine);
+        String cmdline;
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get("/proc/self/cmdline"));
+            int end = 0;
+            while (end < bytes.length && bytes[end] != 0) end++;
+            cmdline = new String(bytes, 0, end, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            cmdline = "unreadable";
+        }
+        System.out.println("process name " + Application.getProcessName() + " running " + running
+                + " importance " + mine.importance + " cmdline " + cmdline);
     }
 
     /** Loop Habit Tracker opens its database while its Application is created. */
