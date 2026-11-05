@@ -1,3 +1,5 @@
+<img src="docs/logo/icon.svg" alt="" width="96">
+
 # uxdroid
 
 **Run Android apps on Linux as native processes.** No emulator, no virtual machine, no container and no Android system image: each app is an ordinary Linux process with its own Wayland window, its sound on your audio server and its input from your seat.
