@@ -36,6 +36,11 @@ for file in /usr/lib/uxdroid/*; do
     if ldd "$file" | grep -q "not found"; then ldd "$file"; fail "$file has unresolved libraries"; fi
 done
 
+step "the icon and the menu entry"
+[ -s /usr/share/icons/hicolor/scalable/apps/uxdroid.svg ] || fail "no icon"
+grep -qx "Icon=uxdroid" /usr/share/applications/uxdroid.desktop || fail "the menu entry has no icon"
+grep -qx "Exec=uxdroid tui" /usr/share/applications/uxdroid.desktop || fail "the menu entry does not open the terminal UI"
+
 useradd -m tester
 as_tester() { runuser -u tester -- env HOME=/home/tester "$@"; }
 
@@ -63,5 +68,6 @@ as_tester /tmp/unpacked/uxdroid-*/uxdroid search markor --limit 1 | grep -q net.
 
 step "remove the package"
 apt-get remove -y -qq uxdroid > /dev/null
-[ ! -e /usr/lib/uxdroid ] && [ ! -e /usr/bin/uxdroid ] || fail "files are left after remove"
+[ ! -e /usr/lib/uxdroid ] && [ ! -e /usr/bin/uxdroid ] && [ ! -e /usr/share/applications/uxdroid.desktop ] \
+    && [ ! -e /usr/share/icons/hicolor/scalable/apps/uxdroid.svg ] || fail "files are left after remove"
 echo "OK: $(. /etc/os-release && echo "$PRETTY_NAME") $ARCH"

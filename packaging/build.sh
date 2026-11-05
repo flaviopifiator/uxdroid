@@ -38,6 +38,9 @@ done
 ln -s ../lib/uxdroid/uxdroid "$ROOT/usr/bin/uxdroid"
 install -m 0644 /work/NOTICE "$ROOT/usr/share/doc/uxdroid/copyright"
 install -m 0644 /work/README.md "$ROOT/usr/share/doc/uxdroid/README.md"
+# The icon and a menu entry that opens the terminal UI.
+install -D -m 0644 /work/docs/logo/icon.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/uxdroid.svg"
+install -D -m 0644 /work/packaging/uxdroid.desktop "$ROOT/usr/share/applications/uxdroid.desktop"
 # Linked: glibc and libgcc only. Opened when needed, so recommended: Mesa's EGL, GLES and GBM for
 # apps that draw with the GPU, xkbcommon for typed characters, and PulseAudio or ALSA for sound.
 cat > "$ROOT/DEBIAN/control" <<EOF
@@ -65,6 +68,7 @@ NAME="uxdroid-${VERSION}-linux-${ARCH}"
 mkdir -p "$WORK/$NAME"
 cp -a "$ROOT/usr/lib/uxdroid/." "$WORK/$NAME/"
 cp /work/NOTICE /work/README.md "$WORK/$NAME/"
+cp /work/docs/logo/icon.svg "$WORK/$NAME/uxdroid.svg"
 TAR="$OUT/$NAME.tar.gz"
 tar -C "$WORK" --owner=0 --group=0 --numeric-owner -czf "$TAR" "$NAME"
 
