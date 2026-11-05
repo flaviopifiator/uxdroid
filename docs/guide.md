@@ -177,7 +177,7 @@ uxdroid run app.apk --runtime /runtime/art
 
 | Option | Meaning |
 |--------|---------|
-| `--runtime <dir>` | The packaged runtime. Otherwise `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime` |
+| `--runtime <dir>` | The packaged runtime. Otherwise `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime`, then `runtime` beside the `uxdroid` program, where the `uxdroid-runtime` package installs it |
 | `--exit-after-first-frame` | Exit once a frame is shown, for tests |
 
 The first run of an APK compiles its DEX and extracts its native libraries into `$XDG_CACHE_HOME/uxdroid/<package>/<id>`. The id comes from the APK's archive directory and the runtime, so a changed APK installs fresh and an older one does not run a newer one's code. Only a crafted APK that copies another's CRC values could match it. A version in use keeps its files until it exits. The compiled runtime must stay at the path where it was compiled; a copy elsewhere works, but without compiled code. The app's current directory is `$XDG_CACHE_HOME/uxdroid/<package>/data`. APKs with native code only for another CPU are refused, because translation does not exist yet.
@@ -230,7 +230,7 @@ A single APK is reported as before, with no second line.
 
 The sample apps `runtime/framework/build_system.sh` builds are signed by AOSP's `apksigner` with the public test key in [runtime/keys](../runtime/keys/README.md), and `make-first-apk` signs with the testkit's, so the smokes install them as any app.
 
-With the framework's runtime, found as for `uxdroid run` through `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime`, the install also prepares everything a start would otherwise redo, in the app's code directory `<data>/app/<package>`, as Android's installer does:
+With the framework's runtime, found as for `uxdroid run` through `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime`, then `runtime` beside the program, the install also prepares everything a start would otherwise redo, in the app's code directory `<data>/app/<package>`, as Android's installer does:
 
 | File | What a start does with it instead of the work |
 |------|-----------------------------------------------|
