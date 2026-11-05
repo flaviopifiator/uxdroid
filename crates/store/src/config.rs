@@ -15,6 +15,10 @@ pub const FDROID_URL: &str = "https://f-droid.org/repo";
 /// https://f-droid.org/repo/entry.jar on 2026-11-04 (CN=Ciaran Gultnieks, RSA 2048).
 pub const FDROID_FINGERPRINT: &str =
     "43238d512c1e5eb2d6569f4a3afbf5523418b82e0a3ed1552770abb9a9c9ccab";
+/// The name of Google Play's source, which exists only once the user enables it.
+pub const PLAY: &str = "play";
+/// Google Play's API, which the Play source signs in to and asks.
+pub const PLAY_URL: &str = "https://android.clients.google.com/fdfe";
 /// An index older than this is fetched again before it is used.
 pub const DEFAULT_REFRESH_AFTER_HOURS: u64 = 24;
 const MAX_NAME: usize = 32;
@@ -26,12 +30,15 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub enum Kind {
     /// An F-Droid repository: a signed `entry.jar` naming an `index-v2.json` by its hash.
     Fdroid,
+    /// Google Play, asked app by app through its API by a client of uxdroid's own.
+    Play,
 }
 
 impl std::fmt::Display for Kind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Kind::Fdroid => "fdroid",
+            Kind::Play => "play",
         })
     }
 }
@@ -43,7 +50,9 @@ pub struct SourceConfig {
     pub kind: Kind,
     /// The repository's address, without a final `/`.
     pub url: String,
-    /// The SHA-256 of the certificate its index must be signed with, in lowercase hex.
+    /// The SHA-256 of the certificate its index must be signed with, in lowercase hex; empty for
+    /// Google Play, which signs no index, and then left out of the file.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fingerprint: String,
     pub enabled: bool,
 }
@@ -167,11 +176,23 @@ impl Config {
                 config.version
             )));
         }
-        for source in &config.sources {
+        for (number, source) in config.sources.iter().enumerate() {
+            let fingerprint = match source.kind {
+                Kind::Fdroid => {
+                    normalize_fingerprint(&source.fingerprint).as_deref()
+                        == Ok(source.fingerprint.as_str())
+                }
+                // One Google Play source at most, with no fingerprint.
+                Kind::Play => {
+                    source.fingerprint.is_empty()
+                        && !config.sources[..number]
+                            .iter()
+                            .any(|other| other.kind == Kind::Play)
+                }
+            };
             if !valid_source_name(&source.name)
                 || normalize_url(&source.url).as_deref() != Ok(source.url.as_str())
-                || normalize_fingerprint(&source.fingerprint).as_deref()
-                    != Ok(source.fingerprint.as_str())
+                || !fingerprint
             {
                 return Err(Error::new(format!(
                     "{} has a malformed source {}",
@@ -223,6 +244,32 @@ impl Config {
             enabled: true,
         });
         Ok(self.sources.last().expect("just pushed"))
+    }
+
+    /// Enables Google Play, adding its source first when there is none, and says whether it was
+    /// added.
+    pub fn enable_play(&mut self) -> bool {
+        if let Some(source) = self
+            .sources
+            .iter_mut()
+            .find(|source| source.kind == Kind::Play)
+        {
+            source.enabled = true;
+            return false;
+        }
+        self.sources.push(SourceConfig {
+            name: PLAY.to_string(),
+            kind: Kind::Play,
+            url: PLAY_URL.to_string(),
+            fingerprint: String::new(),
+            enabled: true,
+        });
+        true
+    }
+
+    /// The Google Play source, when it was ever enabled.
+    pub fn play(&self) -> Option<&SourceConfig> {
+        self.sources.iter().find(|source| source.kind == Kind::Play)
     }
 
     pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), Error> {

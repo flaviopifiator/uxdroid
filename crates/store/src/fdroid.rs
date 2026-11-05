@@ -646,6 +646,7 @@ impl Fdroid {
                         stable: version
                             .release_channels
                             .is_none_or(|channels| channels.is_empty()),
+                        paid: None,
                     })
                 })
                 .collect();

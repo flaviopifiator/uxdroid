@@ -2,14 +2,17 @@
 //!
 //! The command line (`uxdroid search`, `install <package>`, `update`, `sources`) and the terminal
 //! UI (`uxdroid tui`) are thin layers over this crate. A source is anything that can list apps with
-//! their releases and serve a release's APK with a size and SHA-256 known in advance: F-Droid
-//! repositories today; Google Play and direct URLs are meant to become other kinds of source behind the same
-//! [`App`] and [`Release`] model. Installing stays the installer's job: this crate hands it a file
-//! whose bytes matched what the source signed, and the installer checks them again as it copies.
+//! their releases and serve a release's APKs with sizes and hashes known before they are kept:
+//! F-Droid repositories, whose signed indexes list every app, and Google Play ([`play`]), asked app
+//! by app and off until the user enables it. Direct URLs are meant to become another kind behind the
+//! same [`App`] and [`Release`] model. Installing stays the installer's job: this crate hands it
+//! files whose bytes matched what the source stated, and the installer checks them again as it
+//! copies.
 
 pub mod config;
 pub mod fdroid;
 pub mod fetch;
+pub mod play;
 pub mod search;
 
 use std::fs::File;
@@ -22,6 +25,7 @@ use sha2::{Digest, Sha256};
 use config::{Config, Kind, unknown_source};
 use fdroid::Fdroid;
 use fetch::{Fetch, Http};
+use play::{Play, Profile};
 
 pub use search::{Hit, Matches, search};
 
@@ -52,6 +56,18 @@ pub enum Refresh {
     IfStale,
     /// Every time, as `--refresh` asks.
     Always,
+}
+
+/// Which apps a lookup needs. Sources with an index give all their apps whatever is asked; Google
+/// Play, which has none, is asked only for these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Want<'a> {
+    /// Every app, to browse: Google Play gives none.
+    Everything,
+    /// The apps matching what the user typed.
+    Matching(&'a str),
+    /// These packages.
+    Packages(&'a [String]),
 }
 
 /// What a release must fit: the ABI apps run with and the SDK level the platform reports.
@@ -104,6 +120,8 @@ pub struct Release {
     pub added: Option<u64>,
     /// Not a beta or other opt-in channel.
     pub stable: bool,
+    /// The price shown, when the app is not free; only Google Play sells apps.
+    pub paid: Option<String>,
 }
 
 impl Release {
@@ -221,6 +239,7 @@ impl Drop for Download {
 pub struct Store {
     root: PathBuf,
     config: Config,
+    profile: Profile,
     fetch: Box<dyn Fetch>,
     progress: Box<dyn Fn(&str)>,
     transfer: Box<dyn Fn(u64, u64) -> bool>,
@@ -235,9 +254,16 @@ impl Store {
     pub fn open_with(data: &Path, fetch: Box<dyn Fetch>) -> Result<Self, Error> {
         let root = data.join("store");
         let config = Config::load(&root.join("sources.json"))?;
+        let device = Device::host();
         Ok(Self {
             root,
             config,
+            profile: Profile {
+                abi: device.abi,
+                sdk: device.sdk,
+                density: 160,
+                languages: vec!["en".to_string()],
+            },
             fetch,
             progress: Box::new(|_| {}),
             transfer: Box::new(|_, _| true),
@@ -257,6 +283,42 @@ impl Store {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// The device Google Play is told about; its density and languages should be the installer's.
+    pub fn set_profile(&mut self, profile: Profile) {
+        self.profile = profile;
+    }
+
+    /// How Google Play is signed in to.
+    pub fn play_settings(&self) -> Result<play::Settings, Error> {
+        play::Settings::load(&self.root)
+    }
+
+    /// Signs in to Google Play anonymously from now on, through `dispenser` when it is given.
+    pub fn play_anonymous(&self, dispenser: Option<&str>) -> Result<play::Settings, Error> {
+        play::use_anonymous(&self.root, dispenser)
+    }
+
+    /// Changes the token dispenser anonymous sign-ins ask.
+    pub fn play_dispenser(&self, dispenser: &str) -> Result<play::Settings, Error> {
+        play::set_dispenser(&self.root, dispenser)
+    }
+
+    /// Signs in to Google Play as `email` from now on, with an AAS or OAuth `token`.
+    pub fn play_account(&self, email: &str, token: &str) -> Result<play::Settings, Error> {
+        let api = self
+            .config
+            .play()
+            .map_or(config::PLAY_URL, |source| source.url.as_str());
+        play::use_account(
+            self.fetch.as_ref(),
+            api,
+            &self.root,
+            &self.profile,
+            email,
+            token,
+        )
     }
 
     /// Changes the configuration with `change` under the store's lock, from what is on disk then, so
@@ -283,6 +345,16 @@ impl Store {
         &self,
         from: Option<&str>,
         refresh: Refresh,
+    ) -> Result<(Vec<App>, Vec<String>), Error> {
+        self.apps_for(from, refresh, Want::Everything)
+    }
+
+    /// As [`Store::apps`], asking Google Play, when it is among the sources, for what `want` names.
+    pub fn apps_for(
+        &self,
+        from: Option<&str>,
+        refresh: Refresh,
+        want: Want,
     ) -> Result<(Vec<App>, Vec<String>), Error> {
         let sources: Vec<_> = match from {
             Some(name) => {
@@ -313,20 +385,37 @@ impl Store {
         let mut notes = Vec::new();
         let mut errors = Vec::new();
         for source in sources {
-            let loaded = match source.kind {
-                Kind::Fdroid => Fdroid::new(source.clone(), &self.root).load(
+            match source.kind {
+                Kind::Fdroid => match Fdroid::new(source.clone(), &self.root).load(
                     self.fetch.as_ref(),
                     refresh,
                     self.config.refresh_after_hours,
                     self.progress.as_ref(),
-                ),
-            };
-            match loaded {
-                Ok(loaded) => {
-                    apps.extend(loaded.apps);
-                    notes.extend(loaded.note);
+                ) {
+                    Ok(loaded) => {
+                        apps.extend(loaded.apps);
+                        notes.extend(loaded.note);
+                    }
+                    Err(error) => errors.push(error),
+                },
+                Kind::Play => {
+                    let play = Play::new(source, &self.root, &self.profile, self.fetch.as_ref());
+                    match want {
+                        Want::Everything => {}
+                        Want::Matching(text) => match play.search(text) {
+                            Ok(found) => apps.extend(found),
+                            Err(error) => errors.push(error),
+                        },
+                        Want::Packages(packages) => {
+                            for package in packages {
+                                match play.details(package) {
+                                    Ok(found) => apps.extend(found),
+                                    Err(error) => errors.push(error),
+                                }
+                            }
+                        }
+                    }
                 }
-                Err(error) => errors.push(error),
             }
         }
         if apps.is_empty() && !errors.is_empty() {
@@ -350,6 +439,7 @@ impl Store {
         for source in self.config.sources.iter().filter(|source| source.enabled) {
             let listed = match source.kind {
                 Kind::Fdroid => Fdroid::new(source.clone(), &self.root).permissions(),
+                Kind::Play => Default::default(),
             };
             for ((package, code), names) in listed {
                 found.insert((source.name.clone(), package, code), names);
@@ -366,6 +456,15 @@ impl Store {
                 "bad package name {}",
                 app.package.escape_debug()
             )));
+        }
+        if self
+            .config
+            .source(&app.source)
+            .is_some_and(|source| source.kind == Kind::Play)
+        {
+            return Err(Error::new(
+                "this uxdroid cannot download from Google Play yet",
+            ));
         }
         let directory = self.root.join("downloads");
         std::fs::create_dir_all(&directory).map_err(|error| {
