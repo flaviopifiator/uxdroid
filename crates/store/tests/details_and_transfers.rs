@@ -239,3 +239,52 @@ fn a_download_reports_its_bytes_as_they_arrive_and_can_be_cancelled() {
         .collect();
     assert!(left.is_empty(), "a cancelled download leaves no file");
 }
+
+#[test]
+fn a_missing_or_corrupt_permissions_file_is_rebuilt_from_the_whole_index() {
+    let dir = scratch("repair");
+    let repo = dir.join("repo");
+    let first = fdroid::write_repo(&repo, FIRST, &[notes(1)], &[], &Key::test());
+    let (store, asked) = store(&dir);
+    store.apps(None, Refresh::IfStale).unwrap();
+    let permissions = dir.join("data/store/sources/test/permissions.json");
+    let entry = format!("{URL}/entry.jar");
+    let whole = format!("{URL}/index-v2.json");
+    for damage in ["missing", "corrupt"] {
+        match damage {
+            "missing" => std::fs::remove_file(&permissions).unwrap(),
+            _ => std::fs::write(&permissions, b"\x00\xff not json").unwrap(),
+        }
+        asked.borrow_mut().clear();
+        // The repository has not changed: only the whole index can rebuild the file.
+        store.apps(None, Refresh::Always).unwrap();
+        assert_eq!(
+            asked.borrow().as_slice(),
+            [entry.clone(), whole.clone()],
+            "{damage}"
+        );
+        assert_eq!(
+            store.permissions(),
+            internet("com.example.notes", 1),
+            "{damage}"
+        );
+    }
+    asked.borrow_mut().clear();
+    store.apps(None, Refresh::Always).unwrap();
+    assert_eq!(
+        asked.borrow().as_slice(),
+        std::slice::from_ref(&entry),
+        "repaired: nothing more"
+    );
+
+    // A diff is never merged onto a missing file: the whole index is read instead.
+    std::fs::remove_file(&permissions).unwrap();
+    let old: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    let new = fdroid::index(SECOND, &[notes(2)]);
+    let patch = serde_json::to_vec(&fdroid::diff(&old, &new)).unwrap();
+    fdroid::write_repo(&repo, SECOND, &[notes(2)], &[(FIRST, patch)], &Key::test());
+    asked.borrow_mut().clear();
+    store.apps(None, Refresh::Always).unwrap();
+    assert_eq!(asked.borrow().as_slice(), [entry, whole]);
+    assert_eq!(store.permissions(), internet("com.example.notes", 2));
+}

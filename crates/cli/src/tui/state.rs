@@ -52,6 +52,8 @@ pub(crate) enum Modal {
 pub(crate) struct Status {
     pub text: String,
     pub error: bool,
+    /// Said while a job runs, so shown beside what it does rather than in place of it.
+    pub during_job: bool,
 }
 
 pub(crate) struct State {
@@ -84,6 +86,10 @@ pub(crate) struct State {
     pub transfer: Option<(u64, u64)>,
     /// Quit once the worker is done.
     pub quit_pending: bool,
+    /// The signal that asked the UI to end, which it ends by once the terminal is restored.
+    pub signalled: Option<i32>,
+    /// The worker's panic, which ends the UI.
+    pub failed: Option<String>,
     pub quit: bool,
     pub cancel: Arc<AtomicBool>,
     jobs: Vec<Job>,
@@ -132,11 +138,14 @@ impl State {
             status: Status {
                 text: "type to search; ? shows the keys".to_string(),
                 error: false,
+                during_job: false,
             },
             notes: Vec::new(),
             busy: Some(Job::Load(Refresh::IfStale).describe()),
             transfer: None,
             quit_pending: false,
+            signalled: None,
+            failed: None,
             quit: false,
             cancel,
             jobs: vec![Job::Load(Refresh::IfStale)],
@@ -152,6 +161,7 @@ impl State {
         self.status = Status {
             text: text.into(),
             error: false,
+            during_job: self.busy.is_some(),
         };
     }
 
@@ -159,6 +169,7 @@ impl State {
         self.status = Status {
             text: text.into(),
             error: true,
+            during_job: self.busy.is_some(),
         };
     }
 
@@ -171,6 +182,7 @@ impl State {
         }
         self.busy = Some(job.describe());
         self.transfer = None;
+        self.status.during_job = false;
         self.jobs.push(job);
         true
     }
@@ -256,12 +268,14 @@ impl State {
             return self.modal_key(modal, key);
         }
         if control && key.code == KeyCode::Char('r') || key.code == KeyCode::F(5) {
-            if self.start(Job::Load(Refresh::Always)) {
-                self.say("refreshing the indexes of the enabled sources");
-            }
+            self.start(Job::Load(Refresh::Always));
             return;
         }
-        if key.code == KeyCode::Esc && self.transfer.is_some() {
+        if let (KeyCode::Esc, Some((done, total))) = (key.code, self.transfer) {
+            if done >= total {
+                return self
+                    .say("the download is complete: the install can no longer be cancelled");
+            }
             self.cancel.store(true, Ordering::SeqCst);
             return self.say("cancelling the download");
         }
@@ -292,15 +306,11 @@ impl State {
             KeyCode::Char('i') => self.install(),
             KeyCode::Char('u') => self.update_selected(),
             KeyCode::Char('U') => {
-                if self.start(Job::Update(None)) {
-                    self.say("updating every app installed from a source");
-                }
+                self.start(Job::Update(None));
             }
             KeyCode::Char('d') => self.ask_remove(),
             KeyCode::Char('r') => {
-                if self.start(Job::Load(Refresh::Always)) {
-                    self.say("refreshing the indexes of the enabled sources");
-                }
+                self.start(Job::Load(Refresh::Always));
             }
             KeyCode::Char('e') | KeyCode::Char(' ') if self.view == View::Sources => {
                 self.toggle_source()
@@ -378,6 +388,22 @@ impl State {
             KeyCode::Tab => self.cycle(true),
             KeyCode::BackTab => self.cycle(false),
             _ => {}
+        }
+    }
+
+    /// A signal asks the UI to end, as quitting does: once the running job ends, a download in
+    /// progress cancelled first; a second signal ends it at once.
+    pub(crate) fn signal(&mut self, signal: i32) {
+        let again = self.signalled.is_some();
+        self.signalled = Some(signal);
+        match &self.busy {
+            Some(busy) if !again => {
+                let text = format!("stopping on signal {signal} when {busy} ends");
+                self.cancel.store(true, Ordering::SeqCst);
+                self.quit_pending = true;
+                self.say(text);
+            }
+            _ => self.quit = true,
         }
     }
 
@@ -543,6 +569,10 @@ impl State {
                 self.search();
             }
             Reply::Done(result) => self.done(result),
+            Reply::Failed(message) => {
+                self.failed = Some(message);
+                self.quit = true;
+            }
         }
     }
 

@@ -3,6 +3,7 @@
 //! sends jobs and reads replies, so it never waits on the network or an install.
 
 use std::cell::{Cell, RefCell};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +17,9 @@ use crate::store::{Listed, install_package, list, remove_package, update};
 
 /// Makes the transport each job's store fetches with: HTTP, or files in tests.
 pub(crate) type Connect = Arc<dyn Fn() -> Box<dyn Fetch> + Send + Sync>;
+
+/// The worker thread's name, which its panics are known by.
+pub(crate) const NAME: &str = "uxdroid-tui-worker";
 
 pub(crate) fn http() -> Connect {
     Arc::new(|| Box::new(Http::new()))
@@ -79,6 +83,8 @@ pub(crate) enum Reply {
     /// What each version of those apps requests, as their cached indexes list it.
     Permissions(Permissions),
     Done(Result<String, String>),
+    /// The worker panicked with this message and stopped.
+    Failed(String),
 }
 
 /// Starts the worker for `data`. Setting `cancel` stops the download in progress; the worker clears
@@ -91,12 +97,26 @@ pub(crate) fn spawn(
     let (jobs, inbox) = channel::<Job>();
     let (outbox, replies) = channel();
     std::thread::Builder::new()
-        .name("uxdroid-tui-worker".to_string())
+        .name(NAME.to_string())
         .spawn(move || {
             for job in inbox {
                 cancel.store(false, Ordering::SeqCst);
-                let done = perform(&data, &connect, &cancel, &outbox, job);
-                if outbox.send(Reply::Done(done)).is_err() {
+                let done = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    perform(&data, &connect, &cancel, &outbox, job)
+                }));
+                let reply = match done {
+                    Ok(done) => Reply::Done(done),
+                    Err(panic) => {
+                        let message = panic
+                            .downcast_ref::<&str>()
+                            .map(|message| message.to_string())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "a panic without a message".to_string());
+                        let _ = outbox.send(Reply::Failed(message));
+                        break;
+                    }
+                };
+                if outbox.send(reply).is_err() {
                     break;
                 }
             }

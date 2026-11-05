@@ -42,10 +42,16 @@ pub(crate) fn draw(frame: &mut Frame, state: &State) {
         frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
         return;
     }
+    // What the user is told while a job runs gets a line above the job's own.
+    let status_lines = if state.busy.is_some() && state.status.during_job {
+        2
+    } else {
+        1
+    };
     let [tabs, body, status, hints] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(status_lines),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -110,23 +116,33 @@ fn hint(state: &State) -> String {
 }
 
 fn draw_status(frame: &mut Frame, state: &State, area: Rect) {
-    let (text, style) = match (&state.busy, state.transfer) {
-        (Some(busy), Some((done, total))) => (
-            format!(
-                "{busy}: {} of {} ({}%)",
-                size(done),
-                size(total),
-                done.saturating_mul(100) / total.max(1)
-            ),
-            Style::default().fg(Color::Yellow),
-        ),
-        (Some(busy), None) if !state.quit_pending => {
-            (format!("{busy}…"), Style::default().fg(Color::Yellow))
-        }
-        _ if state.status.error => (state.status.text.clone(), Style::default().fg(Color::Red)),
-        _ => (state.status.text.clone(), Style::default()),
+    let message = Paragraph::new(state.status.text.clone()).style(if state.status.error {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default()
+    });
+    let Some(busy) = &state.busy else {
+        frame.render_widget(message, area);
+        return;
     };
-    frame.render_widget(Paragraph::new(text).style(style), area);
+    let job = match state.transfer {
+        Some((done, total)) => format!(
+            "{busy}: {} of {} ({}%)",
+            size(done),
+            size(total),
+            done.saturating_mul(100) / total.max(1)
+        ),
+        None => format!("{busy}…"),
+    };
+    let job = Paragraph::new(job).style(Style::default().fg(Color::Yellow));
+    if state.status.during_job && area.height >= 2 {
+        let [above, below] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+        frame.render_widget(message, above);
+        frame.render_widget(job, below);
+    } else {
+        frame.render_widget(job, area);
+    }
 }
 
 fn bordered(title: String) -> Block<'static> {

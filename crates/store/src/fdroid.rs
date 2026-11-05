@@ -414,16 +414,18 @@ impl Fdroid {
                     entry.timestamp, state.timestamp
                 )));
             }
-            // A diff, or no change, keeps the fields an older cache lacks missing.
-            let complete = state.fields >= FIELDS;
-            if complete && entry.timestamp == state.timestamp {
+            // A diff, or no change, keeps what an older cache lacks missing, and a missing or
+            // unreadable `permissions.json` is not a base to merge a diff onto: either needs the
+            // whole index once.
+            let permissions = (state.fields >= FIELDS)
+                .then(|| self.read_permissions())
+                .flatten();
+            if permissions.is_some() && entry.timestamp == state.timestamp {
                 self.write_state(entry.timestamp)?;
                 return Ok(index);
             }
-            if let Some(diff) = entry
-                .diffs
-                .get(&state.timestamp.to_string())
-                .filter(|_| complete)
+            if let (Some(diff), Some(permissions)) =
+                (entry.diffs.get(&state.timestamp.to_string()), permissions)
             {
                 progress(&format!(
                     "fetching the changes to the index of {} ({} bytes)",
@@ -440,7 +442,7 @@ impl Fdroid {
                 let index: Index = serde_json::from_value(value).map_err(|error| {
                     self.untrusted(format!("its diff makes a malformed index: {error}"))
                 })?;
-                let mut value = serde_json::to_value(self.read_permissions().unwrap_or_default())
+                let mut value = serde_json::to_value(permissions)
                     .map_err(|error| Error::new(error.to_string()))?;
                 merge(&mut value, patch);
                 let permissions: PermissionIndex =

@@ -1690,6 +1690,7 @@ dependencies = [
  "ratatui",
  "serde_json",
  "sha2",
+ "signal-hook",
  "uxdroid-apk",
  "uxdroid-bridge",
  "uxdroid-store",

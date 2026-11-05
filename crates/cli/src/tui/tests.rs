@@ -3,7 +3,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -574,7 +574,14 @@ fn the_terminal_is_restored_after_a_quit_an_error_or_a_panic() {
             let mut state = State::new(dir.join("data"), Arc::new(AtomicBool::new(false)));
             state.reply(Reply::Done(Ok(String::new())));
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-            event_loop(&mut terminal, &mut state, &jobs, &replies, events)
+            event_loop(
+                &mut terminal,
+                &mut state,
+                &jobs,
+                &replies,
+                &AtomicUsize::new(0),
+                events,
+            )
         };
         (result, out.text())
     };
@@ -609,4 +616,152 @@ fn the_first_job_reads_the_cached_indexes_without_refreshing_them() {
     );
     let mut state = state;
     assert_eq!(state.take_jobs(), vec![Job::Load(Refresh::IfStale)]);
+}
+
+/// The UI with no worker, past its first index read, out of the query box, drawn at 80x24.
+fn idle(name: &str) -> (State, Terminal<TestBackend>) {
+    let dir = scratch(name);
+    let mut state = State::new(dir.join("data"), Arc::new(AtomicBool::new(false)));
+    state.take_jobs();
+    state.reply(Reply::Done(Ok(String::new())));
+    state.typing = false;
+    (state, Terminal::new(TestBackend::new(80, 24)).unwrap())
+}
+
+fn draw(state: &State, terminal: &mut Terminal<TestBackend>) -> String {
+    terminal.draw(|frame| view::draw(frame, state)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn press(state: &mut State, code: KeyCode) {
+    state.key(KeyEvent::new(code, KeyModifiers::NONE));
+}
+
+/// An install from a source, its APK half downloaded.
+fn downloading(state: &mut State) {
+    state.busy = Some("installing com.example.notes from test".to_string());
+    state.reply(Reply::Transfer(512, 1024));
+}
+
+#[test]
+fn what_the_user_is_told_during_a_download_shows_beside_its_progress() {
+    let (mut state, mut terminal) = idle("progress");
+    downloading(&mut state);
+    let screen = draw(&state, &mut terminal);
+    assert!(
+        screen.contains("installing com.example.notes from test: 512 B of 1.0 KiB (50%)"),
+        "{screen}"
+    );
+
+    press(&mut state, KeyCode::Char('q'));
+    let screen = draw(&state, &mut terminal);
+    assert!(!state.quit);
+    assert!(
+        screen.contains("quitting when installing com.example.notes from test ends"),
+        "{screen}"
+    );
+    assert!(screen.contains("(50%)"), "{screen}");
+
+    press(&mut state, KeyCode::Char('r'));
+    let screen = draw(&state, &mut terminal);
+    assert!(
+        screen.contains("wait: installing com.example.notes from test is still running"),
+        "{screen}"
+    );
+    assert!(screen.contains("(50%)"), "{screen}");
+
+    press(&mut state, KeyCode::Esc);
+    let screen = draw(&state, &mut terminal);
+    assert!(state.cancel.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(screen.contains("cancelling the download"), "{screen}");
+    assert!(screen.contains("(50%)"), "{screen}");
+}
+
+#[test]
+fn esc_after_the_download_ends_says_the_install_can_no_longer_be_cancelled() {
+    let (mut state, mut terminal) = idle("downloaded");
+    downloading(&mut state);
+    state.reply(Reply::Transfer(1024, 1024));
+    press(&mut state, KeyCode::Esc);
+    assert!(!state.cancel.load(std::sync::atomic::Ordering::SeqCst));
+    let screen = draw(&state, &mut terminal);
+    assert!(
+        screen.contains("the download is complete: the install can no longer be cancelled"),
+        "{screen}"
+    );
+}
+
+#[test]
+fn a_signal_quits_once_the_running_job_ends_and_a_second_one_at_once() {
+    let (mut state, _) = idle("signal");
+    state.signal(15);
+    assert!(state.quit, "idle: at once");
+    assert_eq!(state.signalled, Some(15));
+
+    let (mut state, mut terminal) = idle("signal-busy");
+    downloading(&mut state);
+    state.signal(1);
+    assert!(!state.quit);
+    assert!(
+        state.cancel.load(std::sync::atomic::Ordering::SeqCst),
+        "the download stops"
+    );
+    let screen = draw(&state, &mut terminal);
+    assert!(
+        screen.contains("stopping on signal 1 when installing com.example.notes from test ends"),
+        "{screen}"
+    );
+    state.reply(Reply::Done(Err(
+        "the download of com.example.notes from test was cancelled".into(),
+    )));
+    assert!(state.quit);
+    assert_eq!(state.signalled, Some(1));
+
+    let (mut state, _) = idle("signal-twice");
+    downloading(&mut state);
+    state.signal(2);
+    state.signal(2);
+    assert!(state.quit);
+}
+
+#[test]
+fn a_worker_panic_ends_the_ui_with_its_message_and_the_terminal_restored() {
+    let dir = scratch("worker-panic");
+    let connect: worker::Connect = Arc::new(|| panic!("a bug in the worker"));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (jobs, replies) = worker::spawn(dir.join("data"), connect, cancel.clone());
+    let out = Shared::default();
+    let result = {
+        let _session = Session::start(out.clone(), false).unwrap();
+        let mut state = State::new(dir.join("data"), cancel);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut state,
+            &jobs,
+            &replies,
+            &AtomicUsize::new(0),
+            &mut |_| {
+                std::thread::sleep(Duration::from_millis(10));
+                Ok(None)
+            },
+        )
+    };
+    let error = result.unwrap_err().to_string();
+    assert_eq!(error, "the store worker failed: a bug in the worker");
+    assert_eq!(out.text(), format!("{ENTER}{LEAVE}"));
+    // Its panic leaves the terminal to the UI, which restores it as it ends.
+    assert!(!super::restores_on_panic(Some("uxdroid-tui-worker")));
+    assert!(super::restores_on_panic(Some("main")));
+    assert!(super::restores_on_panic(None));
 }
