@@ -29,11 +29,21 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// Serves `root` under `/repo/` over HTTP/1.1, one connection a request, and records each path.
+/// Paths can be made to stall after their headers, or to redirect.
 struct Server {
     port: u16,
     requests: Arc<Mutex<Vec<String>>>,
+    behavior: Arc<Mutex<Vec<(String, Behavior)>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+enum Behavior {
+    /// Promises a body and never sends it.
+    Stall,
+    /// Answers 302 with this location.
+    Redirect(String),
 }
 
 impl Server {
@@ -41,16 +51,22 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let behavior = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (root, requests, stop) = (root.to_path_buf(), requests.clone(), stop.clone());
+            let (root, requests, behavior, stop) = (
+                root.to_path_buf(),
+                requests.clone(),
+                behavior.clone(),
+                stop.clone(),
+            );
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     if stop.load(Ordering::SeqCst) {
                         break;
                     }
                     if let Ok(stream) = stream {
-                        serve(stream, &root, &requests);
+                        serve(stream, &root, &requests, &behavior, &stop);
                     }
                 }
             })
@@ -58,9 +74,17 @@ impl Server {
         Self {
             port,
             requests,
+            behavior,
             stop,
             thread: Some(thread),
         }
+    }
+
+    fn behave(&self, path: &str, behavior: Behavior) {
+        self.behavior
+            .lock()
+            .unwrap()
+            .push((path.to_string(), behavior));
     }
 
     fn url(&self) -> String {
@@ -83,7 +107,13 @@ impl Drop for Server {
     }
 }
 
-fn serve(stream: TcpStream, root: &Path, requests: &Mutex<Vec<String>>) {
+fn serve(
+    stream: TcpStream,
+    root: &Path,
+    requests: &Mutex<Vec<String>>,
+    behavior: &Mutex<Vec<(String, Behavior)>>,
+    stop: &AtomicBool,
+) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
@@ -97,11 +127,36 @@ fn serve(stream: TcpStream, root: &Path, requests: &Mutex<Vec<String>>) {
     }
     let path = line.split(' ').nth(1).unwrap_or("").to_string();
     requests.lock().unwrap().push(path.clone());
+    let special = behavior
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(special, _)| *special == path)
+        .map(|(_, behavior)| behavior.clone());
+    let mut stream = stream;
+    match special {
+        Some(Behavior::Stall) => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nPK",
+            );
+            while !stop.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            return;
+        }
+        Some(Behavior::Redirect(location)) => {
+            let _ = write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            return;
+        }
+        None => {}
+    }
     let file = path
         .strip_prefix("/repo/")
         .filter(|name| !name.contains(".."))
         .map(|name| root.join(name));
-    let mut stream = stream;
     match file.and_then(|file| std::fs::read(file).ok()) {
         Some(body) => {
             let _ = write!(
@@ -384,7 +439,7 @@ fn a_third_party_repository_is_added_by_url_and_fingerprint_and_can_be_disabled_
                 "--fingerprint",
                 &zeros,
             ],
-            "error: ftp://other.org/repo is not a repository address: give an http or https URL without a query\n",
+            "error: ftp://other.org/repo is not a repository address: give an https URL without a query (plain http only for this machine, such as http://127.0.0.1)\n",
         ),
         (
             &[
@@ -713,7 +768,8 @@ fn names_from_the_index_that_could_leave_their_directory_are_never_used() {
     assert_eq!(install.status.code(), Some(1));
     assert_eq!(
         text(&install.stderr),
-        "error: no enabled source has com.example.evil: uxdroid search finds apps\n"
+        "note: com.example.evil is not a file, so it is looked up as a package name in the enabled sources\n\
+         error: no enabled source has com.example.evil: uxdroid search finds apps\n"
     );
     assert_eq!(traversal.status.code(), Some(1));
     assert_eq!(
@@ -781,7 +837,8 @@ fn install_of_a_package_takes_the_newest_version_for_this_machine_and_records_it
     assert_eq!(unfit.status.code(), Some(1));
     assert_eq!(
         text(&unfit.stderr),
-        "error: com.example.future in test has no version for x86_64 and SDK 36: its newest, 1.0 (1), needs SDK 30 or earlier\n"
+        "note: com.example.future is not a file, so it is looked up as a package name in the enabled sources\n\
+         error: com.example.future in test has no version for x86_64 and SDK 36: its newest, 1.0 (1), needs SDK 30 or earlier\n"
     );
 }
 
@@ -1131,4 +1188,206 @@ fn an_apk_path_installs_as_before_and_ends_the_apps_tie_to_its_source() {
         text(&update.stderr),
         "error: com.example.notes was installed from a file, so it has no source to update from: uxdroid install com.example.notes --from <source> installs it from one\n"
     );
+}
+
+/// Runs uxdroid as `uxdroid` does, but gives up after `seconds`: `None` when it had not finished.
+fn uxdroid_within(data: &Path, args: &[&str], seconds: u64) -> Option<Output> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_uxdroid"));
+    command
+        .args(args)
+        .arg("--data")
+        .arg(data)
+        .env("UXDROID_RUNTIME", "")
+        .env("XDG_DATA_HOME", "/nonexistent")
+        .env_remove("http_proxy")
+        .env_remove("HTTP_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("ALL_PROXY")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            return Some(child.wait_with_output().unwrap());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
+#[test]
+fn a_stalled_server_is_given_up_on_within_a_time_bound_by_what_it_may_send() {
+    let dir = scratch("stall");
+    let fixture = repository(&dir, &catalog());
+    fixture.server.behave("/repo/entry.jar", Behavior::Stall);
+    let started = std::time::Instant::now();
+
+    let output = uxdroid_within(&fixture.data, &["search", "notes"], 40)
+        .expect("the search gave up on the stalled server");
+
+    // The entry may have 256 KiB: 10 s plus that at 128 KiB/s.
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "error: cannot fetch {}/entry.jar: it did not finish within 12 s, so it was stopped\n",
+            fixture.server.url()
+        )
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}
+
+#[test]
+fn a_fresh_cache_is_read_while_another_command_holds_the_refresh_lock() {
+    let dir = scratch("lockless");
+    let fixture = repository(&dir, &catalog());
+    let first = ok(&uxdroid(&fixture.data, &["search", "notes"]));
+    let refreshing = std::fs::File::create(fixture.data.join("store/sources/test/.lock")).unwrap();
+    refreshing.lock().unwrap();
+
+    let output = uxdroid_within(&fixture.data, &["search", "notes"], 10)
+        .expect("the search did not wait for the refresh lock");
+
+    assert_eq!(ok(&output), first);
+}
+
+/// A data directory whose only enabled source is a repository nobody serves.
+fn unreachable_source(dir: &Path) -> (PathBuf, String) {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let url = format!("http://127.0.0.1:{port}/repo");
+    let data = dir.join("data");
+    ok(&uxdroid(&data, &["sources", "disable", "fdroid"]));
+    ok(&uxdroid(
+        &data,
+        &[
+            "sources",
+            "add",
+            "gone",
+            &url,
+            "--fingerprint",
+            &Key::test().fingerprint(),
+        ],
+    ));
+    (data, url)
+}
+
+#[test]
+fn a_word_that_names_no_file_is_looked_up_as_a_package_and_the_user_is_told() {
+    let dir = scratch("not-a-file");
+    let (data, url) = unreachable_source(&dir);
+
+    let output = uxdroid(&data, &["install", "com.example.typo"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.starts_with(&format!(
+            "note: com.example.typo is not a file, so it is looked up as a package name in the enabled sources\nerror: cannot fetch {url}/entry.jar: "
+        )),
+        "{stderr}"
+    );
+    // Named as a package, it needs no explanation.
+    let named = uxdroid(&data, &["install", "com.example.typo", "--from", "gone"]);
+    assert!(
+        text(&named.stderr).starts_with("error: cannot fetch"),
+        "{}",
+        text(&named.stderr)
+    );
+}
+
+#[test]
+fn a_first_lookup_that_fails_leaves_no_store_state() {
+    let dir = scratch("no-state");
+    let (data, _) = unreachable_source(&dir);
+    let fresh = dir.join("fresh");
+    std::fs::create_dir_all(fresh.join("store")).unwrap();
+    std::fs::copy(
+        data.join("store/sources.json"),
+        fresh.join("store/sources.json"),
+    )
+    .unwrap();
+
+    let install = uxdroid(&data, &["install", "com.example.none"]);
+    let search = uxdroid(&fresh, &["search", "notes"]);
+
+    assert_eq!(install.status.code(), Some(1));
+    assert_eq!(search.status.code(), Some(1));
+    assert_eq!(listing(&data.join("store")), [".lock", "sources.json"]);
+    assert_eq!(listing(&fresh.join("store")), ["sources.json"]);
+}
+
+#[test]
+fn a_repository_over_plain_http_is_refused_unless_it_is_on_this_machine() {
+    let data = scratch("http").join("data");
+    let fingerprint = Key::test().fingerprint();
+
+    let remote = uxdroid(
+        &data,
+        &[
+            "sources",
+            "add",
+            "plain",
+            "http://example.org/repo",
+            "--fingerprint",
+            &fingerprint,
+        ],
+    );
+
+    assert_eq!(remote.status.code(), Some(1));
+    assert_eq!(
+        text(&remote.stderr),
+        "error: http://example.org/repo is not a repository address: give an https URL without a query (plain http only for this machine, such as http://127.0.0.1)\n"
+    );
+    for (name, url) in [
+        ("loopback", "http://127.0.0.1:8080/repo"),
+        ("localhost", "http://localhost/repo"),
+        ("six", "http://[::1]:8080/repo"),
+        ("secure", "https://example.org/repo"),
+    ] {
+        ok(&uxdroid(
+            &data,
+            &["sources", "add", name, url, "--fingerprint", &fingerprint],
+        ));
+    }
+    let lookalike = uxdroid(
+        &data,
+        &[
+            "sources",
+            "add",
+            "fake",
+            "http://127.0.0.1.example.org/repo",
+            "--fingerprint",
+            &fingerprint,
+        ],
+    );
+    assert_eq!(lookalike.status.code(), Some(1));
+}
+
+#[test]
+fn a_plain_http_repository_that_redirects_is_refused() {
+    let dir = scratch("redirect");
+    let fixture = repository(&dir, &catalog());
+    fixture.server.behave(
+        "/repo/entry.jar",
+        Behavior::Redirect(format!("{}/index-v2.json", fixture.server.url())),
+    );
+
+    let output = uxdroid(&fixture.data, &["search", "notes"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "error: cannot fetch {}/entry.jar: it redirects, and a plain http address may not\n",
+            fixture.server.url()
+        )
+    );
+    assert_eq!(fixture.server.take(), ["/repo/entry.jar"]);
 }

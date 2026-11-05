@@ -436,11 +436,31 @@ impl Drop for Unpacked {
 }
 
 /// Opens each APK given, so one that cannot be read is reported before anything is written.
+/// The most this install copies of one file given: the size of the largest entry a bundle may
+/// unpack, far beyond any real APK. Anything larger, such as `/dev/zero`, is refused.
+const MAX_GIVEN_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+fn too_large(apk: &Path) -> String {
+    format!(
+        "{} is larger than the {MAX_GIVEN_BYTES} bytes an APK or bundle may have, so it is refused",
+        apk.display()
+    )
+}
+
+/// Opens each APK given, so one that cannot be read, or a file too large to be one, is reported
+/// before anything is written.
 fn open_all(apks: &[&Path]) -> Result<Vec<std::fs::File>, String> {
     apks.iter()
         .map(|apk| {
-            std::fs::File::open(apk)
-                .map_err(|error| format!("cannot read APK {}: {error}", apk.display()))
+            let file = std::fs::File::open(apk)
+                .map_err(|error| format!("cannot read APK {}: {error}", apk.display()))?;
+            if file
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() > MAX_GIVEN_BYTES)
+            {
+                return Err(too_large(apk));
+            }
+            Ok(file)
         })
         .collect()
 }
@@ -455,12 +475,18 @@ fn copy_hashing(mut source: std::fs::File, from: &Path, to: &Path) -> Result<Str
         .map_err(|error| cannot(to, error))?;
     let mut hash = Sha256::new();
     let mut buffer = vec![0; 256 * 1024];
+    let mut total = 0u64;
     loop {
         let read = source
             .read(&mut buffer)
             .map_err(|error| format!("cannot read APK {}: {error}", from.display()))?;
         if read == 0 {
             break;
+        }
+        // A file that is not regular, such as a device or a pipe, has no size to check first.
+        total += read as u64;
+        if total > MAX_GIVEN_BYTES {
+            return Err(too_large(from));
         }
         hash.update(&buffer[..read]);
         copy.write_all(&buffer[..read])

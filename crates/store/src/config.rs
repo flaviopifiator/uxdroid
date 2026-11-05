@@ -82,12 +82,28 @@ pub fn valid_source_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-/// A repository address: http or https, printable, with no query, fragment or final `/`.
+/// Whether `host`, as a URL names it with its port, is this machine.
+fn loopback(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    name == "localhost"
+        || name == "::1"
+        || name.strip_prefix("127.").is_some_and(|rest| {
+            rest.split('.').count() == 3 && rest.split('.').all(|part| part.parse::<u8>().is_ok())
+        })
+}
+
+/// A repository address: https, or http only on this machine, printable, with no query, fragment or
+/// final `/`. Signatures protect what a repository serves, but over plain http anyone on the way
+/// sees which apps a user looks at.
 pub fn normalize_url(url: &str) -> Result<String, Error> {
     let url = url.trim_end_matches('/');
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"));
+    let rest = url.strip_prefix("https://").or_else(|| {
+        url.strip_prefix("http://")
+            .filter(|rest| loopback(rest.split('/').next().unwrap_or_default()))
+    });
     let valid = rest.is_some_and(|rest| {
         !rest.is_empty() && !rest.starts_with('/') && !rest.contains(['?', '#', '\\'])
     }) && url.len() <= MAX_URL
@@ -96,7 +112,7 @@ pub fn normalize_url(url: &str) -> Result<String, Error> {
         Ok(url.to_string())
     } else {
         Err(Error::new(format!(
-            "{} is not a repository address: give an http or https URL without a query",
+            "{} is not a repository address: give an https URL without a query (plain http only for this machine, such as http://127.0.0.1)",
             url.escape_debug()
         )))
     }

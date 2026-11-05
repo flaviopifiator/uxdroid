@@ -26,8 +26,9 @@ use crate::config::SourceConfig;
 use crate::fetch::Fetch;
 use crate::{App, Error, Refresh, Release, valid_package, write_atomically};
 
-/// Entries seen are a few KiB; the limit only stops a hostile server.
-const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
+/// Entries seen are a few KiB (F-Droid's, with 30 days of diffs, 2.6 KiB); the limit only stops a
+/// hostile server, and with it the time a fetch of the entry may take.
+const MAX_ENTRY_BYTES: u64 = 256 * 1024;
 /// F-Droid's whole index is 72 MB in November 2026.
 const MAX_INDEX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILE_NAME: usize = 512;
@@ -386,21 +387,38 @@ impl Fdroid {
         max_age_hours: u64,
         progress: &dyn Fn(&str),
     ) -> Result<Loaded, Error> {
+        let fresh = |cached: &Option<(State, Index)>| {
+            cached.as_ref().is_some_and(|(state, _)| {
+                now().saturating_sub(state.checked) < max_age_hours.saturating_mul(3600)
+            })
+        };
+        // A fresh cache is read without the lock, so a refresh that runs long elsewhere never
+        // keeps other commands waiting; its files are replaced by renames, never written in place.
+        if refresh == Refresh::IfStale {
+            let cached = self.read_cache();
+            if fresh(&cached) {
+                let (_, index) = cached.expect("a fresh cache exists");
+                return Ok(Loaded {
+                    apps: self.apps(index),
+                    note: None,
+                });
+            }
+        }
+        // What this refresh creates, so a first one that fails leaves no trace.
+        let created: Vec<PathBuf> = self
+            .cache
+            .ancestors()
+            .take_while(|directory| !directory.exists())
+            .map(Path::to_path_buf)
+            .collect();
         std::fs::create_dir_all(&self.cache).map_err(|error| {
             Error::new(format!("cannot write {}: {error}", self.cache.display()))
         })?;
-        let _lock = crate::lock(&self.cache.join(".lock"))?;
+        let lock = crate::lock(&self.cache.join(".lock"))?;
+        // Another command may have refreshed it while this one waited for the lock.
         let cached = self.read_cache();
-        let age = cached
-            .as_ref()
-            .map(|(state, _)| now().saturating_sub(state.checked));
-        let stale = age.is_none_or(|age| age >= max_age_hours.saturating_mul(3600));
-        let wanted = match refresh {
-            Refresh::Always => true,
-            Refresh::IfStale => stale,
-        };
-        if !wanted {
-            let (_, index) = cached.expect("a cache that is not stale exists");
+        if refresh == Refresh::IfStale && fresh(&cached) {
+            let (_, index) = cached.expect("a fresh cache exists");
             return Ok(Loaded {
                 apps: self.apps(index),
                 note: None,
@@ -428,7 +446,16 @@ impl Fdroid {
                     )),
                 })
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                if created.contains(&self.cache) {
+                    let _ = std::fs::remove_file(self.cache.join(".lock"));
+                }
+                drop(lock);
+                for directory in &created {
+                    let _ = std::fs::remove_dir(directory);
+                }
+                Err(error)
+            }
         }
     }
 

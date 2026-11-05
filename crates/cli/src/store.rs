@@ -101,6 +101,12 @@ fn file_like(word: &str) -> bool {
         .any(|extension| word.ends_with(extension))
 }
 
+/// Whether `uxdroid install` takes a package only because no file has that name, which the user is
+/// told, since a mistyped file name would otherwise look like a package nobody offers.
+fn package_for_want_of_a_file(parsed: &Args) -> bool {
+    !parsed.has("--from") && !parsed.has("--refresh")
+}
+
 /// Whether `uxdroid install` was given a package to find in the sources rather than files: one word
 /// that is a package name and no existing file, or `--from`.
 pub(crate) fn names_a_package(args: &[OsString]) -> bool {
@@ -371,6 +377,11 @@ pub(crate) fn run_install_package(args: &[OsString]) -> ExitCode {
     };
     if file_like(package) {
         return fail(INSTALL_USAGE, EXIT_USAGE);
+    }
+    if package_for_want_of_a_file(&parsed) {
+        note(&format!(
+            "{package} is not a file, so it is looked up as a package name in the enabled sources"
+        ));
     }
     let from = match parsed.value("--from").map(|from| from.to_str()) {
         None => None,
