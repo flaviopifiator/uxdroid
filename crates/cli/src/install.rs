@@ -1,9 +1,11 @@
-//! `uxdroid install`: the installer's part for an app the framework launcher starts. It puts the APK's
-//! native libraries where `ApplicationInfo.nativeLibraryDir` points, `<data>/data/<package>/lib`, and
-//! records the ABI it chose. With the framework's runtime at hand it also prepares the app's code
-//! directory, `<data>/app/<package>`, as Android's installer does: the APK as `base.apk`, its DEX
-//! compiled beside it, the framework's parse of its manifest, and its library of default bodies. A
-//! start then only maps what is there.
+//! `uxdroid install`: the installer's part for an app the framework launcher starts. It verifies the
+//! signature of every APK given, and that an update is signed as the installed app is. It puts the
+//! APK's native libraries where `ApplicationInfo.nativeLibraryDir` points, `<data>/data/<package>/lib`,
+//! and records the ABI it chose. An app delivered as a base APK plus splits, as files or as a bundle,
+//! gets the splits that fit this machine, as `split_<name>.apk` beside `base.apk` in its code
+//! directory, `<data>/app/<package>`. With the framework's runtime at hand it also prepares that
+//! directory as Android's installer does: the DEX compiled beside the APKs, the framework's parse of
+//! the manifest, and the library of default bodies. A start then only maps what is there.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -11,7 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use uxdroid_apk::{ExecutionPath, extract_native_libs, host_abi, inspect};
+use uxdroid_apk::{
+    ExecutionPath, Host, Kind, Part, Plan, Scheme, bundle_entries, extract_bundled,
+    extract_native_libs, host_abi, inspect, plan_splits, verify_signature,
+};
 
 use crate::runtime::{boot_class_path, default_runtime, failure, runtime_environment};
 use crate::{EXIT_FAILURE, EXIT_USAGE, INSTALL_USAGE, fail, print};
@@ -24,6 +29,11 @@ const INSTALLER_CLASS: &str = "dev.uxdroid.system.Installer";
 /// what the largest app measured needs (RustDesk compiles in under a second), so only a hung program
 /// is stopped, and other installs of the package are not kept waiting forever.
 const STEP_LIMIT: Duration = Duration::from_secs(600);
+/// The density the framework reports, `DisplayService.DENSITY` in system/java: density splits are
+/// chosen for it.
+const HOST_DENSITY: u32 = 160;
+/// Android 11: apps targeting it or later need a v2 or later signature.
+const V2_REQUIRED_FROM_SDK: u32 = 30;
 
 /// Runs `command` as `Command::output` does, but stops it after `limit`.
 fn output_within(command: &mut Command, what: &str, limit: Duration) -> Result<Output, String> {
@@ -88,20 +98,26 @@ pub(crate) fn valid_package(package: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'_')
 }
 
-fn parse(args: &[OsString]) -> Option<(&Path, &Path)> {
+fn parse(args: &[OsString]) -> Option<(Vec<&Path>, &Path)> {
     match args {
-        [apk, flag, data] if flag == "--data" && !apk.as_encoded_bytes().starts_with(b"--") => {
-            Some((Path::new(apk), Path::new(data)))
+        [apks @ .., flag, data]
+            if flag == "--data"
+                && !apks.is_empty()
+                && apks
+                    .iter()
+                    .all(|apk| !apk.as_encoded_bytes().starts_with(b"--")) =>
+        {
+            Some((apks.iter().map(Path::new).collect(), Path::new(data)))
         }
         _ => None,
     }
 }
 
 pub fn run_install(args: &[OsString]) -> ExitCode {
-    let Some((apk, data)) = parse(args) else {
+    let Some((apks, data)) = parse(args) else {
         return fail(INSTALL_USAGE, EXIT_USAGE);
     };
-    match install(apk, data) {
+    match install(&apks, data) {
         Ok((report, note)) => {
             if let Some(note) = note {
                 let _ = fail(&format!("note: {note}"), 0);
@@ -187,24 +203,55 @@ fn framework_runtime() -> Framework {
     }
 }
 
-/// Prepares the code directory `staged`, which becomes `code`: the APK, the record and default bodies
-/// the framework's installer writes, and the DEX compiled. Returns the launcher Activity and the number
-/// of default bodies.
+/// Copies `from` to `to`. A read-only APK must not make its copy impossible to replace, so contents
+/// are copied, not mode.
+fn copy_apk(from: &Path, to: &Path) -> Result<(), String> {
+    let mut source = std::fs::File::open(from)
+        .map_err(|error| format!("cannot read APK {}: {error}", from.display()))?;
+    let mut copy = std::fs::File::create(to).map_err(|error| cannot(to, error))?;
+    std::io::copy(&mut source, &mut copy).map_err(|error| cannot(to, error))?;
+    Ok(())
+}
+
+/// Fills the code directory `staged` with the base APK as `base.apk` and each split as
+/// `split_<name>.apk`, and, when there are splits, their names in `splits`, in the order Android
+/// lists them.
+fn stage_code(staged: &Path, parts: &[Part], plan: &Plan) -> Result<(), String> {
+    std::fs::create_dir_all(staged).map_err(|error| cannot(staged, error))?;
+    copy_apk(&parts[plan.base].path, &staged.join("base.apk"))?;
+    let mut record = String::new();
+    for (index, _) in &plan.chosen {
+        let name = split_name(&parts[*index]);
+        copy_apk(
+            &parts[*index].path,
+            &staged.join(format!("split_{name}.apk")),
+        )?;
+        record.push_str(name);
+        record.push('\n');
+    }
+    if !record.is_empty() {
+        let path = staged.join("splits");
+        std::fs::write(&path, record).map_err(|error| cannot(&path, error))?;
+    }
+    Ok(())
+}
+
+fn split_name(part: &Part) -> &str {
+    part.apk.manifest.split.as_deref().unwrap_or_default()
+}
+
+/// Prepares the code directory `staged`, which becomes `code` and already holds the APKs: the record
+/// and default bodies the framework's installer writes, and the DEX of the base and of each split in
+/// `with_code` compiled. Returns the launcher Activity and the number of default bodies.
 fn prepare(
     runtime: &Path,
-    apk: &Path,
     staged: &Path,
     code: &Path,
     data: &Path,
+    with_code: &[&str],
 ) -> Result<(String, u64), String> {
     let base = staged.join("base.apk");
     std::fs::create_dir_all(staged.join("oat/x86_64")).map_err(|error| cannot(staged, error))?;
-    // A read-only APK must not make its copy impossible to replace, so contents are copied, not mode.
-    let mut source = std::fs::File::open(apk)
-        .map_err(|error| format!("cannot read APK {}: {error}", apk.display()))?;
-    let mut copy = std::fs::File::create(&base).map_err(|error| cannot(&base, error))?;
-    std::io::copy(&mut source, &mut copy).map_err(|error| cannot(&base, error))?;
-    drop(copy);
 
     std::fs::create_dir_all(data.join("dalvik-cache/x86_64"))
         .map_err(|error| cannot(data, error))?;
@@ -257,55 +304,234 @@ fn prepare(
         .map_err(|_| "the framework installer printed a bad count".to_string())?;
 
     // The app's class loader has the framework's as its parent, so the code is compiled against it.
-    let mut dex2oat = Command::new(runtime.join("bin/dex2oat64"));
-    dex2oat
-        .arg(format!("--compiler-filter={COMPILER_FILTER}"))
-        .arg("--instruction-set=x86_64")
-        .arg("--host")
-        .arg(format!("--android-root={}", runtime.display()))
-        .args(["--runtime-arg", &format!("-Xbootclasspath:{boot}")])
-        .args([
-            "--runtime-arg",
-            &format!("-Xbootclasspath-locations:{boot}"),
-        ])
-        .arg(format!(
-            "--boot-image={}",
-            runtime.join("framework/boot.art").display()
-        ))
-        .arg(format!("--class-loader-context=PCL[];PCL[{framework}]"))
-        .arg(format!("--dex-file={}", base.display()))
-        .arg(format!(
-            "--dex-location={}",
-            code.join("base.apk").display()
-        ))
-        .arg(format!(
-            "--oat-file={}",
-            staged.join("oat/x86_64/base.odex").display()
-        ));
-    runtime_environment(&mut dex2oat, runtime, data, &library_path);
-    let output = output_within(&mut dex2oat, "dex2oat", STEP_LIMIT)?;
-    if !output.status.success() {
-        return Err(format!("dex2oat failed: {}", failure(&output.stderr, &[])));
+    // A split's code joins the base's loader after the base and the splits before it, as Android
+    // loads splits that are not isolated. As installd does, those are named relative to the directory
+    // dex2oat reads them from, since their installed paths do not exist yet; ART matches them by name.
+    let mut earlier: Vec<String> = Vec::new();
+    for file in std::iter::once("base".to_string())
+        .chain(with_code.iter().map(|name| format!("split_{name}")))
+    {
+        let location = code.join(format!("{file}.apk"));
+        let mut dex2oat = Command::new(runtime.join("bin/dex2oat64"));
+        dex2oat
+            .arg(format!("--compiler-filter={COMPILER_FILTER}"))
+            .arg("--instruction-set=x86_64")
+            .arg("--host")
+            .arg(format!("--android-root={}", runtime.display()))
+            .args(["--runtime-arg", &format!("-Xbootclasspath:{boot}")])
+            .args([
+                "--runtime-arg",
+                &format!("-Xbootclasspath-locations:{boot}"),
+            ])
+            .arg(format!(
+                "--boot-image={}",
+                runtime.join("framework/boot.art").display()
+            ))
+            .arg(format!(
+                "--class-loader-context=PCL[{}];PCL[{framework}]",
+                earlier.join(":")
+            ))
+            .arg(format!(
+                "--dex-file={}",
+                staged.join(format!("{file}.apk")).display()
+            ))
+            .arg(format!("--dex-location={}", location.display()))
+            .arg(format!(
+                "--oat-file={}",
+                staged.join(format!("oat/x86_64/{file}.odex")).display()
+            ));
+        if !earlier.is_empty() {
+            dex2oat.arg(format!("--classpath-dir={}", staged.display()));
+        }
+        runtime_environment(&mut dex2oat, runtime, data, &library_path);
+        let output = output_within(&mut dex2oat, "dex2oat", STEP_LIMIT)?;
+        if !output.status.success() {
+            return Err(format!("dex2oat failed: {}", failure(&output.stderr, &[])));
+        }
+        earlier.push(format!("{file}.apk"));
     }
     Ok((launcher, defaults))
 }
 
+/// A directory of `<data>/app` that holds APKs unpacked from bundles while this install runs. The
+/// lock on its `lock` file says it is in use, so an install can tell what a dead one left.
+struct Unpacked {
+    directory: PathBuf,
+    _lock: std::fs::File,
+}
+
+impl Unpacked {
+    fn new(data: &Path) -> Result<Self, String> {
+        let apps = data.join("app");
+        std::fs::create_dir_all(&apps).map_err(|error| cannot(&apps, error))?;
+        if let Ok(entries) = std::fs::read_dir(&apps) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !entry.file_name().to_string_lossy().starts_with(".unpack-") {
+                    continue;
+                }
+                let free = std::fs::File::open(path.join("lock"))
+                    .map(|file| file.try_lock().is_ok())
+                    .unwrap_or(true);
+                if free {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            }
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| time.as_nanos());
+        // The directory takes its swept name only once its lock is held, so another install never
+        // sees it unlocked.
+        let name = format!("unpack-{}-{stamp}", std::process::id());
+        let staging = apps.join(format!(".staging-{name}"));
+        std::fs::create_dir(&staging).map_err(|error| cannot(&staging, error))?;
+        let path = staging.join("lock");
+        let lock = std::fs::File::create(&path).map_err(|error| cannot(&path, error))?;
+        lock.lock()
+            .map_err(|error| format!("cannot lock {}: {error}", path.display()))?;
+        let directory = apps.join(format!(".{name}"));
+        std::fs::rename(&staging, &directory).map_err(|error| cannot(&directory, error))?;
+        Ok(Self {
+            directory,
+            _lock: lock,
+        })
+    }
+}
+
+impl Drop for Unpacked {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// Reads and verifies every APK given, unpacking bundles into `unpacked`.
+fn gather(
+    apks: &[&Path],
+    data: &Path,
+    unpacked: &mut Option<Unpacked>,
+) -> Result<Vec<Part>, String> {
+    let read = |origin: String, path: PathBuf| -> Result<Part, String> {
+        // As Android does, the signature is checked before anything of the APK is parsed.
+        let signature = verify_signature(&path).map_err(|error| match error {
+            uxdroid_apk::Error::Unsigned | uxdroid_apk::Error::BadSignature(_) => {
+                format!("{origin}: {error}")
+            }
+            other => other.to_string(),
+        })?;
+        let apk = inspect(&path).map_err(|error| error.to_string())?;
+        // Android 11 stopped accepting a JAR signature alone from apps that target it or later.
+        let target = apk
+            .manifest
+            .target_sdk
+            .as_deref()
+            .and_then(|sdk| sdk.parse::<u32>().ok());
+        if let Some(target) = target.filter(|target| *target >= V2_REQUIRED_FROM_SDK)
+            && signature.scheme == Scheme::V1
+        {
+            return Err(format!(
+                "{origin}: it targets SDK {target}, which needs a v2 or later signature, and it has only v1"
+            ));
+        }
+        Ok(Part {
+            origin,
+            path,
+            apk,
+            signature,
+        })
+    };
+    let mut parts = Vec::new();
+    for apk in apks {
+        let Some(entries) = bundle_entries(apk).map_err(|error| match error {
+            uxdroid_apk::Error::Splits(reason) => format!("{}: {reason}", apk.display()),
+            other => other.to_string(),
+        })?
+        else {
+            parts.push(read(apk.display().to_string(), apk.to_path_buf())?);
+            continue;
+        };
+        let directory = match unpacked {
+            Some(unpacked) => unpacked.directory.clone(),
+            None => unpacked.insert(Unpacked::new(data)?).directory.clone(),
+        };
+        for entry in entries {
+            let path = directory.join(format!("{}.apk", parts.len()));
+            extract_bundled(apk, &entry, &path).map_err(|error| error.to_string())?;
+            parts.push(read(
+                format!("{}!{}", apk.display(), entry.escape_debug()),
+                path,
+            )?);
+        }
+    }
+    Ok(parts)
+}
+
+/// The languages of this user's locale, as `LANGUAGE` and the locale variables name them; English
+/// when none is set.
+fn host_languages() -> Vec<String> {
+    let language = |locale: &str| {
+        locale
+            .split(['_', '.', '@', '-'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
+    let mut languages: Vec<String> = Vec::new();
+    if let Some(locale) =
+        locale.filter(|locale| locale != "C" && locale != "POSIX" && !locale.starts_with("C."))
+    {
+        let preferred = std::env::var("LANGUAGE").unwrap_or_default();
+        for item in preferred.split(':').chain([locale.as_str()]) {
+            let code = language(item);
+            if !code.is_empty() && !languages.contains(&code) {
+                languages.push(code);
+            }
+        }
+    }
+    if languages.is_empty() {
+        languages.push("en".to_string());
+    }
+    languages
+}
+
+fn describe(list: &[(String, Kind)]) -> String {
+    list.iter()
+        .map(|(name, kind)| format!("{} ({kind})", name.escape_debug()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 type Report = (String, Option<String>);
 
-fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
+fn install(apks: &[&Path], data: &Path) -> Result<Report, String> {
     if !data.is_absolute() {
         return Err(format!(
             "the data directory must be absolute, not {}",
             data.display()
         ));
     }
-    let apk = inspect(apk_path).map_err(|error| error.to_string())?;
-    let package = &apk.manifest.package;
+    let mut unpacked = None;
+    let parts = gather(apks, data, &mut unpacked)?;
+    let abi = host_abi();
+    let host = Host {
+        abi: abi.to_string(),
+        density: HOST_DENSITY,
+        languages: host_languages(),
+    };
+    let plan = plan_splits(&parts, &host).map_err(|error| error.to_string())?;
+    let base = &parts[plan.base];
+    let package = &base.apk.manifest.package;
     if !valid_package(package) {
         return Err(format!("bad package name {}", package.escape_debug()));
     }
-    let abi = host_abi();
-    if let ExecutionPath::NeedsAbiBridge(abis) = apk.execution_path(abi) {
+    let abi_split = plan
+        .chosen
+        .iter()
+        .any(|(_, kind)| matches!(kind, Kind::Abi(_)));
+    if !abi_split && let ExecutionPath::NeedsAbiBridge(abis) = base.apk.execution_path(abi) {
         return Err(format!(
             "this APK has native code only for {}, and running it on {abi} needs translation, which is not built yet",
             abis.join(", ").escape_debug()
@@ -318,6 +544,23 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
     let libraries = app_dir.join("lib");
     let apps = data.join("app");
     let code = apps.join(package);
+    let signer = apps.join(format!(".{package}.signer"));
+    let fingerprints = base.signature.fingerprints();
+    match std::fs::read_to_string(&signer) {
+        Ok(installed) => {
+            let installed: Vec<&str> = installed.lines().collect();
+            if installed != fingerprints {
+                return Err(format!(
+                    "{} is installed signed by a different certificate, so this update is refused: installed {}, update {}",
+                    package.escape_debug(),
+                    installed.join(", ").escape_debug(),
+                    fingerprints.join(", ")
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot read {}: {error}", signer.display())),
+    }
     remove_leftovers(
         &app_dir,
         &[".lib-".into(), ".abi-".into(), ".old-lib-".into()],
@@ -330,19 +573,36 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
     // Staged beside their final places and renamed into place.
     let staging = app_dir.join(format!(".lib-{pid}"));
     let staged_code = apps.join(format!(".{package}.new-{pid}"));
+    let staged_signer = apps.join(format!(".{package}.new-signer-{pid}"));
     let pending = app_dir.join(format!(".abi-{pid}"));
     let old_libraries = app_dir.join(format!(".old-lib-{pid}"));
     let old_code = apps.join(format!(".{package}.old-{pid}"));
+    let old_signer = apps.join(format!(".{package}.old-signer-{pid}"));
     let record = app_dir.join("abi");
     let runtime = framework_runtime();
+    let with_code: Vec<&str> = plan
+        .chosen
+        .iter()
+        .filter(|(index, _)| parts[*index].apk.dex.files > 0)
+        .map(|(index, _)| split_name(&parts[*index]))
+        .collect();
 
     let result = (|| {
         std::fs::create_dir_all(&staging).map_err(|error| cannot(&staging, error))?;
-        let count =
-            extract_native_libs(apk_path, abi, &staging).map_err(|error| error.to_string())?;
+        let mut count =
+            extract_native_libs(&base.path, abi, &staging).map_err(|error| error.to_string())?;
+        for (index, _) in &plan.chosen {
+            count += extract_native_libs(&parts[*index].path, abi, &staging)
+                .map_err(|error| error.to_string())?;
+        }
+        // Splits are part of the app even when nothing is prepared, so they get a code directory.
+        let staged = matches!(runtime, Framework::Found(_)) || !plan.chosen.is_empty();
+        if staged {
+            stage_code(&staged_code, &parts, &plan)?;
+        }
         let prepared = match &runtime {
             Framework::Found(runtime) => Some(
-                prepare(runtime, apk_path, &staged_code, &code, data).map_err(|error| {
+                prepare(runtime, &staged_code, &code, data, &with_code).map_err(|error| {
                     format!(
                         "cannot prepare {} for the framework: {error}",
                         package.escape_debug()
@@ -352,6 +612,10 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
             Framework::Missing(_) | Framework::Unknown(_) => None,
         };
         std::fs::write(&pending, format!("{abi}\n")).map_err(|error| cannot(&pending, error))?;
+        let mut fingerprint_record = fingerprints.join("\n");
+        fingerprint_record.push('\n');
+        std::fs::write(&staged_signer, fingerprint_record)
+            .map_err(|error| cannot(&staged_signer, error))?;
 
         let mut renames = Renames::default();
         let swap = (|| {
@@ -363,9 +627,13 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
             if code.exists() {
                 renames.rename(&code, &old_code)?;
             }
-            if prepared.is_some() {
+            if staged {
                 renames.rename(&staged_code, &code)?;
             }
+            if signer.exists() {
+                renames.rename(&signer, &old_signer)?;
+            }
+            renames.rename(&staged_signer, &signer)?;
             renames.rename(&pending, &record)
         })();
         if let Err(error) = swap {
@@ -375,9 +643,12 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
         Ok((count, prepared))
     })();
     let _ = std::fs::remove_file(&pending);
+    let _ = std::fs::remove_file(&staged_signer);
+    let _ = std::fs::remove_file(&old_signer);
     for leftover in [&staging, &staged_code, &old_libraries, &old_code] {
         let _ = std::fs::remove_dir_all(leftover);
     }
+    drop(unpacked);
     let (count, prepared) = result?;
 
     let mut report = format!(
@@ -385,6 +656,26 @@ fn install(apk_path: &Path, data: &Path) -> Result<Report, String> {
         package.escape_debug(),
         libraries.display()
     );
+    if !plan.chosen.is_empty() || !plan.skipped.is_empty() {
+        let chosen: Vec<(String, Kind)> = plan
+            .chosen
+            .iter()
+            .map(|(index, kind)| (split_name(&parts[*index]).to_string(), kind.clone()))
+            .collect();
+        report.push_str(&format!(
+            "installed splits of {}: {}",
+            package.escape_debug(),
+            if chosen.is_empty() {
+                "none".to_string()
+            } else {
+                describe(&chosen)
+            }
+        ));
+        if !plan.skipped.is_empty() {
+            report.push_str(&format!("; skipped {}", describe(&plan.skipped)));
+        }
+        report.push('\n');
+    }
     let note = match (prepared, runtime) {
         (Some((launcher, defaults)), _) => {
             report.push_str(&format!(

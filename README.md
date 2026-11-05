@@ -108,6 +108,9 @@ docker compose run --rm -T dev bash /work/runtime/framework/compose_smoke.sh
 # system services the corpus asks for, startActivityForResult results, broadcasts to registered and
 # manifest receivers (alarms included), network callbacks, GLES 3.1 and 3.2, and a PC's features.
 docker compose run --rm -T dev bash /work/runtime/framework/compat_smoke.sh
+# An app delivered as a base APK and a feature split: the split's code, compiled at install, and its
+# resources are the app's, from the install record and from a parse of the code directory.
+docker compose run --rm -T dev bash /work/runtime/framework/split_smoke.sh
 # RustDesk 1.5.1's x86_64 build (Flutter) to its first frame, then a click and typed text. Its code
 # is untrusted: sandbox only.
 docker compose run --rm dev cargo build --release -p uxdroid-system -p uxdroid-nativebridge -p uxdroid-cli
@@ -157,12 +160,39 @@ Exit codes: `1` it cannot start, `2` wrong usage. Once started, the process is t
 UXDROID_RUNTIME=/runtime/art uxdroid install app.apk --data /path/to/android-data
 ```
 
+Every APK is verified before anything is installed, as Android's installer does: the APK Signature Scheme v3 or v2 signature when it has one (v3.1 and v3 signers are chosen for SDK 36), otherwise its JAR signature (v1), which Android accepts alone only from apps targeting SDK 29 or older. Signers with RSA keys up to 4096 bits or EC P-256 and P-384 keys verify; DSA and the verity-only algorithms do not, and ZIP64 archives are refused. The SHA-256 of each signer's certificate, as `apksigner verify --print-certs` prints it, is recorded in `<data>/app/.<package>.signer`, and an update signed by other certificates is refused, keeping the installed app. Key rotation (v3 proof-of-rotation) is not followed yet, so an update signed with a rotated key is refused too. An app installed before signers were recorded takes the next install's signer.
+
+| Error | Meaning |
+|-------|---------|
+| `<apk>: it is not signed, and Android installs only signed APKs` | No v2, v3 or JAR signature |
+| `<apk>: its signature does not verify: <reason>` | Damaged, changed after signing, or a stronger signature stripped |
+| `<apk>: it targets SDK <n>, which needs a v2 or later signature, and it has only v1` | Android 11 and later refuse it too |
+| `<package> is installed signed by a different certificate, so this update is refused: installed <sha256>, update <sha256>` | The installed app stays as it was |
+
+An app delivered as a base APK plus split APKs, as Google Play delivers App Bundles, installs from its files or from one bundle: a `.apks` written by bundletool or exported by an installer, or an `.xapk`. Inside a bundle, an APK is any entry ending in `.apk`; with bundletool's table of contents, `toc.pb`, only the variant for the highest minimum SDK up to 36 is used, and standalone APKs for old systems are ignored when splits are there. Other files, such as an `.xapk`'s OBB expansion files, are not installed. Bundles are unpacked into `<data>/app/.unpack-*` and removed after the install.
+
+```sh
+uxdroid install base.apk split_config.x86_64.apk split_config.en.apk --data /path/to/android-data
+uxdroid install app.apks --data /path/to/android-data
+```
+
+The APKs must make one app: exactly one base APK, splits of its package and `versionCode` with unique names, each signed by the base's certificates, a configuration split only for a feature split that is given, and every split type the base requires (`android:requiredSplitTypes`, or `android:isSplitRequired` with no split at all). All feature splits given are installed. Configuration splits are chosen as Play chooses them for a device, by their bundletool names: the ABI split for this CPU (none for it is refused, as an APK only for another CPU is), the density split closest above 160 dpi, the screen density the framework reports, or else the highest, the language splits of the user's locale (`LANGUAGE`, then `LC_ALL`, `LC_MESSAGES` or `LANG`; English for none or `C`), and any whose purpose the name does not tell. The chosen splits go beside `base.apk` in the code directory as `split_<name>.apk`, their names in `<data>/app/<package>/splits`, one per line, sorted, even without a framework; their native libraries join the base's in `lib`. The launcher gives them to the app as Android does, in `ApplicationInfo.splitNames` and `splitSourceDirs`, so the framework's `LoadedApk` adds their code to the app's class loader after the base's and their resources to the app's; the install record and a parse without one both read the code directory as one package. The report then names them:
+
+```
+installed com.example.app: 1 native libraries for x86_64 in /data/data/com.example.app/lib
+installed splits of com.example.app: config.en (language), config.mdpi (density), config.x86_64 (abi); skipped config.arm64_v8a (abi), config.fr (language), config.xxhdpi (density)
+```
+
+A single APK is reported as before, with no second line.
+
+The sample apps `runtime/framework/build_system.sh` builds are signed by AOSP's `apksigner` with the public test key in [runtime/keys](runtime/keys/README.md), and `make-first-apk` signs with the testkit's, so the smokes install them as any app.
+
 With the framework's runtime, found as for `uxdroid run` through `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime`, the install also prepares everything a start would otherwise redo, in the app's code directory `<data>/app/<package>`, as Android's installer does:
 
 | File | What a start does with it instead of the work |
 |------|-----------------------------------------------|
 | `base.apk` | A copy of the APK, which the launcher is given: `Launcher <runtime> <libuxdroid_system.so> <data>/app/<package>/base.apk` |
-| `oat/x86_64/base.odex`, `base.vdex` | The DEX compiled by `dex2oat` with the `verify` filter, against the boot image and the framework's class loader, which ART maps instead of verifying the code at each start |
+| `oat/x86_64/base.odex`, `base.vdex` | The DEX compiled by `dex2oat` with the `verify` filter, against the boot image and the framework's class loader, which ART maps instead of verifying the code at each start. A split with code gets `split_<name>.odex`, compiled after the base and the splits before it in the same class loader |
 | `package.record` | The framework's own `PackageParser` result: `ApplicationInfo`, the launcher `ActivityInfo` and `PackageInfo`, read back instead of parsing the manifest |
 | `defaults.so` | The default bodies of every framework native, bound by ART by name on first call, instead of a stub per native made at each start |
 
