@@ -832,6 +832,12 @@ public final class Launcher {
          */
         public void setComponentEnabledSetting(ComponentName component, int newState, int flags, int userId,
                 String callingPackage) {
+            checkComponentChange(component, newState);
+            EnabledSettings.set(component.getPackageName(), component.getClassName(), newState);
+        }
+
+        /** Refuses a change of another app's component, of a class the app does not declare, or to no state. */
+        private void checkComponentChange(ComponentName component, int newState) {
             if (!component.getPackageName().equals(app.packageName())) {
                 throw new SecurityException("Attempt to change component state; pid=" + android.os.Process.myPid()
                         + ", uid=" + app.application.uid + ", component=" + component);
@@ -844,15 +850,25 @@ public final class Launcher {
                 throw new IllegalArgumentException("Component class " + name + " does not exist in "
                         + component.getPackageName());
             }
-            EnabledSettings.set(component.getPackageName(), name, newState);
+            if (newState < android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                    || newState > android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
+                throw new IllegalArgumentException("Invalid new component state: " + newState);
+            }
         }
 
+        /** Every entry is checked before any is written, so a list with a bad entry changes nothing. */
         public void setComponentEnabledSettings(
                 java.util.List<android.content.pm.PackageManager.ComponentEnabledSetting> settings, int userId,
                 String callingPackage) {
             for (android.content.pm.PackageManager.ComponentEnabledSetting setting : settings) {
-                setComponentEnabledSetting(setting.getComponentName(), setting.getEnabledState(),
-                        setting.getEnabledFlags(), userId, callingPackage);
+                if (!setting.isComponent()) {
+                    throw new IllegalArgumentException("An app is not turned off as a whole here: "
+                            + setting.getPackageName());
+                }
+                checkComponentChange(setting.getComponentName(), setting.getEnabledState());
+            }
+            for (android.content.pm.PackageManager.ComponentEnabledSetting setting : settings) {
+                EnabledSettings.set(setting.getPackageName(), setting.getClassName(), setting.getEnabledState());
             }
         }
 
@@ -879,14 +895,19 @@ public final class Launcher {
             return new android.content.pm.InstallSourceInfo(null, null, null, null);
         }
 
+        /** Every package with the uid, the caller first, as Android lists a shared uid's packages. */
         public String[] getPackagesForUid(int uid) {
-            App installed = Packages.byUid(uid);
-            return installed == null ? null : new String[] {installed.packageName()};
+            java.util.List<App> found = Packages.byUid(uid);
+            if (found.isEmpty()) return null;
+            String[] names = new String[found.size()];
+            for (int i = 0; i < names.length; i++) names[i] = found.get(i).packageName();
+            return names;
         }
 
+        /** The caller for its own uid, else the first package with it. */
         public String getNameForUid(int uid) {
-            App installed = Packages.byUid(uid);
-            return installed == null ? null : installed.packageName();
+            java.util.List<App> found = Packages.byUid(uid);
+            return found.isEmpty() ? null : found.get(0).packageName();
         }
 
         public boolean hasSystemFeature(String name, int version) {

@@ -18,10 +18,12 @@ APK="$RUNTIME/samples/framework/compat.apk"
 [ -r "$APK" ] || fail "no $APK: run runtime/framework/build_system.sh"
 UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$APK" --data "$ANDROID_DATA" >"$WORK/install" 2>&1 \
     || { cat "$WORK/install"; fail "install"; }
-# A second app over the same data directory, which the compat app's PackageManager must know.
-PEER="$RUNTIME/samples/framework/peer.apk"
-UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$PEER" --data "$ANDROID_DATA" >"$WORK/install-peer" 2>&1 \
-    || { cat "$WORK/install-peer"; fail "install of the peer app"; }
+# Other apps over the same data directory, which the compat app's PackageManager must know: the peer,
+# and a package whose uid is the compat app's own.
+for other in peer uidtwin; do
+    UXDROID_RUNTIME="$RUNTIME" "$TARGET/uxdroid" install "$RUNTIME/samples/framework/$other.apk" --data "$ANDROID_DATA" \
+        >"$WORK/install-$other" 2>&1 || { cat "$WORK/install-$other"; fail "install of the $other app"; }
+done
 timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher --once \
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
@@ -162,8 +164,10 @@ expect "^stores accounts 0 google 0 authenticators 0$" "AccountManager does not 
 # own default activity. An app turns its own components off, not another's, and that lasts.
 expect "^packages meta-data auto-init false without flag null$" \
     "getApplicationInfo with GET_META_DATA did not give the app's meta-data, or gave it without the flag"
-expect "^packages installed com\.example\.compat,com\.example\.peer applications 2$" \
-    "getInstalledPackages does not list both installed apps"
+expect "^packages installed com\.example\.a11245,com\.example\.compat,com\.example\.peer applications 3$" \
+    "getInstalledPackages does not list every installed app"
+expect "^packages own uid names com\.example\.compat,com\.example\.a11245 name com\.example\.compat$" \
+    "the app's own uid named another package that shares it, or not every package"
 expect "^packages peer version 1\.3 3 meta-data peer$" "another app's package or meta-data is not known"
 expect "^packages uid peer application true named com\.example\.peer$" "another app's uid is not its own"
 expect "^packages missing not found$" "a package nobody installed was found"
@@ -177,22 +181,54 @@ expect "^packages activity com\.example\.peer\.ViewerActivity exported true appl
     "another app's activity is not found by name"
 expect "^packages toggled before 0 found 1 after 2 found 0$" "a component the app turned off is still offered"
 expect "^packages toggled another app refused$" "an app changed another app's component"
+expect "^packages toggled list with a bad entry refused, state 2$" \
+    "setComponentEnabledSettings wrote entries of a list it refused"
 expect "^packages can request installs true$" "an app that asks to install others may not"
 expect "^packages start other app refused uxdroid cannot start com\.example\.peer/\.ViewerActivity from com\.example\.compat: it is another app" \
     "starting another app's activity did not fail naming it"
 [ "$(cat "$ANDROID_DATA/system/components/com.example.compat" 2>/dev/null)" = "2 com.example.compat.ToggledActivity" ] \
     || fail "the component setting was not kept in system/components"
 expect "^launched com\.example\.compat/\.CompatActivity " "the activity was not launched"
-# The other app, started next, sees what the first one set and declared; the first one's install
-# record is gone, so its APK is parsed instead.
-rm "$ANDROID_DATA/app/com.example.compat/package.record"
-timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher --once \
-    "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.peer/base.apk" >"$WORK/out" 2>&1 \
-    || fail "the peer app: exit $?"
-grep -E "^peer " "$WORK/out"
-expect "^peer sees compat toggled 2 found 0$" "a component setting did not last into another app's start"
-expect "^peer resolves compat launcher com\.example\.compat\.CompatActivity auto-init false$" \
-    "an app without its install record is not known from its APK"
-expect "^peer own launcher com\.example\.peer\.PeerActivity$" "an app does not find its own launcher activity"
-expect "^launched com\.example\.peer/\.PeerActivity " "the peer app was not launched"
+# The other app, started next, sees what the first one set and declared. The first one's install
+# record is then one another app's PackageManager must not trust: nested deeper than any record, then
+# larger than any, both behind the header that makes it current; and finally it is gone. Each time its
+# APK is parsed instead, and the reading app keeps running.
+RECORD="$ANDROID_DATA/app/com.example.compat/package.record"
+cp "$RECORD" "$WORK/record"
+hostile() {
+    PYTHONDONTWRITEBYTECODE=1 python3 - "$WORK/record" "$RECORD" "$1" <<'PY'
+import struct, sys
+original, out, kind = sys.argv[1:]
+data = open(original, "rb").read()
+end = 0
+for _ in range(2):  # the magic and the identity, as DataOutputStream.writeUTF wrote them
+    end += 2 + struct.unpack(">H", data[end:end + 2])[0]
+if kind == "deep":  # lists in lists, as no framework object nests
+    body = (b"\x06" + struct.pack(">i", 1)) * 300000 + b"\x00"
+else:  # an array of 64 Mi longs, which a reader would allocate before reading them
+    body = b"\x04" + struct.pack(">i", 4) + b"long" + struct.pack(">i", 64 << 20) + b"\x00" * (64 << 20)
+open(out, "wb").write(data[:end] + body)
+PY
+}
+for record in deep large missing; do
+    case $record in
+        missing) rm "$RECORD" ;;
+        *) hostile "$record" ;;
+    esac
+    timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.system.Launcher --once \
+        "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.peer/base.apk" >"$WORK/out" 2>&1 \
+        || fail "the peer app, with a $record install record of the compat app: exit $?"
+    grep -E "^peer |install record .*com\.example\.compat" "$WORK/out" | cut -c1-200
+    case $record in
+        deep) expect "^uxdroid: the install record .*com\.example\.compat/package\.record is not used, the APK is parsed instead: the record nests deeper than 64 values$" \
+            "a record nested too deep was not refused by its depth" ;;
+        large) expect "^uxdroid: the install record .*com\.example\.compat/package\.record is not used, the APK is parsed instead: the record is larger than 4194304 bytes$" \
+            "a record too large was not refused by its size" ;;
+    esac
+    expect "^peer sees compat toggled 2 found 0$" "a component setting did not last into another app's start ($record record)"
+    expect "^peer resolves compat launcher com\.example\.compat\.CompatActivity auto-init false$" \
+        "an app with a $record install record is not known from its APK"
+    expect "^peer own launcher com\.example\.peer\.PeerActivity$" "an app does not find its own launcher activity ($record record)"
+    expect "^launched com\.example\.peer/\.PeerActivity " "the peer app was not launched ($record record)"
+done
 echo "ok: the app has its own identity, storage and the system services the corpus asks for, and knows the other installed app"

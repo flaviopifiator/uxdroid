@@ -27,6 +27,13 @@ final class Record {
 
     static final String FILE = "package.record";
     private static final String MAGIC = "uxdroid package record 3";
+    /**
+     * Bounds of a record another app may have left, checked before anything is allocated: microG's,
+     * the largest seen, is 157 KB, and a framework object nests a few values deep. Past either, the
+     * record is refused and the APK parsed.
+     */
+    static final int MAX_BYTES = 4 << 20;
+    static final int MAX_DEPTH = 64;
     /** Files of the runtime a record depends on: the classes it holds and the natives its library lists. */
     private static final String[] RUNTIME_FILES = {
         "framework/framework.jar", "framework/uxdroid-system.jar", "framework/natives.txt",
@@ -105,7 +112,11 @@ final class Record {
         out.value(components.providers);
         out.value(components.providerFilters);
         out.bytes(info.toByteArray());
-        java.nio.file.Files.write(file.toPath(), out.toByteArray());
+        byte[] record = out.toByteArray();
+        if (record.length > MAX_BYTES) {
+            throw new IllegalArgumentException("the record would be larger than " + MAX_BYTES + " bytes");
+        }
+        java.nio.file.Files.write(file.toPath(), record);
     }
 
     /** Whether a record was made for this identity, reading only its header: no framework class is touched. */
@@ -120,7 +131,7 @@ final class Record {
 
     /** Reads a record, or explains in the exception why it cannot be used. */
     static Contents read(File file, String identity) throws IOException, ReflectiveOperationException {
-        Reader in = new Reader(java.nio.file.Files.readAllBytes(file.toPath()));
+        Reader in = new Reader(bounded(file));
         if (!MAGIC.equals(in.data.readUTF())) throw new IOException("not a record of this version");
         if (!identity.equals(in.data.readUTF())) throw new IOException("the runtime or the APK changed since install");
         android.content.pm.ApplicationInfo application = (android.content.pm.ApplicationInfo) in.value();
@@ -258,9 +269,22 @@ final class Record {
         }
     }
 
+    /** The record's bytes, refused before they are read when there are more than a record holds. */
+    private static byte[] bounded(File file) throws IOException {
+        String tooLarge = "the record is larger than " + MAX_BYTES + " bytes";
+        if (file.length() > MAX_BYTES) throw new IOException(tooLarge);
+        try (java.io.InputStream in = new java.io.FileInputStream(file)) {
+            // The file may have grown since its length was read.
+            byte[] bytes = in.readNBytes(MAX_BYTES + 1);
+            if (bytes.length > MAX_BYTES) throw new IOException(tooLarge);
+            return bytes;
+        }
+    }
+
     private static final class Reader {
         final DataInputStream data;
         final List<Object> seen = new ArrayList<>();
+        private int depth;
 
         Reader(byte[] bytes) {
             data = new DataInputStream(new ByteArrayInputStream(bytes));
@@ -278,7 +302,17 @@ final class Record {
             return new String(bytes(), StandardCharsets.UTF_8);
         }
 
+        /** One value, refused when it nests deeper than any framework object, before the stack runs out. */
         Object value() throws IOException, ReflectiveOperationException {
+            if (++depth > MAX_DEPTH) throw new IOException("the record nests deeper than " + MAX_DEPTH + " values");
+            try {
+                return valueHere();
+            } finally {
+                depth--;
+            }
+        }
+
+        private Object valueHere() throws IOException, ReflectiveOperationException {
             byte tag = data.readByte();
             switch (tag) {
                 case NULL: return null;
@@ -328,8 +362,10 @@ final class Record {
                     return set;
                 }
                 case OBJECT: {
-                    Class<?> type = Class.forName(string());
-                    if (!type.getName().startsWith("android.")) throw new IOException("unexpected class in record");
+                    // Only a framework class is ever looked up, and none is initialized by the lookup.
+                    String name = string();
+                    if (!name.startsWith("android.")) throw new IOException("unexpected class in record: " + name);
+                    Class<?> type = Class.forName(name, false, Record.class.getClassLoader());
                     Object object = newInstance(type);
                     seen.add(object);
                     for (Field field : fields(type)) field.set(object, value());
@@ -359,7 +395,7 @@ final class Record {
                         ? element.matches("[ZBCSIJFD]|Ljava\\.lang\\.String;|Landroid\\.[\\w.$]+;")
                         : name.startsWith("android.");
                 if (!allowed) throw new ClassNotFoundException("unexpected class in record: " + name);
-                return Class.forName(name);
+                return Class.forName(name, false, Record.class.getClassLoader());
         }
     }
 

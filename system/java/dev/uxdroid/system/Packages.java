@@ -235,12 +235,18 @@ final class Packages {
         throw new android.content.ActivityNotFoundException(message);
     }
 
-    /** The app that has this application uid, or null. */
-    static Launcher.App byUid(int uid) {
+    /**
+     * Every installed app with this application uid, the running app first. A uid comes from a hash
+     * of the package name, so two packages can share one; the caller's own uid names the caller.
+     */
+    static List<Launcher.App> byUid(int uid) {
+        List<Launcher.App> found = new ArrayList<>();
+        Launcher.App caller = running();
+        if (caller != null && caller.application.uid == uid) found.add(caller);
         for (Launcher.App app : all()) {
-            if (app.application.uid == uid) return app;
+            if (app != caller && app.application.uid == uid) found.add(app);
         }
-        return null;
+        return found;
     }
 
     static ApplicationInfo application(String packageName, long flags) {

@@ -6,7 +6,8 @@
 //! cannot initialize for. Here the process keeps the user's Linux uid, which owns its files, and the
 //! framework sees the app's own uid: `Binder.getCallingUid`, which `Process.myUid` is rewritten to
 //! call (`runtime/framework/rewrite_classes.py`), `ApplicationInfo.uid` and the services in process.
-//! Nothing crosses to another process, so the uid only needs to be stable for a package.
+//! The uid only needs to be stable for a package; packages that share one are told apart by name, as
+//! `application_uid` says.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -20,7 +21,9 @@ static APPLICATION: AtomicI32 = AtomicI32::new(-1);
 
 /// The uid of an installed package: the same for a package name on every install and host, so files
 /// and settings that record it stay valid. FNV-1a of the name picks one of Android's 10,000
-/// application uids; two packages can share one, which only matters between processes.
+/// application uids; two packages can share one, such as `com.example.compat` and
+/// `com.example.a11245` (14194). Each process sees only its own, and the package manager, which knows
+/// every installed app, names the caller first for its own uid and lists every package that has it.
 pub fn application_uid(package: &str) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in package.bytes() {

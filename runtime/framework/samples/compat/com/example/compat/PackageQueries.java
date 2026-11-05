@@ -67,6 +67,12 @@ final class PackageQueries {
             System.out.println("packages uid peer application " + (uid >= 10000 && uid <= 19999 && uid != android.os.Process.myUid())
                     + " named " + (named == null ? "none" : String.join(",", named)));
         });
+        // Another installed package shares this app's uid by its hash: the caller is named first.
+        check("own uid", () -> {
+            String[] named = pm.getPackagesForUid(android.os.Process.myUid());
+            System.out.println("packages own uid names " + (named == null ? "none" : String.join(",", named))
+                    + " name " + pm.getNameForUid(android.os.Process.myUid()));
+        });
         check("missing", () -> {
             try {
                 pm.getPackageInfo("com.example.absent", 0);
@@ -114,6 +120,18 @@ final class PackageQueries {
                     PackageManager.DONT_KILL_APP);
             System.out.println("packages toggled before " + before + " found " + found + " after "
                     + pm.getComponentEnabledSetting(toggled) + " found " + pm.queryIntentActivities(intent, 0).size());
+            // A list with one bad entry changes nothing, not even the good entries before it.
+            try {
+                pm.setComponentEnabledSettings(java.util.List.of(
+                        new PackageManager.ComponentEnabledSetting(toggled, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+                                PackageManager.DONT_KILL_APP),
+                        new PackageManager.ComponentEnabledSetting(new ComponentName(context.getPackageName(),
+                                "com.example.compat.Nobody"), PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                PackageManager.DONT_KILL_APP)));
+                System.out.println("packages toggled list with a bad entry applied");
+            } catch (IllegalArgumentException e) {
+                System.out.println("packages toggled list with a bad entry refused, state " + pm.getComponentEnabledSetting(toggled));
+            }
             try {
                 pm.setComponentEnabledSetting(new ComponentName("com.example.peer", "com.example.peer.PeerActivity"),
                         PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP);

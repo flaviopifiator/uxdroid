@@ -90,6 +90,7 @@ build_app /work/runtime/framework/samples/input "$RUNTIME/samples/framework/inpu
 build_app /work/runtime/framework/samples/compose "$RUNTIME/samples/framework/compose.apk"
 build_app /work/runtime/framework/samples/compat "$RUNTIME/samples/framework/compat.apk"
 build_app /work/runtime/framework/samples/peer "$RUNTIME/samples/framework/peer.apk"
+build_app /work/runtime/framework/samples/uidtwin "$RUNTIME/samples/framework/uidtwin.apk"
 
 # An app delivered as a base APK and a feature split, linked as bundletool links them: the split's
 # resources in a package of their own id, against the base's, and its code in its own classes.dex.
