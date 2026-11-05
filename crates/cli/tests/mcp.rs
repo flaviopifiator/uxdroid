@@ -174,6 +174,8 @@ fn initialize_negotiates_the_version_and_names_the_tools_capability() {
     assert_eq!(icon["sizes"], json!(["any"]));
     let src = icon["src"].as_str().unwrap();
     let encoded = src.strip_prefix("data:image/svg+xml,").unwrap();
+    // A URL parser ends the data at '#' and refuses spaces, so both are percent-encoded.
+    assert!(!encoded.contains(['#', ' ']), "{src}");
     let logo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/logo/icon.svg");
     assert_eq!(
         percent_decoded(encoded),

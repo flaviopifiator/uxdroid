@@ -55,7 +55,7 @@ pub(crate) fn banner(color: bool) -> String {
 pub(crate) fn icon_data_uri() -> String {
     let mut uri = String::from("data:image/svg+xml,");
     for byte in ICON_SVG.bytes() {
-        if byte.is_ascii_alphanumeric() || b" -_.~/=:;,()#".contains(&byte) {
+        if byte.is_ascii_alphanumeric() || b"-_.~/=:;,()".contains(&byte) {
             uri.push(byte as char);
         } else {
             uri.push_str(&format!("%{byte:02X}"));
