@@ -431,6 +431,110 @@ fn an_arm64_import_found_nowhere_fails_the_install_naming_it() {
     assert!(!data.join("data/com.example.app/lib").exists());
 }
 
+/// Installs an APK whose only native library is `name`, built for arm64 from `source`.
+#[cfg(target_arch = "x86_64")]
+fn install_arm64(test: &str, name: &str, source: &str, flags: &[&str]) -> (Output, PathBuf) {
+    let dir = scratch(test);
+    let path = dir.join("lib.cpp");
+    std::fs::write(&path, source).unwrap();
+    let library = arm64_library(&dir, name, &path, flags);
+    let apk = dir.join("app.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .file(&format!("lib/arm64-v8a/{name}"), &library)
+        .write_signed(&apk, &Key::test());
+    let data = dir.join("data");
+    (install(&apk, &data), data)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn plan_imports(data: &Path, library: &str) -> serde_json::Value {
+    let plan = data.join("data/com.example.app/lib/arm64-v8a.plan.json");
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plan).unwrap()).unwrap();
+    plan["libraries"][library]["imports"].clone()
+}
+
+/// LinkedIn's Cronet build imports `ATrace_beginSection` and `ATrace_endSection`, which uxdroid's
+/// libandroid lacks.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_library_calling_ndk_functions_uxdroid_lacks_installs_with_a_warning() {
+    let (output, data) = install_arm64(
+        "arm64-atrace",
+        "libcronet.so",
+        "#include <android/trace.h>\n\
+         extern \"C\" void traced(void) { ATrace_beginSection(\"x\"); ATrace_endSection(); }\n",
+        &["-landroid"],
+    );
+
+    let stdout = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        stdout.contains(
+            "warning: com.example.app: libcronet.so calls functions uxdroid does not have yet, \
+             and stops if it reaches one: ATrace_beginSection, ATrace_endSection\n"
+        ),
+        "{stdout}"
+    );
+    let imports = plan_imports(&data, "libcronet.so");
+    assert_eq!(
+        imports["ATrace_beginSection"],
+        "unimplemented: libandroid.so"
+    );
+    assert_eq!(imports["ATrace_endSection"], "unimplemented: libandroid.so");
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_library_needing_an_ndk_library_uxdroid_lacks_installs_with_a_warning() {
+    let (output, data) = install_arm64(
+        "arm64-vulkan",
+        "libvk.so",
+        "#include <vulkan/vulkan.h>\n\
+         extern \"C\" int make(void) {\n\
+           VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};\n\
+           VkInstance instance;\n\
+           return vkCreateInstance(&info, nullptr, &instance);\n\
+         }\n",
+        &["-lvulkan"],
+    );
+
+    let stdout = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        stdout.contains(
+            "warning: com.example.app: libvk.so calls functions uxdroid does not have yet, \
+             and stops if it reaches one: vkCreateInstance\n"
+        ),
+        "{stdout}"
+    );
+    assert_eq!(
+        plan_imports(&data, "libvk.so")["vkCreateInstance"],
+        "unimplemented: libvulkan.so"
+    );
+}
+
+/// Data cannot stop the program when read, so an unresolved data import still fails.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_data_import_found_nowhere_still_fails_the_install() {
+    let (output, data) = install_arm64(
+        "arm64-data",
+        "libdata.so",
+        "extern \"C\" int uxdroid_nowhere_data;\n\
+         extern \"C\" int reads_it(void) { return uxdroid_nowhere_data; }\n",
+        &["-Wl,-z,undefs", "-landroid"],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        text(&output.stderr),
+        "error: cannot translate com.example.app: libdata.so imports what no library, table or the guest libc has: uxdroid_nowhere_data\n"
+    );
+    assert!(!data.join("data/com.example.app/lib").exists());
+}
+
 #[test]
 fn a_package_name_cannot_choose_the_directory() {
     let dir = scratch("package");

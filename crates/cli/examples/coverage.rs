@@ -68,6 +68,7 @@ mod audit {
     enum Status {
         Resolved,
         Trap,
+        Unimplemented,
         Missing,
     }
 
@@ -76,6 +77,7 @@ mod audit {
             match self {
                 Status::Resolved => "resolved",
                 Status::Trap => "trap",
+                Status::Unimplemented => "unimplemented",
                 Status::Missing => "missing",
             }
         }
@@ -108,7 +110,7 @@ mod audit {
             let mut missing_lists = String::new();
             let _ = writeln!(
                 summary,
-                "\n{} (NDK stubs, API {api}, {})\n{:<20} {:>6} {:>6} {:>6} {:>9} {:>5} {:>8} {:>9}",
+                "\n{} (NDK stubs, API {api}, {})\n{:<20} {:>6} {:>6} {:>6} {:>9} {:>5} {:>7} {:>8} {:>9}",
                 path.label(),
                 directory.display(),
                 "library",
@@ -117,10 +119,11 @@ mod audit {
                 "data",
                 "resolved",
                 "trap",
+                "unimpl",
                 "missing",
                 "resolved%"
             );
-            let mut totals = [0usize; 6];
+            let mut totals = [0usize; 7];
             for library in libraries(&directory)? {
                 let exports = exports(&nm, &directory.join(&library))?;
                 let rows = classify(path, &library, &exports, &tables);
@@ -132,6 +135,7 @@ mod audit {
                     data,
                     count(Status::Resolved),
                     count(Status::Trap),
+                    count(Status::Unimplemented),
                     count(Status::Missing),
                 ];
                 for (total, value) in totals.iter_mut().zip(counts) {
@@ -181,14 +185,14 @@ mod audit {
 
     fn summary_line(
         library: &str,
-        [total, funcs, data, resolved, trap, missing]: [usize; 6],
+        [total, funcs, data, resolved, trap, unimplemented, missing]: [usize; 7],
     ) -> String {
         let percent = match total {
             0 => 100.0,
             total => 100.0 * resolved as f64 / total as f64,
         };
         format!(
-            "{library:<20} {total:>6} {funcs:>6} {data:>6} {resolved:>9} {trap:>5} {missing:>8} {percent:>8.1}%\n"
+            "{library:<20} {total:>6} {funcs:>6} {data:>6} {resolved:>9} {trap:>5} {unimplemented:>7} {missing:>8} {percent:>8.1}%\n"
         )
     }
 
@@ -286,7 +290,8 @@ mod audit {
                 exports
                     .iter()
                     .map(|export| {
-                        let binding = host_binding(&export.name, &table, export.is_data);
+                        let binding =
+                            host_binding(&export.name, &table, &[library], export.is_data);
                         let (status, detail) = match binding {
                             HostBinding::Table(library) => {
                                 (Status::Resolved, format!("table {library}"))
@@ -294,6 +299,10 @@ mod audit {
                             HostBinding::Shim => (Status::Resolved, "shim".to_string()),
                             HostBinding::Glibc => (Status::Resolved, "audited glibc".to_string()),
                             HostBinding::Trap(why) => (Status::Trap, why.to_string()),
+                            HostBinding::Unimplemented(library) => (
+                                Status::Unimplemented,
+                                format!("a stub naming it, of {library}"),
+                            ),
                             HostBinding::Missing(why) => (Status::Missing, why.to_string()),
                         };
                         Row {
@@ -334,6 +343,10 @@ mod audit {
                             }
                             Binding::Libc => (Status::Resolved, "guest libc".to_string()),
                             Binding::Stub(why) => (Status::Trap, why.to_string()),
+                            Binding::Unimplemented(library) => (
+                                Status::Unimplemented,
+                                format!("a stub naming it, of {library}"),
+                            ),
                             Binding::Unresolved => (Status::Missing, "unresolved".to_string()),
                             Binding::App(owner) => (Status::Resolved, format!("app {owner}")),
                         };

@@ -51,15 +51,36 @@ pub enum HostBinding {
     Glibc,
     /// A stub that stops the program naming the function when called, with why.
     Trap(&'static str),
+    /// A function of this NDK library that uxdroid does not have yet: a stub that stops the
+    /// program naming the library and the function when called.
+    Unimplemented(&'static str),
     /// Nothing binds: the load fails, or a weak import is null; with why.
     Missing(&'static str),
 }
 
 const NOT_AUDITED: &str = "glibc has it, not audited for bionic";
 
-/// How a host library whose scope has `tables` binds `name`, decided as the loader does after the
-/// libraries in scope, and without making a trap. liblog is always in scope, as on Android.
-pub fn host_binding(name: &str, tables: &[&'static Table], is_data: bool) -> HostBinding {
+/// How a host library whose scope has `tables` and needs the NDK libraries `needed` binds a
+/// non-weak import of `name`, decided as the loader does after the libraries in scope, and without
+/// making a trap. liblog is always in scope, as on Android.
+pub fn host_binding(
+    name: &str,
+    tables: &[&'static Table],
+    needed: &[&str],
+    is_data: bool,
+) -> HostBinding {
+    match bound_by_host(name, tables, is_data) {
+        HostBinding::Missing(why) => {
+            match crate::unimplemented::find(needed.iter().copied(), name, is_data, false) {
+                Some(function) => HostBinding::Unimplemented(function.library),
+                None => HostBinding::Missing(why),
+            }
+        }
+        binding => binding,
+    }
+}
+
+fn bound_by_host(name: &str, tables: &[&'static Table], is_data: bool) -> HostBinding {
     let liblog = crate::table::liblog();
     let in_scope = tables
         .iter()
@@ -119,6 +140,19 @@ fn decide(name: &CStr, is_data: bool) -> Decision<'_> {
             Some(_) => Decision::Unaudited(text),
         },
     }
+}
+
+/// Whether the host has a function `name`, a shim or glibc's, audited or not, decided without
+/// taking one of the stubs for unaudited functions.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn has_function(name: &str) -> bool {
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    matches!(
+        decide(&name, false),
+        Decision::Bound(..) | Decision::Unaudited(_)
+    )
 }
 
 /// Whether `name` binds to a shim or an audited glibc function, rather than a stub that stops
@@ -366,6 +400,8 @@ functions! {
     "__system_property_get" => system_property_get,
     "__system_property_read" => system_property_read,
     "__system_property_read_callback" => system_property_read_callback,
+    "__pwrite64_chk" => pwrite_chk,
+    "__pwrite_chk" => pwrite_chk,
     "__umask_chk" => umask_chk,
     "__write_chk" => write_chk,
     "__loader_android_dlopen_ext" => loader::linker::android_dlopen_ext,
@@ -1651,6 +1687,22 @@ unsafe extern "C" fn write_chk(
     unsafe { libc::write(fd, buffer, count) }
 }
 
+/// bionic's `off_t` is 64-bit on LP64, so `__pwrite_chk` and `__pwrite64_chk` are one function, which
+/// glibc lacks under either name.
+unsafe extern "C" fn pwrite_chk(
+    fd: c_int,
+    buffer: *const c_void,
+    count: usize,
+    offset: i64,
+    object_size: usize,
+) -> isize {
+    if count > object_size {
+        fortify_failure("pwrite");
+    }
+    // SAFETY: the check proves the write stays inside the caller's object.
+    unsafe { libc::pwrite64(fd, buffer, count, offset) }
+}
+
 extern "C" fn umask_chk(mode: libc::mode_t) -> libc::mode_t {
     if mode & !0o777 != 0 {
         die(format_args!(
@@ -2785,6 +2837,29 @@ mod tests {
             libc::close(fds[1]);
         }
         assert_eq!(&back, b"dump");
+    }
+
+    #[test]
+    fn pwrite_chk_writes_what_fits_its_object_at_its_offset() {
+        for name in [c"__pwrite_chk", c"__pwrite64_chk"] {
+            let pwrite_chk: unsafe extern "C" fn(c_int, *const c_void, usize, i64, usize) -> isize =
+                function(name);
+            let file = std::env::temp_dir().join(format!("uxdroid-pwrite-{}", std::process::id()));
+            let path = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: the path is a C string, and the buffers are as long as given.
+            unsafe {
+                let fd = libc::open(
+                    path.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                    0o600,
+                );
+                assert!(fd >= 0);
+                assert_eq!(pwrite_chk(fd, b"dump".as_ptr().cast(), 4, 2, 4), 4);
+                libc::close(fd);
+            }
+            assert_eq!(std::fs::read(&file).unwrap(), b"\0\0dump", "{name:?}");
+            std::fs::remove_file(&file).unwrap();
+        }
     }
 
     #[test]

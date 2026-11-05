@@ -714,7 +714,7 @@ fn plan_translation(staging: &Path, package: &str) -> Result<String, String> {
         .parent()
         .map_or_else(|| staging.to_path_buf(), |app| app.join("lib"))
         .join(crate::translation::PLAN_FILE);
-    Ok(summary.describe(&installed))
+    Ok(summary.describe(&installed, package))
 }
 
 #[cfg(not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")))]

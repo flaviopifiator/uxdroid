@@ -20,6 +20,12 @@ pub(crate) fn import(
     Err(ElfError::Unsupported("a library for another ABI"))
 }
 
+pub(crate) fn unimplemented(
+    _function: crate::unimplemented::Unimplemented,
+) -> Result<u64, ElfError> {
+    Err(ElfError::Unsupported("a library for another ABI"))
+}
+
 pub(crate) fn call_ifunc(_resolver: u64) -> Result<u64, String> {
     Err(NO_TRANSLATOR.to_string())
 }

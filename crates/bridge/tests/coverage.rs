@@ -23,7 +23,7 @@ static COVERAGE_TABLE: Table = Table {
 #[test]
 fn a_table_export_binds_to_its_table() {
     assert_eq!(
-        host_binding("coverage_answer", &[&COVERAGE_TABLE], false),
+        host_binding("coverage_answer", &[&COVERAGE_TABLE], &[], false),
         HostBinding::Table("libuxdroidcoverage.so")
     );
 }
@@ -31,25 +31,25 @@ fn a_table_export_binds_to_its_table() {
 #[test]
 fn liblog_is_searched_like_the_loader_does() {
     assert_eq!(
-        host_binding("__android_log_print", &[], false),
+        host_binding("__android_log_print", &[], &[], false),
         HostBinding::Table("liblog.so")
     );
 }
 
 #[test]
 fn an_audited_glibc_function_binds_to_glibc() {
-    assert_eq!(host_binding("strlen", &[], false), HostBinding::Glibc);
+    assert_eq!(host_binding("strlen", &[], &[], false), HostBinding::Glibc);
 }
 
 #[test]
 fn a_bionic_name_glibc_spells_differently_binds_to_a_shim() {
-    assert_eq!(host_binding("__errno", &[], false), HostBinding::Shim);
+    assert_eq!(host_binding("__errno", &[], &[], false), HostBinding::Shim);
 }
 
 #[test]
 fn an_incompatible_abi_binds_to_a_trap() {
     assert!(matches!(
-        host_binding("fgetpos", &[], false),
+        host_binding("fgetpos", &[], &[], false),
         HostBinding::Trap(_)
     ));
 }
@@ -57,7 +57,7 @@ fn an_incompatible_abi_binds_to_a_trap() {
 #[test]
 fn an_unaudited_glibc_function_binds_to_a_trap() {
     assert!(matches!(
-        host_binding("gnu_get_libc_version", &[], false),
+        host_binding("gnu_get_libc_version", &[], &[], false),
         HostBinding::Trap(_)
     ));
 }
@@ -65,7 +65,7 @@ fn an_unaudited_glibc_function_binds_to_a_trap() {
 #[test]
 fn unaudited_glibc_data_cannot_trap_and_is_missing() {
     assert!(matches!(
-        host_binding("program_invocation_name", &[], true),
+        host_binding("program_invocation_name", &[], &[], true),
         HostBinding::Missing(_)
     ));
 }
@@ -73,7 +73,7 @@ fn unaudited_glibc_data_cannot_trap_and_is_missing() {
 #[test]
 fn a_name_found_nowhere_is_missing() {
     assert!(matches!(
-        host_binding("uxdroid_coverage_nowhere", &[], false),
+        host_binding("uxdroid_coverage_nowhere", &[], &[], false),
         HostBinding::Missing(_)
     ));
 }
@@ -122,5 +122,71 @@ fn the_planner_classifies_a_system_library_without_app_libraries() {
             Binding::Libc,
             Binding::Unresolved
         ]
+    );
+}
+
+#[test]
+fn a_listed_function_of_a_needed_ndk_library_binds_to_a_stub_naming_both() {
+    assert_eq!(
+        host_binding("vkCreateInstance", &[], &["libvulkan.so"], false),
+        HostBinding::Unimplemented("libvulkan.so")
+    );
+    // A function of a table that lacks it, such as libandroid's.
+    assert_eq!(
+        host_binding("ATrace_beginSection", &[], &["libandroid.so"], false),
+        HostBinding::Unimplemented("libandroid.so")
+    );
+}
+
+#[test]
+fn only_a_needed_library_s_listed_functions_are_stubbed() {
+    for (name, needed, is_data) in [
+        ("vkCreateInstance", &["libandroid.so"][..], false),
+        ("uxdroid_coverage_nowhere", &["libvulkan.so"][..], false),
+        ("uxdroid_coverage_nowhere", &["libc.so"][..], true),
+    ] {
+        assert!(
+            matches!(
+                host_binding(name, &[], needed, is_data),
+                HostBinding::Missing(_)
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn the_planner_stubs_listed_functions_of_ndk_libraries_uxdroid_lacks() {
+    assert!(plan::provided("libvulkan.so", &[]));
+    assert!(!plan::provided("libuxdroid_nowhere.so", &[]));
+    assert_eq!(
+        guest_bindings(
+            "libvulkan.so",
+            &[
+                ("vkCreateInstance", false),
+                ("uxdroid_coverage_nowhere", false),
+                ("vkCreateInstance", true),
+            ],
+            &[],
+        ),
+        [
+            Binding::Unimplemented("libvulkan.so"),
+            Binding::Unresolved,
+            Binding::Unresolved
+        ]
+    );
+}
+
+/// A guest libc signature is not enough: the planner agrees with the loader that a function the
+/// host lacks binds to the stub naming it, not to an unaudited host function.
+#[test]
+fn the_planner_stubs_a_signed_libc_function_the_host_lacks_as_the_loader_does() {
+    assert_eq!(
+        host_binding("fgetln", &[], &["libc.so"], false),
+        HostBinding::Unimplemented("libc.so")
+    );
+    assert_eq!(
+        guest_bindings("libc.so", &[("fgetln", false)], &[]),
+        [Binding::Unimplemented("libc.so")]
     );
 }

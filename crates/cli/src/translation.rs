@@ -4,8 +4,10 @@
 //! to the libraries with each one's JNI entry points and function boundaries.
 //!
 //! An import the host has but guest code cannot call yet is recorded as a stub, which stops the
-//! program naming it only if it is called: apps import much they never call on a given path. An
-//! import found nowhere would fail the load, so it fails the install instead, naming it.
+//! program naming it only if it is called: apps import much they never call on a given path. So is
+//! a function on the NDK's official list of a library the app needs that uxdroid does not have yet,
+//! and the install warns, naming those per library. Any other import found nowhere would fail the
+//! load, so it fails the install instead, naming it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,19 +27,28 @@ pub(crate) struct Summary {
     pub libc: usize,
     pub weak_null: usize,
     pub stubs: Vec<String>,
+    /// Each library with imports of NDK functions uxdroid does not have yet, and their names.
+    pub unimplemented: Vec<(String, Vec<String>)>,
 }
 
 impl Summary {
-    /// One line of the install's report.
-    pub(crate) fn describe(&self, plan: &Path) -> String {
-        let total = self.app + self.tables + self.libc + self.weak_null + self.stubs.len();
+    /// The install's report: one line, then a warning per library calling functions uxdroid
+    /// does not have yet.
+    pub(crate) fn describe(&self, plan: &Path, package: &str) -> String {
+        let unimplemented: usize = self
+            .unimplemented
+            .iter()
+            .map(|(_, names)| names.len())
+            .sum();
+        let total =
+            self.app + self.tables + self.libc + self.weak_null + self.stubs.len() + unimplemented;
         let mut line = format!(
             "translated for x86_64: {total} imports resolved at install, {} from the app's libraries, {} from system library tables, {} from the guest libc, {} weak ones null, {} bound to stubs that stop the program naming them if called",
             self.app,
             self.tables,
             self.libc,
             self.weak_null,
-            self.stubs.len()
+            self.stubs.len() + unimplemented
         );
         if !self.stubs.is_empty() {
             let shown: Vec<String> = self
@@ -53,6 +64,18 @@ impl Summary {
             line.push(')');
         }
         line.push_str(&format!("; plan in {}\n", plan.display()));
+        for (library, names) in &self.unimplemented {
+            let names: Vec<String> = names
+                .iter()
+                .map(|name| name.escape_debug().to_string())
+                .collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            line.push_str(&format!(
+                "warning: {}: {}\n",
+                package.escape_debug(),
+                uxdroid_bridge::unimplemented::warning(library, &names)
+            ));
+        }
         line
     }
 }
@@ -63,6 +86,7 @@ fn binding_text(binding: &Binding, weak: bool) -> String {
         Binding::Table(library) => format!("table {library}"),
         Binding::Libc => "libc".to_string(),
         Binding::Stub(why) => format!("stub: {why}"),
+        Binding::Unimplemented(library) => format!("unimplemented: {library}"),
         Binding::Unresolved if weak => "null (weak)".to_string(),
         Binding::Unresolved => "unresolved".to_string(),
     }
@@ -124,12 +148,14 @@ pub(crate) fn prepare(directory: &Path, package: &str) -> Result<Summary, String
     let mut summary = Summary::default();
     for library in &plans {
         let mut unresolved = Vec::new();
+        let mut unimplemented = Vec::new();
         for import in &library.imports {
             match &import.binding {
                 Binding::App(_) => summary.app += 1,
                 Binding::Table(_) => summary.tables += 1,
                 Binding::Libc => summary.libc += 1,
                 Binding::Stub(_) => summary.stubs.push(import.name.clone()),
+                Binding::Unimplemented(_) => unimplemented.push(import.name.clone()),
                 Binding::Unresolved if import.weak => summary.weak_null += 1,
                 Binding::Unresolved => unresolved.push(import.name.escape_debug().to_string()),
             }
@@ -140,6 +166,13 @@ pub(crate) fn prepare(directory: &Path, package: &str) -> Result<Summary, String
                 library.name.escape_debug(),
                 unresolved.join(", ")
             )));
+        }
+        if !unimplemented.is_empty() {
+            unimplemented.sort();
+            unimplemented.dedup();
+            summary
+                .unimplemented
+                .push((library.name.clone(), unimplemented));
         }
     }
     summary.stubs.sort();

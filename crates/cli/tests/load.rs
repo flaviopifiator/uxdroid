@@ -525,6 +525,81 @@ fn all_unresolved_symbols_are_listed() {
     assert_eq!(stdout(&output), "");
 }
 
+/// A library that needs Vulkan, which uxdroid has no table for, and calls one of its functions.
+const VULKAN_SOURCE: &str = "#include <vulkan/vulkan.h>\n\
+     int make(void) {\n\
+       VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};\n\
+       VkInstance instance;\n\
+       return vkCreateInstance(&info, 0, &instance);\n\
+     }\n";
+
+#[test]
+fn a_library_needing_an_ndk_library_uxdroid_lacks_loads_and_stops_naming_the_call() {
+    let dir = build_root().join("vulkan");
+    let source = dir.join("vulkan.c");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&source, VULKAN_SOURCE).unwrap();
+    ndk_build(
+        &dir,
+        "libvk.so",
+        "24",
+        &[source.to_str().unwrap()],
+        &["-lvulkan"],
+    );
+    let warning = "warning: libvk.so calls functions uxdroid does not have yet, \
+                   and stops if it reaches one: vkCreateInstance\n";
+
+    let loaded = uxdroid(&["load", dir.join("libvk.so").to_str().unwrap()]);
+    let called = load_and_call(&dir.join("libvk.so"), "make");
+
+    assert_eq!(loaded.status.code(), Some(0), "{}", stderr(&loaded));
+    assert_eq!(stderr(&loaded), warning);
+    assert!(
+        stdout(&loaded).contains("needs: libvulkan.so"),
+        "{}",
+        stdout(&loaded)
+    );
+    assert_eq!(called.status.code(), None, "must die from abort");
+    // QEMU user, on an x86_64 machine testing the aarch64 build, reports the abort after it.
+    assert!(
+        stderr(&called).starts_with(&format!(
+            "{warning}uxdroid: libvulkan.so vkCreateInstance is not implemented yet\n"
+        )),
+        "{}",
+        stderr(&called)
+    );
+}
+
+/// Only Android's official exports of a needed library are stubbed: any other name is no API.
+#[test]
+fn a_name_on_no_ndk_list_still_fails_the_load_beside_a_needed_ndk_library() {
+    let dir = build_root().join("not-listed");
+    let source = dir.join("not_listed.c");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        "#include <android/trace.h>\n\
+         int ATrace_notAnApi(void);\n\
+         int entry(void) { ATrace_beginSection(\"x\"); return ATrace_notAnApi(); }\n",
+    )
+    .unwrap();
+    ndk_build(
+        &dir,
+        "libnotlisted.so",
+        "24",
+        &[source.to_str().unwrap()],
+        &["-landroid", "-Wl,-z,undefs"],
+    );
+
+    let output = uxdroid(&["load", dir.join("libnotlisted.so").to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "error: libnotlisted.so: unresolved symbols: ATrace_notAnApi\n"
+    );
+}
+
 #[test]
 fn missing_dependencies_are_named_and_search_dirs_find_them() {
     let dir = build_root().join("search");
@@ -776,6 +851,36 @@ fn an_arm64_library_runs_through_the_translator() {
         stdout(&output).ends_with("call spike_qsort: 1235789\n"),
         "{}",
         stdout(&output)
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_library_needing_an_ndk_library_uxdroid_lacks_stops_naming_the_call() {
+    if std::env::var_os("UXDROID_TRANSLATOR").is_none() {
+        eprintln!("skipped: UXDROID_TRANSLATOR is not set; run in the translation service");
+        return;
+    }
+    let dir = build_root().join("arm64-vulkan");
+    let source = dir.join("vulkan.c");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&source, VULKAN_SOURCE).unwrap();
+    let status = Command::new(toolchain().join("bin/aarch64-linux-android24-clang"))
+        .arg(&source)
+        .args(["-shared", "-fPIC", "-O2", "-lvulkan", "-o"])
+        .arg(dir.join("libvk.so"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build the arm64 library");
+
+    let output = load_and_call(&dir.join("libvk.so"), "make");
+
+    assert_eq!(output.status.code(), None, "must die from abort");
+    assert_eq!(
+        stderr(&output),
+        "warning: libvk.so calls functions uxdroid does not have yet, \
+         and stops if it reaches one: vkCreateInstance\n\
+         uxdroid: libvulkan.so vkCreateInstance is not implemented yet\n"
     );
 }
 
