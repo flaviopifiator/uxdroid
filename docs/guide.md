@@ -248,7 +248,7 @@ The `verify` filter was chosen by measurement, in [benches/framework](../benches
 
 ### Install from app sources
 
-`uxdroid search`, `install <package>`, `update`, `remove`, `list` and `sources` find apps in app sources and keep them installed. The only kind of source so far is an F-Droid repository, and F-Droid's official one, `fdroid`, is there from the start. Every command takes `--data <dir>`, the data directory to work on; without it they use `$XDG_DATA_HOME/uxdroid/data`, where `uxdroid app` starts apps from.
+`uxdroid search`, `install <package>`, `update`, `remove`, `list` and `sources` find apps in app sources and keep them installed. A source is an F-Droid repository, and F-Droid's official one, `fdroid`, is there from the start, or Google Play, off until `uxdroid sources enable play` (see [Google Play](#google-play) below). Every command takes `--data <dir>`, the data directory to work on; without it they use `$XDG_DATA_HOME/uxdroid/data`, where `uxdroid app` starts apps from.
 
 ```sh
 uxdroid search markor
@@ -272,14 +272,15 @@ removed net.gsantner.markor: its code, data, signer record and component setting
 
 | Command | What it does |
 |---------|--------------|
-| `search <text>... [--refresh] [--limit <n>]` | Apps of the enabled sources whose name, package or summary holds every word, best first: a word that is the name or the package counts most, then the start of the name, a word of the name, the name, the package, and the summary. Each row has the app's name, package, source, the version that would be installed and the day the source last changed the app (UTC). At most 20 rows unless `--limit` says otherwise; how many more matched, and how many matched with no version for this machine, go to stderr as notes. Nothing found exits 1 |
-| `install <package> [--from <source>] [--refresh]` | Installs the newest version for this machine: stable (no beta channel), native code for this CPU or none, and `minSdkVersion` up to 36 and `maxSdkVersion` from 36. The source is `--from`, else the one the app was installed from, else the first enabled source that has it, in `sources` order. The APK is downloaded into `<data>/store/downloads`, refused if it is larger than the index says or does not have its SHA-256, and handed to the installer above, which checks the SHA-256 again on its own copy, then that its package, `versionCode` and signer certificates are those the index gives, then its signature and the installed app's signer as for any APK. The source is recorded in `<data>/app/.<package>.source`. The same version from the same source is not installed again, and an older one than the installed is refused |
+| `search <text>... [--refresh] [--limit <n>]` | Apps of the enabled sources, Google Play asked for the text, whose name, package or summary holds every word, best first: a word that is the name or the package counts most, then the start of the name, a word of the name, the name, the package, and the summary. Each row has the app's name, package, source, the version that would be installed and the day the source last changed the app (UTC). At most 20 rows unless `--limit` says otherwise; how many more matched, and how many matched with no version for this machine, go to stderr as notes. Nothing found exits 1 |
+| `install <package> [--from <source>] [--refresh]` | Installs the newest version for this machine: stable (no beta channel), native code for this CPU or none, and `minSdkVersion` up to 36 and `maxSdkVersion` from 36. The source is `--from`, else the one the app was installed from, else the first enabled source that has it, in `sources` order; Google Play is asked only when no F-Droid repository has the package, and when one has it stderr says so: `note: <package> is in <source>, so it is installed from there and Google Play is not asked; uxdroid install <package> --from play installs it from Google Play`. The APK is downloaded into `<data>/store/downloads`, refused if it is larger than the index says or does not have its SHA-256, and handed to the installer above, which checks the SHA-256 again on its own copy, then that its package, `versionCode` and signer certificates are those the index gives, then its signature and the installed app's signer as for any APK. The source is recorded in `<data>/app/.<package>.source`. The same version from the same source is not installed again, and an older one than the installed is refused |
 | `update [<package>] [--refresh]` | For each app installed from a source, or the one named, installs the newest version for this machine from that source when it is newer, as `install` does; an update signed by another certificate is refused and the app stays. Apps installed from a file are left alone; naming one is an error. Exits 1 when any app failed |
 | `remove <package>` | Removes the app's code directory, its data directory `<data>/data/<package>`, its signer and source records and its component settings `<data>/system/components/<package>`. A running app is refused: stop it first. The lock files stay |
 | `list` | Installed apps with their source (`file` for an APK given as a file) and version |
-| `sources` | The sources, with kind, whether enabled, address and the SHA-256 of the certificate their index must be signed with |
+| `sources` | The sources, with kind, whether enabled, address and the SHA-256 of the certificate their index must be signed with; once Google Play was enabled, a last line says how it signs in |
 | `sources add <name> <url> --fingerprint <sha256>` | Adds an F-Droid repository: a name of lowercase letters, digits and `-`, its https address (plain http only for this machine: `localhost`, `127.x.x.x` or `[::1]`) and its signing certificate's SHA-256, as the repository publishes it (colons and case do not matter) |
-| `sources enable\|disable <name>` | Uses a source, or stops using it, for `search`, `install` and `update`; `--from` cannot name a disabled source |
+| `sources enable\|disable <name>` | Uses a source, or stops using it, for `search`, `install` and `update`; `--from` cannot name a disabled source. `enable play` adds Google Play the first time, with a warning on stderr |
+| `sources play [--anonymous \| --account <email>] [--dispenser <url>]` | How Google Play signs in: anonymously through a token dispenser (the default), or as `<email>` with a token read from standard input; without options it says which |
 | `sources refresh-after <hours>` | How old an index may be before it is fetched again, 24 hours by default |
 
 Exit codes: `0` success, also for `install` of the version already installed and for `update` with nothing newer; `1` the command failed, with its reason, or `search` found nothing; `2` wrong usage. Notes, such as an index fetched or read stale, go to stderr.
@@ -296,7 +297,48 @@ An F-Droid repository's index is trusted only as far as it is signed. `entry.jar
 | `the APK of <package> from <source> does not match its index (SHA-256 <sha256>, <n> bytes; the index gives <sha256>, <n> bytes), so it is refused` | The download is not the APK the index signed; `is larger than the <n> bytes its index gives` when it is longer |
 | `the APK of <package> from <source> is the package <name>` / `has version code <n>` / `is signed by <sha256>, and its index says <sha256>` | The APK is not the release the index describes |
 
-Not yet: Google Play and direct URLs as sources, beta channels, a source's own mirrors, removing a source, and checking `entry.json`'s `maxAge`.
+#### Google Play
+
+Google Play is a source of its own kind, `play`, asked app by app over the API Play's store app uses, by a client written for uxdroid from public descriptions of that protocol and from observing its answers. It is off until enabled, and the first `uxdroid sources enable play` warns, on stderr:
+
+```text
+warning: Google Play's terms allow only Google's own store app, so Google may limit or block the accounts that sign in with another client such as uxdroid. Anonymous mode signs in to shared accounts handed out by a third-party service, Aurora OSS's token dispenser (https://auroraoss.com), which uxdroid does not control and which may stop working at any time. uxdroid sources play --account <email> signs in with your own account instead, at your own risk.
+```
+
+```sh
+uxdroid sources enable play
+uxdroid search signal
+uxdroid install org.thoughtcrime.securesms --from play
+```
+
+```text
+NAME                      PACKAGE                     SOURCE  VERSION  UPDATED
+Signal Private Messenger  org.thoughtcrime.securesms  play    8.34.2   2026-11-02
+downloaded org.thoughtcrime.securesms 8.34.2 (177501) from play: 3 APKs (base, config.mdpi, config.x86_64), 121812046 bytes
+installed org.thoughtcrime.securesms: 12 native libraries for x86_64 in /home/me/.local/share/uxdroid/data/data/org.thoughtcrime.securesms/lib
+installed splits of org.thoughtcrime.securesms: config.mdpi (density), config.x86_64 (abi)
+```
+
+Play is told about a generic device: Android's emulator build names, this machine's ABI (`x86_64` or `arm64-v8a`), SDK 36, 160 dpi, and the languages of the locale, so the splits it serves are the ones the installer keeps. `search` asks Play for the text and shows what it finds that matches every word, beside the F-Droid repositories' apps; `install`, `update` and `list` work as for any source, and `UPDATED` is the day Play shows. In `uxdroid tui`, Enter in the query box asks Play. An install acquires the app, free, asks Play for its delivery and downloads the base and every split it delivers into `<data>/store/downloads`; each file must have the size and SHA-256 (and SHA-1) Play states and come from `https://play.googleapis.com` (or the API's own address, as a test server has it), and then the installer checks it as any APK: signatures, one signer for the base and its splits, the installed app's signer on an update, and the splits chosen as for an `.apks` file. Play's details name a signing certificate, but for an app that rotated its key it is the original one (Signal's names `29f34e5f…`, the APK's signer for SDK 36 is `4be4f6cd…`), and the installer does not read rotation lineages, so that certificate is not checked. Apps that are paid, or that Play does not deliver to this device, are refused: `<package> costs <price> on Google Play, and uxdroid installs only free apps from it` and `Google Play does not deliver <package> <version code> to this device (x86_64, SDK 36) (status <n>): ...`. Play is asked at most every 250 ms.
+
+Signing in:
+
+- Anonymous, the default, asks a token dispenser, which signs in to one of its shared accounts for the device described and hands back that sign-in; `--dispenser <url>` names another one (https). As of 2026-11-05, Aurora OSS's dispenser at `https://auroraoss.com/api/auth` answers 403 to every client but Aurora Store (its Cloudflare front refuses uxdroid's user agent), so anonymous mode needs a dispenser that accepts uxdroid.
+- `--account <email>` signs in as your own account with a token read from standard input, not echoed on a terminal, never from the command line, where other users can see it; uxdroid never asks for a password. Give the AAS token (`aas_et/...`), or the OAuth token of Google's sign-in page, which uxdroid trades for an AAS token: open `https://accounts.google.com/EmbeddedSetup` in a browser, sign in and accept, then copy the value of the `oauth_token` cookie of `accounts.google.com` (it starts with `oauth2_4/`, and expires within minutes) and run `uxdroid sources play --account <email>`, pasting it. The device then checks in with Google, as a new Android device does, and its profile is registered with Play. `--anonymous` goes back and deletes the token.
+
+What it keeps, in `<data>/store/play`, a directory readable only by you: `settings.json` (the mode, the dispenser and the account's address), `token` (the AAS token) and `session.json` (the sign-in in use and the device profile it was made for), both readable only by you, never printed. A sign-in Play refuses (401 or 403) is renewed once; another profile, such as another locale, signs in again.
+
+| Error | Meaning |
+|-------|---------|
+| `Google Play answered with a malformed message (<why>), so it is refused` | An answer that is cut short or damaged; nothing of it is used |
+| `Google Play's delivery of <package> gives <file> the address <url>, which is not Google Play's, so it is refused` | A download address on another host or scheme; also `names a split <name>, which is not a valid or a new split name` and `has a malformed hash` |
+| `the split <name> of <package> from play does not match its index (SHA-256 ...)` | A file is not the one Play stated |
+| `the token dispenser <url> answered <code>, so Google Play cannot be signed in to anonymously now; ...` | The dispenser refused or failed |
+| `Google Play answered <code> to <request>` | Play refused a request, with a hint for 401, 403 and 429 |
+
+Measured on 2026-11-05 from this machine over the Internet, anonymous, release build (`benches/store/play.sh`): `search markor` 0.735 s (median of 5, 0.714 to 0.959), and `install net.gsantner.markor --from play` 2.01 s (median of 5, 11,980,325 bytes, compiled); Signal's 121.8 MB in three files took 8.4 s. F-Droid over the Internet, measured the day before: a search with no cached index 15 to 62 s, mostly its 23 MB index, a cached one 0.071 s, and Markor's install 9.5 to 25.8 s. Not measured: Aurora Store's own flow, an Android app that would need the network to run here; F-Droid on the same day; downloads of Play's compressed files, which uxdroid does not use yet (Signal's would be 47 MB instead of 122). The account mode is proven only against a fake server in the tests; no real account was used.
+
+Not yet: direct URLs as sources, beta channels, a source's own mirrors, removing a source, and checking `entry.json`'s `maxAge`.
 
 #### A terminal UI over the same store
 

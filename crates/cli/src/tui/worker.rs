@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use uxdroid_store::config::Config;
 use uxdroid_store::fetch::{Fetch, Http};
-use uxdroid_store::{App, Permissions, Refresh, Store};
+use uxdroid_store::{App, Permissions, Refresh, Store, Want};
 
 use crate::store::{Listed, install_package, list, remove_package, update};
 
@@ -46,6 +46,8 @@ pub(crate) enum Job {
         enabled: bool,
     },
     RefreshAfter(u64),
+    /// Asks Google Play, which has no index to search as the user types, for what was typed.
+    Search(String),
 }
 
 impl Job {
@@ -63,6 +65,7 @@ impl Job {
                 format!("{} {name}", if *enabled { "enabling" } else { "disabling" })
             }
             Job::RefreshAfter(_) => "changing the refresh interval".to_string(),
+            Job::Search(text) => format!("asking Google Play for {text}"),
         }
     }
 }
@@ -80,6 +83,8 @@ pub(crate) enum Reply {
     },
     /// The apps of the enabled sources and notes about them, or why none could be read.
     Apps(Result<(Vec<App>, Vec<String>), String>),
+    /// The apps Google Play found for a search, and notes about it, or why it could not be asked.
+    Found(Result<(Vec<App>, Vec<String>), String>),
     /// What each version of those apps requests, as their cached indexes list it.
     Permissions(Permissions),
     Done(Result<String, String>),
@@ -252,6 +257,24 @@ fn perform(
                 "{} {name}",
                 if enabled { "enabled" } else { "disabled" }
             ))
+        }
+        Job::Search(text) => {
+            let play = store
+                .config()
+                .play()
+                .map(|source| source.name.clone())
+                .ok_or_else(|| {
+                    "Google Play is not a source: uxdroid sources enable play".to_string()
+                })?;
+            let found = store
+                .apps_for(Some(&play), Refresh::IfStale, Want::Matching(&text))
+                .map_err(|error| error.0);
+            let failed = found.as_ref().err().cloned();
+            let _ = outbox.send(Reply::Found(found));
+            match failed {
+                Some(error) => Err(error),
+                None => Ok(String::new()),
+            }
         }
         Job::RefreshAfter(hours) => {
             store

@@ -97,6 +97,10 @@ fn hint(state: &State) -> String {
         (Some(Modal::Help), ..) => "any key closes the help".to_string(),
         (Some(Modal::Remove(_)), ..) => "y removes, n or Esc keeps".to_string(),
         (Some(Modal::Form(_)), ..) => "Tab next field  Enter submit  Esc cancel".to_string(),
+        (None, View::Search, true) if state.play_enabled() => {
+            "type to search  Enter asks Google Play  ↓ results  Tab next  Ctrl-R refresh  Ctrl-C quit"
+                .to_string()
+        }
         (None, View::Search, true) => {
             "type to search  Enter/↓ results  Tab next  Ctrl-R refresh  Ctrl-C quit".to_string()
         }

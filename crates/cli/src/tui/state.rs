@@ -384,7 +384,13 @@ impl State {
                 self.query.pop();
                 self.search();
             }
-            KeyCode::Enter | KeyCode::Down | KeyCode::Esc => self.typing = false,
+            KeyCode::Enter => {
+                self.typing = false;
+                if self.play_enabled() && !self.query.trim().is_empty() {
+                    self.start(Job::Search(self.query.clone()));
+                }
+            }
+            KeyCode::Down | KeyCode::Esc => self.typing = false,
             KeyCode::Tab => self.cycle(true),
             KeyCode::BackTab => self.cycle(false),
             _ => {}
@@ -542,6 +548,14 @@ impl State {
         self.modal = Some(Modal::Form(form));
     }
 
+    /// Whether Google Play is an enabled source, which Enter in the query box asks.
+    pub(crate) fn play_enabled(&self) -> bool {
+        self.config
+            .as_ref()
+            .and_then(|config| config.play())
+            .is_some_and(|source| source.enabled)
+    }
+
     pub(crate) fn reply(&mut self, reply: Reply) {
         match reply {
             Reply::Note(message) => self.say(clean(&message)),
@@ -562,6 +576,19 @@ impl State {
                 self.notes = notes.iter().map(|note| clean(note)).collect();
                 self.search();
             }
+            Reply::Found(Ok((found, notes))) => {
+                // Play's earlier results give way to these.
+                let play = self.config.as_ref().and_then(|config| config.play());
+                let mut apps = self.apps.take().unwrap_or_default();
+                if let Some(play) = play {
+                    apps.retain(|app| app.source != play.name);
+                }
+                apps.extend(found);
+                self.apps = Some(apps);
+                self.notes.extend(notes.iter().map(|note| clean(note)));
+                self.search();
+            }
+            Reply::Found(Err(_)) => {}
             Reply::Permissions(permissions) => self.permissions = Some(permissions),
             Reply::Apps(Err(error)) => {
                 self.apps = Some(Vec::new());

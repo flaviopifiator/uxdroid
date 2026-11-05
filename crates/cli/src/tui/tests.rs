@@ -126,10 +126,14 @@ struct Ui {
 
 impl Ui {
     fn new(dir: &Path, data: &Path, width: u16, height: u16) -> Self {
-        let cancel = Arc::new(AtomicBool::new(false));
         let root = dir.join("repo");
         let connect: worker::Connect =
             Arc::new(move || Box::new(Files { root: root.clone() }) as Box<dyn Fetch>);
+        Self::with(connect, data, width, height)
+    }
+
+    fn with(connect: worker::Connect, data: &Path, width: u16, height: u16) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
         let (jobs, replies) = worker::spawn(data.to_path_buf(), connect, cancel.clone());
         let mut ui = Self {
             state: State::new(data.to_path_buf(), cancel),
@@ -764,4 +768,73 @@ fn a_worker_panic_ends_the_ui_with_its_message_and_the_terminal_restored() {
     assert!(!super::restores_on_panic(Some("uxdroid-tui-worker")));
     assert!(super::restores_on_panic(Some("main")));
     assert!(super::restores_on_panic(None));
+}
+
+#[test]
+fn enter_asks_google_play_whose_apps_install_like_the_others() {
+    use uxdroid_testkit::play::{FakePlay, PlayApp};
+    let dir = scratch("play");
+    let key = Key::test();
+    fdroid::write_repo(&dir.join("repo"), FIRST, &catalog((2, "2.0")), &[], &key);
+    let play = FakePlay::start(Some(&dir.join("repo")));
+    play.add(PlayApp::new(
+        "com.example.chat",
+        "Chat Messenger",
+        5,
+        "5.0",
+        apk("com.example.chat", 5, "5.0"),
+        &key.fingerprint(),
+    ));
+    let data = dir.join("data");
+    let mut store = Store::open(&data).unwrap();
+    store
+        .change(|config| {
+            config.set_enabled("fdroid", false)?;
+            config.add("test", &play.repo(), &key.fingerprint())?;
+            config.enable_play();
+            Ok(())
+        })
+        .unwrap();
+    let path = data.join("store/sources.json");
+    let config = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(uxdroid_store::config::PLAY_URL, &play.api());
+    std::fs::write(&path, config).unwrap();
+    store.play_dispenser(&play.dispenser()).unwrap();
+
+    let mut ui = Ui::with(worker::http(), &data, 100, 24);
+    assert!(ui.screen().contains("Enter asks Google Play"));
+    ui.typed("chat");
+    assert!(
+        !ui.screen().contains("Chat Messenger"),
+        "Play is asked only on Enter"
+    );
+    ui.press(KeyCode::Enter);
+    assert!(ui.screen().contains("asking Google Play for chat"));
+    ui.settle();
+    let screen = ui.screen();
+    let row = line_with(&screen, "com.example.chat");
+    assert!(
+        row.contains("Chat Messenger") && row.contains("play") && row.contains("5.0"),
+        "{screen}"
+    );
+    ui.press(KeyCode::Char('i'));
+    ui.settle();
+    let screen = ui.screen();
+    assert!(!ui.state.status.error, "{screen}");
+    assert_eq!(
+        Installed::read(&data, "com.example.chat").unwrap(),
+        Some(Installed {
+            source: "play".to_string(),
+            version_code: 5,
+            version_name: "5.0".to_string(),
+        })
+    );
+    // The index's apps are still found as the user types.
+    ui.press(KeyCode::Char('/'));
+    for _ in 0..4 {
+        ui.press(KeyCode::Backspace);
+    }
+    ui.typed("notes");
+    assert!(ui.screen().contains("com.example.notes"));
 }
