@@ -346,5 +346,73 @@ class BlockerTest(Check):
         self.assertIn("blocked: 7", out)
 
 
+class Collect(Check):
+    """What the sandbox writes is data from untrusted apps: the host copies only regular files with
+    expected names out of it, never follows a link and never writes where the sandbox can."""
+
+    def setUp(self):
+        base = os.environ.get("TMPDIR", "/tmp")
+        self.top = os.path.join(base, f"corpus-collect-{os.getpid()}-{id(self)}")
+        self.stage, self.out = os.path.join(self.top, "stage"), os.path.join(self.top, "out")
+        for sub in ("rows", "logs", "shots"):
+            os.makedirs(os.path.join(self.stage, sub))
+        os.makedirs(self.out)
+        self.outside = os.path.join(self.top, "outside")
+        with open(self.outside, "w") as f:
+            f.write("untouched\n")
+
+    def write(self, relative, text):
+        with open(os.path.join(self.stage, relative), "w") as f:
+            f.write(text)
+
+    def row(self, package, blocker="-"):
+        return "\t".join([package, "1", "x86_64", "yes", "100", "yes", "no", "yes", blocker])
+
+    def test_rows_and_logs_of_the_run_are_copied(self):
+        self.write("rows/b-0.tsv", self.row("org.a") + "\n")
+        self.write("logs/org.a.log", "log of a\n")
+        rows = corpus.collect(self.stage, self.out, {"org.a"})
+        self.assertEqual(rows, [self.row("org.a")])
+        with open(os.path.join(self.out, "report.tsv")) as f:
+            self.assertEqual(f.read(), self.row("org.a") + "\n")
+        with open(os.path.join(self.out, "logs", "org.a.log")) as f:
+            self.assertEqual(f.read(), "log of a\n")
+        self.assertFalse(os.path.exists(self.stage))
+
+    def test_a_link_left_by_an_app_is_not_followed(self):
+        os.symlink(self.outside, os.path.join(self.stage, "rows", "b-0.tsv"))
+        os.symlink(self.outside, os.path.join(self.stage, "logs", "org.a.log"))
+        os.rmdir(os.path.join(self.stage, "shots"))
+        os.symlink(self.top, os.path.join(self.stage, "shots"))
+        self.assertEqual(corpus.collect(self.stage, self.out, {"org.a"}), [])
+        self.assertFalse(os.path.exists(os.path.join(self.out, "logs", "org.a.log")))
+        with open(self.outside) as f:
+            self.assertEqual(f.read(), "untouched\n")
+        self.assertTrue(os.path.exists(self.top))
+
+    def test_rows_naming_other_apps_or_with_extra_columns_are_dropped(self):
+        self.write("rows/b-0.tsv", self.row("org.other") + "\n" + self.row("org.a") + "\tmore\n"
+                   + self.row("org.a") + "\n")
+        self.assertEqual(corpus.collect(self.stage, self.out, {"org.a"}), [self.row("org.a")])
+
+    def test_the_report_is_not_written_through_a_link(self):
+        os.symlink(self.outside, os.path.join(self.out, "report.tsv"))
+        self.write("rows/b-0.tsv", self.row("org.a") + "\n")
+        try:
+            corpus.collect(self.stage, self.out, {"org.a"})
+        except OSError:
+            pass
+        with open(self.outside) as f:
+            self.assertEqual(f.read(), "untouched\n")
+
+    def test_the_ranking_replaces_a_link_instead_of_writing_through_it(self):
+        ranking = os.path.join(self.out, "ranking.txt")
+        os.symlink(self.outside, ranking)
+        corpus.replace_host(ranking, b"ranked\n")
+        self.assertFalse(os.path.islink(ranking))
+        with open(self.outside) as f:
+            self.assertEqual(f.read(), "untouched\n")
+
+
 if __name__ == "__main__":
     main()

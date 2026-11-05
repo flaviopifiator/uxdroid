@@ -20,6 +20,7 @@ import json
 import os
 import random
 import re
+import stat
 import struct
 import sys
 import zlib
@@ -446,6 +447,105 @@ def download(release, directory, repo=REPO, attempts=2):
 # Commands
 
 
+# Results written by the sandbox
+
+REPORT_COLUMNS = ["package", "version", "abi", "installed", "first_frame_ms", "alive", "flat",
+                  "tap_changed", "blocker"]
+# What each staging subdirectory may hold, and the largest file accepted from it.
+STAGED = {"rows": (".tsv", 1 << 20), "logs": (".log", 32 << 20), "shots": (".png", 32 << 20)}
+STAGED_NAME = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
+
+
+def read_staged(path, limit):
+    """A regular file the sandbox wrote, never through a link and never more than `limit` bytes."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        # A regular file is read whole by one read on Linux.
+        data = os.read(fd, limit + 1)
+        return data if len(data) <= limit else None
+    finally:
+        os.close(fd)
+
+
+def write_host(path, data, append=False):
+    """Writes into a directory only the host writes; a link planted there is refused, not followed."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
+    fd = os.open(path, flags, 0o644)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
+def staged_rows(data, packages):
+    """The rows of a staged rows file that name an app of this run and have the report's columns."""
+    rows = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        fields = line.split("\t")
+        if len(fields) != len(REPORT_COLUMNS) or fields[0] not in packages:
+            continue
+        rows.append("\t".join(clean(field) for field in fields))
+    return rows
+
+
+def collect(stage, out, packages):
+    """Moves what the sandbox wrote into `stage` to `out`, which the sandbox never sees: only regular
+    files with expected names, read without following links; rows are checked field by field.
+    Returns the accepted report rows. The staging directory is removed afterwards."""
+    accepted = []
+    for sub, (suffix, limit) in STAGED.items():
+        directory = os.path.join(stage, sub)
+        try:
+            if not stat.S_ISDIR(os.lstat(directory).st_mode):
+                continue
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        if sub != "rows":
+            os.makedirs(os.path.join(out, sub), exist_ok=True)
+        for name in names:
+            if not STAGED_NAME.match(name) or not name.endswith(suffix) or name.startswith("."):
+                continue
+            try:
+                data = read_staged(os.path.join(directory, name), limit)
+            except OSError:
+                continue
+            if data is None:
+                continue
+            if sub == "rows":
+                accepted += staged_rows(data, packages)
+            elif name[: -len(suffix)] in packages:
+                write_host(os.path.join(out, sub, name), data)
+    remove_tree(stage)
+    if accepted:
+        write_host(os.path.join(out, "report.tsv"), ("\n".join(accepted) + "\n").encode(), append=True)
+    return accepted
+
+
+def remove_tree(top):
+    """Removes a directory tree without following links (the dev image's Python has no shutil)."""
+    for directory, dirs, files in os.walk(top, topdown=False):
+        for name in files + [d for d in dirs if os.path.islink(os.path.join(directory, d))]:
+            try:
+                os.unlink(os.path.join(directory, name))
+            except OSError:
+                pass
+        try:
+            os.rmdir(directory)
+        except OSError:
+            pass
+
+
+def replace_host(path, data):
+    """Writes `path` whole, through a new file renamed over it."""
+    temporary = f"{path}.{os.getpid()}.part"
+    write_host(temporary, data)
+    os.replace(temporary, path)
+
+
 def option(args, name, default=None):
     if name in args:
         i = args.index(name)
@@ -535,7 +635,16 @@ def main(args):
         outcome = {"installed": yes[0], "alive": yes[1], "frame": yes[2], "flat": flat}
         print(find_blocker(read_text(args[0]), read_text(args[1]), outcome))
     elif command == "rank":
-        sys.stdout.write(format_ranking(read_report(args[0])))
+        output = option(args, "--output")
+        ranking = format_ranking(read_report(args[0]))
+        if output:
+            replace_host(output, ranking.encode())
+        else:
+            sys.stdout.write(ranking)
+    elif command == "collect":
+        packages = {row.get("package") for row in read_tsv(args[2])}
+        rows = collect(args[0], args[1], packages)
+        print(f"{len(rows)} rows collected from {args[0]}", file=sys.stderr)
     else:
         sys.stderr.write(__doc__)
         return 2

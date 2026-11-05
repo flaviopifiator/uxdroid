@@ -32,8 +32,10 @@ BATCH="${BATCH:-$((JOBS * 4))}"
 OUT="${OUT:-$CATALOG-out/$(date +%Y-%m-%d)}"
 CATALOG=$(mkdir -p "$CATALOG" && cd "$CATALOG" && pwd)
 OUT=$(mkdir -p "$OUT" && cd "$OUT" && pwd)
-APKS="$CATALOG/apks" SHARDS="$CATALOG/run"
-mkdir -p "$CATALOG/store" "$APKS" "$SHARDS" "$OUT/batches" "$OUT/rows"
+# The sandbox writes only into a staging directory per shard, outside $OUT; the host copies what
+# it accepts from there into $OUT, which no container ever mounts.
+APKS="$CATALOG/apks" SHARDS="$CATALOG/run" STAGE="$CATALOG/stage"
+mkdir -p "$CATALOG/store" "$APKS" "$SHARDS" "$STAGE" "$OUT/batches"
 
 exec 9>"$OUT/.lock"
 flock -n 9 || { echo "another run is using $OUT" >&2; exit 1; }
@@ -66,7 +68,9 @@ fi
 [ -f "$OUT/report.tsv" ] || printf "package\tversion\tabi\tinstalled\tfirst_frame_ms\talive\tflat\ttap_changed\tblocker\n" \
     >"$OUT/report.tsv"
 # Rows of a run that stopped half way through a batch are kept.
-cat "$OUT"/rows/*.tsv >>"$OUT/report.tsv" 2>/dev/null; rm -f "$OUT"/rows/*.tsv
+for stage in "$STAGE"/*/; do
+    [ -d "$stage" ] && "${CORPUS[@]}" collect "$stage" "$OUT" "$OUT/apps.tsv" 2>>"$OUT/run.log"
+done
 
 "${CORPUS[@]}" pending "$OUT/apps.tsv" "$OUT/report.tsv" >"$OUT/pending.tsv"
 rm -f "$OUT"/batches/*.tsv
@@ -89,6 +93,7 @@ run_batch() {
     name=$(basename "$list" .tsv)
     for j in $(seq 0 $((JOBS - 1))); do
         mkdir -p "$SHARDS/$name-$j"
+        rm -rf "${STAGE:?}/$name-$j" && mkdir "$STAGE/$name-$j"
         head -1 "$list" >"$SHARDS/$name-$j/apps.tsv"
     done
     j=0
@@ -105,11 +110,12 @@ run_batch() {
         [ "$(wc -l <"$SHARDS/$name-$j/apps.tsv")" -gt 1 ] || continue
         UXDROID_SAMPLES="$SHARDS/$name-$j" docker compose run --rm -T -e WAIT="$WAIT" -e SHARD="$name-$j" \
             -e UXDROID_TRANSLATOR=/translator/libuxdroid_dynarmic.so -v "$CATALOG/translator:/translator:ro" \
-            -v "$OUT:/out" sandbox bash /work/runtime/corpus/run_apps.sh >"$OUT/batches/$name-$j.log" 2>&1 &
+            -v "$STAGE/$name-$j:/out" sandbox bash /work/runtime/corpus/run_apps.sh >"$OUT/batches/$name-$j.log" 2>&1 &
     done
     wait $(jobs -p | grep -v -x "${downloading:-none}")
-    cat "$OUT"/rows/"$name"-*.tsv >>"$OUT/report.tsv" 2>/dev/null
-    rm -f "$OUT"/rows/"$name"-*.tsv
+    for j in $(seq 0 $((JOBS - 1))); do
+        "${CORPUS[@]}" collect "$STAGE/$name-$j" "$OUT" "$OUT/apps.tsv" 2>>"$OUT/run.log"
+    done
     for j in $(seq 0 $((JOBS - 1))); do
         rm -f "$SHARDS/$name-$j"/*.apk "$SHARDS/$name-$j/apps.tsv"
         rmdir "$SHARDS/$name-$j"
@@ -119,7 +125,7 @@ run_batch() {
             rm -f "$APKS/${package}_$version.apk"
         done
     fi
-    "${CORPUS[@]}" rank "$OUT/report.tsv" >"$OUT/ranking.txt"
+    "${CORPUS[@]}" rank "$OUT/report.tsv" --output "$OUT/ranking.txt"
 }
 
 # The next batch downloads while this one runs.
