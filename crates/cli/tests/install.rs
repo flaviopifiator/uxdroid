@@ -6,8 +6,8 @@ use std::process::{Command, Output};
 
 use uxdroid_testkit::{
     ATTR_IS_SPLIT_REQUIRED, ATTR_REQUIRED_SPLIT_TYPES, ATTR_SPLIT_TYPES, ATTR_TARGET_SDK,
-    ATTR_VERSION_CODE, Apk, Axml, Key, Value, android, apks_table, dex, plain, sample_manifest,
-    split_manifest,
+    ATTR_VERSION_CODE, Apk, Axml, BLOCK_V31, INSTALLED_DATA, Key, Past, Value, android, apks_table,
+    dex, plain, sample_manifest, split_manifest,
 };
 
 /// The ABI this host runs apps with.
@@ -1658,5 +1658,72 @@ fn with_a_framework_feature_split_code_is_compiled_after_the_base() {
             .split(' ')
             .any(|word| word.starts_with(&format!("--classpath-dir={}", staged.display()))),
         "--classpath-dir in {split}"
+    );
+}
+
+/// An update signed by `new`, which rotated from `old` with `flags`.
+fn rotated_update(dir: &Path, old: &Key, new: &Key, flags: u32) -> PathBuf {
+    let path = dir.join("rotated.apk");
+    let past = [Past {
+        key: old,
+        flags,
+        forged_by: None,
+    }];
+    let bytes = Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib(ABI, "libnew.so")
+        .signed_rotated(&past, new, BLOCK_V31);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn an_update_by_a_rotated_key_installs_when_its_lineage_trusts_the_installed_signer() {
+    let dir = scratch("rotated-signer");
+    let data = dir.join("data");
+    let old = dir.join("old.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib(ABI, "libold.so")
+        .write_signed(&old, &Key::test());
+    assert_eq!(install(&old, &data).status.code(), Some(0));
+
+    let new = rotated_update(&dir, &Key::test(), &Key::other(), INSTALLED_DATA);
+    let output = install(&new, &data);
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        listing(&data.join("data/com.example.app/lib")),
+        ["libnew.so"]
+    );
+    // From now on the app is the rotated key's.
+    assert_eq!(
+        std::fs::read_to_string(data.join("app/.com.example.app.signer")).unwrap(),
+        format!("{}\n", Key::other().fingerprint())
+    );
+}
+
+#[test]
+fn an_update_by_a_rotated_key_is_refused_when_its_lineage_withholds_the_installed_data() {
+    let dir = scratch("rotated-no-data");
+    let data = dir.join("data");
+    let old = dir.join("old.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib(ABI, "libold.so")
+        .write_signed(&old, &Key::test());
+    assert_eq!(install(&old, &data).status.code(), Some(0));
+
+    let output = install(&rotated_update(&dir, &Key::test(), &Key::other(), 0), &data);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        text(&output.stderr).contains("is installed signed by a different certificate"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert_eq!(
+        listing(&data.join("data/com.example.app/lib")),
+        ["libold.so"]
     );
 }

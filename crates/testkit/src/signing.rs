@@ -167,9 +167,14 @@ fn sequence(items: &[Vec<u8>]) -> Vec<u8> {
 
 const ECDSA_SHA256: u32 = 0x0201;
 const BLOCK_V2: u32 = 0x7109_871a;
+pub const BLOCK_V3: u32 = 0xf053_68c0;
+pub const BLOCK_V31: u32 = 0x1b93_ad61;
+const PROOF_OF_ROTATION: u32 = 0x3ba0_6f8c;
+/// A past signer's capability: the data an app installed with it keeps is trusted.
+pub const INSTALLED_DATA: u32 = 1;
 
-/// Inserts an APK Signing Block with one v2 signer before the central directory.
-pub(crate) fn sign_v2(zip: &[u8], key: &Key) -> Vec<u8> {
+/// Where the archive's end record and central directory are, and the digest a signer signs.
+fn layout(zip: &[u8]) -> (usize, usize, Vec<u8>) {
     let end = (0..=zip.len() - 22)
         .rev()
         .find(|at| zip[*at..*at + 4] == [0x50, 0x4b, 0x05, 0x06])
@@ -182,6 +187,12 @@ pub(crate) fn sign_v2(zip: &[u8], key: &Key) -> Vec<u8> {
         &zip[end..],
         central_directory as u32,
     );
+    (end, central_directory, digest)
+}
+
+/// Inserts an APK Signing Block with one v2 signer before the central directory.
+pub(crate) fn sign_v2(zip: &[u8], key: &Key) -> Vec<u8> {
+    let (_, _, digest) = layout(zip);
     let mut algorithm_digest = ECDSA_SHA256.to_le_bytes().to_vec();
     algorithm_digest.extend(prefixed(&digest));
     let signed_data = [
@@ -198,7 +209,102 @@ pub(crate) fn sign_v2(zip: &[u8], key: &Key) -> Vec<u8> {
         prefixed(&key.public_key),
     ]
     .concat();
-    let value = [BLOCK_V2.to_le_bytes().to_vec(), sequence(&[signer])].concat();
+    insert_block(zip, BLOCK_V2, &sequence(&[signer]))
+}
+
+/// One past signer of a rotated key: its key, the capabilities it keeps, and, to forge a lineage,
+/// another key that signs its successor's node instead of it.
+pub struct Past<'a> {
+    pub key: &'a Key,
+    pub flags: u32,
+    pub forged_by: Option<&'a Key>,
+}
+
+/// A proof-of-rotation lineage, as apksigner writes it: version 1, then a node per certificate from
+/// the oldest to `current`, each signed by the key before it.
+fn lineage(past: &[Past], current: &Key) -> Vec<u8> {
+    let mut out = 1u32.to_le_bytes().to_vec();
+    let certificates: Vec<(&Key, u32)> = past
+        .iter()
+        .map(|past| (past.key, past.flags))
+        .chain([(current, 0)])
+        .collect();
+    for (index, (key, flags)) in certificates.iter().enumerate() {
+        // The algorithm that signs this node, by the key before it; none for the first.
+        let signed_with = if index == 0 { 0 } else { ECDSA_SHA256 };
+        let signed_data = [
+            prefixed(&key.certificate),
+            signed_with.to_le_bytes().to_vec(),
+        ]
+        .concat();
+        let signature = match index {
+            0 => Vec::new(),
+            _ => past[index - 1]
+                .forged_by
+                .unwrap_or(past[index - 1].key)
+                .sign(&signed_data),
+        };
+        let next = if index + 1 < certificates.len() {
+            ECDSA_SHA256
+        } else {
+            0
+        };
+        let node = [
+            prefixed(&signed_data),
+            flags.to_le_bytes().to_vec(),
+            next.to_le_bytes().to_vec(),
+            prefixed(&signature),
+        ]
+        .concat();
+        out.extend(prefixed(&node));
+    }
+    out
+}
+
+/// Inserts an APK Signing Block with one v3 (`BLOCK_V3`) or v3.1 (`BLOCK_V31`) signer for SDK 24
+/// and later, whose key rotated from `past`, oldest first, to `last` (normally `key` itself), when
+/// `past` is not empty.
+pub(crate) fn sign_v3(zip: &[u8], key: &Key, past: &[Past], last: &Key, block: u32) -> Vec<u8> {
+    let (_, _, digest) = layout(zip);
+    let mut algorithm_digest = ECDSA_SHA256.to_le_bytes().to_vec();
+    algorithm_digest.extend(prefixed(&digest));
+    let (min, max) = (24u32, i32::MAX as u32);
+    let attributes: Vec<Vec<u8>> = if past.is_empty() {
+        Vec::new()
+    } else {
+        vec![
+            [
+                PROOF_OF_ROTATION.to_le_bytes().to_vec(),
+                lineage(past, last),
+            ]
+            .concat(),
+        ]
+    };
+    let signed_data = [
+        sequence(&[algorithm_digest]),
+        sequence(std::slice::from_ref(&key.certificate)),
+        min.to_le_bytes().to_vec(),
+        max.to_le_bytes().to_vec(),
+        sequence(&attributes),
+    ]
+    .concat();
+    let mut signature = ECDSA_SHA256.to_le_bytes().to_vec();
+    signature.extend(prefixed(&key.sign(&signed_data)));
+    let signer = [
+        prefixed(&signed_data),
+        min.to_le_bytes().to_vec(),
+        max.to_le_bytes().to_vec(),
+        sequence(&[signature]),
+        prefixed(&key.public_key),
+    ]
+    .concat();
+    insert_block(zip, block, &sequence(&[signer]))
+}
+
+/// Inserts an APK Signing Block holding the one pair `id`, `value` before the central directory.
+fn insert_block(zip: &[u8], id: u32, value: &[u8]) -> Vec<u8> {
+    let (end, central_directory, _) = layout(zip);
+    let value = [id.to_le_bytes().to_vec(), value.to_vec()].concat();
     let mut pairs = ((value.len()) as u64).to_le_bytes().to_vec();
     pairs.extend(value);
     let size = (pairs.len() + 8 + 16) as u64;

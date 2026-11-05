@@ -5,8 +5,6 @@
 //! The names describe Android's emulator, the generic device Google's own SDK publishes, because Play
 //! serves apps only to devices it can classify; nothing identifies the user or this machine.
 
-use std::collections::BTreeMap;
-
 use sha2::{Digest, Sha256};
 
 use super::proto::Writer;
@@ -86,56 +84,10 @@ impl Profile {
         "org.apache.http.legacy",
     ];
 
-    /// The device as the token dispenser takes it: Android's build and configuration names.
-    pub(crate) fn properties(&self) -> BTreeMap<&'static str, String> {
-        let names = self.names();
-        let (width, height) = (1080, 1920);
-        [
-            ("UserReadableName", format!("uxdroid generic {}", self.abi)),
-            ("Build.HARDWARE", "ranchu".to_string()),
-            ("Build.RADIO", "unknown".to_string()),
-            ("Build.BOOTLOADER", "unknown".to_string()),
-            ("Build.FINGERPRINT", names.fingerprint.to_string()),
-            ("Build.BRAND", "google".to_string()),
-            ("Build.DEVICE", names.device.to_string()),
-            ("Build.VERSION.SDK_INT", self.sdk.to_string()),
-            ("Build.VERSION.RELEASE", RELEASE.to_string()),
-            ("Build.MODEL", names.product.to_string()),
-            ("Build.MANUFACTURER", "Google".to_string()),
-            ("Build.PRODUCT", names.product.to_string()),
-            ("Build.ID", BUILD_ID.to_string()),
-            ("TouchScreen", "3".to_string()),
-            ("Keyboard", "1".to_string()),
-            ("Navigation", "1".to_string()),
-            ("ScreenLayout", "2".to_string()),
-            ("HasHardKeyboard", "false".to_string()),
-            ("HasFiveWayNavigation", "false".to_string()),
-            ("Screen.Density", self.density.to_string()),
-            ("Screen.Width", width.to_string()),
-            ("Screen.Height", height.to_string()),
-            ("Platforms", names.platforms.join(",")),
-            ("SharedLibraries", Self::LIBRARIES.join(",")),
-            ("Features", Self::FEATURES.join(",")),
-            ("Locales", self.locales().join(",")),
-            ("GSF.version", GSF_VERSION.to_string()),
-            ("Vending.version", VENDING_VERSION.to_string()),
-            ("Vending.versionString", VENDING_VERSION_NAME.to_string()),
-            ("CellOperator", "310260".to_string()),
-            ("SimOperator", "310260".to_string()),
-            ("Roaming", "mobile-notroaming".to_string()),
-            ("Client", "android-google".to_string()),
-            ("TimeZone", "UTC".to_string()),
-            ("GL.Version", GL_VERSION.to_string()),
-            ("GL.Extensions", "GL_OES_EGL_image".to_string()),
-        ]
-        .into_iter()
-        .collect()
-    }
-
-    /// The SHA-256 of the properties, which a sign-in is kept for: another profile signs in again.
+    /// The SHA-256 of the check-in, which holds the whole device configuration: a sign-in is kept
+    /// for it, and another profile signs in again.
     pub(crate) fn digest(&self) -> String {
-        let json = serde_json::to_vec(&self.properties()).expect("properties serialize");
-        super::proto::hex(&Sha256::digest(json))
+        super::proto::hex(&Sha256::digest(self.checkin()))
     }
 
     /// The user agent of Play's store app on this device.

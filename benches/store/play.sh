@@ -1,14 +1,14 @@
 #!/bin/bash
 # Times `uxdroid search` and `uxdroid install <package> --from play` against the real Google Play,
-# anonymously. It needs the network, which the sandbox does not have, so it runs in a copy of the
+# signed in with your own account. It needs the network, which the sandbox does not have, so it runs in a copy of the
 # sandbox service with the project's default network (see README.md); no app code runs in it: the
 # install compiles the app and parses its manifest, and nothing starts it.
 #
 #   docker compose -f compose.yaml -f <override with network> run --rm -T sandbox-net \
 #       bash /work/benches/store/play.sh
 #
-# DATA is a data directory where Play is enabled and signed in (by default a new one, signed in through
-# the dispenser). Every Play request costs a little of a shared account's quota, so RUNS stays small.
+# DATA is a data directory where Play is enabled and signed in with `uxdroid sources play --account
+# <email>`. Every request counts against the account, so RUNS stays small.
 set -u
 TARGET=${TARGET:-/cache/target/release}
 B=$TARGET/uxdroid
@@ -19,11 +19,7 @@ export UXDROID_RUNTIME=${UXDROID_RUNTIME:-/runtime/art} LANG=en_US.UTF-8
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export HOME=$work/home
-D=${DATA:-$work/data}
-if [ -z "${DATA:-}" ]; then
-    "$B" sources disable fdroid --data "$D" >/dev/null
-    "$B" sources enable play --data "$D" >/dev/null 2>&1
-fi
+D=${DATA:?DATA must name a data directory where Play is enabled and signed in}
 TIMEFORMAT=%R
 times() { # name, command...: runs it, appending its wall time in seconds
     local name=$1; shift

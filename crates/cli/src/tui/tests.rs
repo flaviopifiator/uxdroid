@@ -772,7 +772,8 @@ fn a_worker_panic_ends_the_ui_with_its_message_and_the_terminal_restored() {
 
 #[test]
 fn enter_asks_google_play_whose_apps_install_like_the_others() {
-    use uxdroid_testkit::play::{FakePlay, PlayApp};
+    use uxdroid_testkit::play::{AAS_TOKEN, FakePlay, PlayApp};
+    let uxdroid_store_token = || AAS_TOKEN;
     let dir = scratch("play");
     let key = Key::test();
     fdroid::write_repo(&dir.join("repo"), FIRST, &catalog((2, "2.0")), &[], &key);
@@ -800,7 +801,9 @@ fn enter_asks_google_play_whose_apps_install_like_the_others() {
         .unwrap()
         .replace(uxdroid_store::config::PLAY_URL, &play.api());
     std::fs::write(&path, config).unwrap();
-    store.play_dispenser(&play.dispenser()).unwrap();
+    store
+        .play_account("me@example.org", uxdroid_store_token())
+        .unwrap();
 
     let mut ui = Ui::with(worker::http(), &data, 100, 24);
     assert!(ui.screen().contains("Enter asks Google Play"));

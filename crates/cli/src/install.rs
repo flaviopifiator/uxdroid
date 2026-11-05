@@ -20,7 +20,7 @@ use std::process::{Command, ExitCode, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use uxdroid_apk::{
-    ExecutionPath, Host, Kind, Part, Plan, Scheme, bundle_entries, extract_bundled,
+    ExecutionPath, Host, INSTALLED_DATA, Kind, Part, Plan, Scheme, bundle_entries, extract_bundled,
     extract_native_libs, host_abi, inspect, plan_splits, verify_signature,
 };
 
@@ -634,7 +634,9 @@ fn check_origin(base: &Part, origin: &Origin) -> Result<(), String> {
         expected.sort();
         expected.dedup();
         let actual = base.signature.fingerprints();
-        if actual != expected {
+        // A source may name the certificate a rotated key started from, as Google Play does.
+        let rotated = matches!(&expected[..], [one] if base.signature.descends_from(one, 0));
+        if actual != expected && !rotated {
             return Err(format!(
                 "the APK of {} from {source} is signed by {}, and its index says {}, so it is refused",
                 from.package,
@@ -780,7 +782,10 @@ pub(crate) fn install(apks: &[&Path], data: &Path, origin: &Origin) -> Result<Re
     match std::fs::read_to_string(&signer) {
         Ok(installed) => {
             let installed: Vec<&str> = installed.lines().collect();
-            if installed != fingerprints {
+            // As Android, an update by a rotated key is the same app when its proof of rotation
+            // names the installed signer and lets the new key keep that app's data.
+            let rotated = matches!(&installed[..], [one] if base.signature.descends_from(one, INSTALLED_DATA));
+            if installed != fingerprints && !rotated {
                 return Err(format!(
                     "{} is installed signed by a different certificate, so this update is refused: installed {}, update {}",
                     package.escape_debug(),
@@ -832,8 +837,12 @@ pub(crate) fn install(apks: &[&Path], data: &Path, origin: &Origin) -> Result<Re
             true => Some(plan_translation(&staging, package)?),
             false => None,
         };
-        // Splits are part of the app even when nothing is prepared, so they get a code directory.
-        let staged = matches!(runtime, Framework::Found(_)) || !plan.chosen.is_empty();
+        // Splits are part of the app even when nothing is prepared, so they get a code directory,
+        // and so does a download from a store, which is deleted once installed: without it, the
+        // app would have no APK to start from.
+        let staged = matches!(runtime, Framework::Found(_))
+            || !plan.chosen.is_empty()
+            || matches!(origin, Origin::Store(_));
         if staged {
             stage_code(&staged_code, &parts, &plan)?;
         }

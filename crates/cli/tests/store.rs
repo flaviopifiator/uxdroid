@@ -833,8 +833,15 @@ fn install_of_a_package_takes_the_newest_version_for_this_machine_and_records_it
         [
             ".com.example.notes.lock",
             ".com.example.notes.signer",
-            ".com.example.notes.source"
+            ".com.example.notes.source",
+            "com.example.notes"
         ]
+    );
+    // The download is gone, so with no framework the APK stays in the code directory, where the
+    // app is started from.
+    assert_eq!(
+        std::fs::read(fixture.data.join("app/com.example.notes/base.apk")).unwrap(),
+        fits.apk
     );
     assert_eq!(
         listing(&fixture.data.join("store/downloads")),

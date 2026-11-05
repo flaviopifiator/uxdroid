@@ -10,19 +10,18 @@
 //! - An app (`details` 1.2.4, and in search lists inside clusters, field 11) has 1 its package, 5
 //!   its title, 27 its short description, 8 its offers (1 the price in millionths, 2 the currency,
 //!   3 the price as shown) and 13.1 its details: 3 version code, 4 version name, 9 size, 14 package,
-//!   16 the date of its last update as shown and 17 its files (3 the size of each).
+//!   16 the date of its last update as shown, 17 its files (3 the size of each) and 22 its
+//!   signing certificate (2 its SHA-256, base64url).
 //! - A delivery (1.21) has 1 a status, 1 meaning delivered, and 2 the files: 1 size, 2 SHA-1, 3
 //!   address, 5 a cookie (1 name, 2 value), 19 SHA-256, and in 15 each split: 1 name, 2 size, 4
 //!   SHA-1, 5 address, 9 SHA-256. Hashes are base64url.
 //!
 //! Every file Play delivers is downloaded up to the size it states, must have the hashes it states,
-//! and then goes through the installer like any APK: signatures, one signer for base and splits, and
-//! the installed app's signer on an update. The details also name a signing certificate (13.1.22),
-//! but for an app that rotated its key it is the original one, which Signal's showed (Play named
-//! 29f34e5f…, Signal's published certificate, and the APK's signer for SDK 36 is the rotated
-//! 4be4f6cd…). The installer does not read rotation lineages, so it cannot link the two, and the
-//! certificate is not checked: what Play states is trusted through its delivery's hashes, which come
-//! from the same server as the details anyway.
+//! and then goes through the installer like any APK: signatures, one signer for base and splits,
+//! the installed app's signer on an update, and the certificate the details name: the APK's
+//! signer, or for an app that rotated its key, as Signal did, the certificate its proof of
+//! rotation starts from, which is what Play names (Signal's details name `29f34e5f…`, its APK's
+//! signer for SDK 36 is `4be4f6cd…`).
 
 pub mod account;
 mod profile;
@@ -32,7 +31,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-pub use account::{DEFAULT_DISPENSER, Mode, Settings, set_dispenser, use_account, use_anonymous};
+pub use account::{Settings, use_account};
 pub use profile::Profile;
 use proto::{Message, base64url};
 
@@ -60,12 +59,6 @@ fn pace() {
         std::thread::sleep(wait);
     }
     *last = Some(Instant::now());
-}
-
-pub(crate) fn malformed_json(what: &str, error: &serde_json::Error) -> Error {
-    Error::new(format!(
-        "{what} answered with something that is not the JSON expected ({error}), so it is refused"
-    ))
 }
 
 /// Asks Play's API at `api` for `path`, posting `body` when there is one: a form, or a protocol
@@ -176,16 +169,13 @@ impl<'a> Play<'a> {
         let session = match kept {
             Some(session) => session,
             None => {
-                let session = match settings.mode {
-                    Mode::Anonymous => account::dispense(self.fetch, &settings, self.profile)?,
-                    Mode::Account => account::sign_in(
-                        self.fetch,
-                        &self.source.url,
-                        self.root,
-                        &settings,
-                        self.profile,
-                    )?,
-                };
+                let session = account::sign_in(
+                    self.fetch,
+                    &self.source.url,
+                    self.root,
+                    &settings,
+                    self.profile,
+                )?;
                 account::keep_session(self.root, &session)?;
                 session
             }
@@ -482,6 +472,16 @@ fn app_of(item: Message, source: &str) -> Result<Option<App>, Error> {
         }
         _ => None,
     };
+    let mut signers = Vec::new();
+    for certificate in details.messages(22)? {
+        if let Some(sha256) = certificate
+            .string(2)?
+            .and_then(base64url)
+            .filter(|bytes| bytes.len() == 32)
+        {
+            signers.push(proto::hex(&sha256));
+        }
+    }
     let updated = details.string(16)?.and_then(shown_date);
     Ok(Some(App {
         source: source.to_string(),
@@ -499,7 +499,7 @@ fn app_of(item: Message, source: &str) -> Result<Option<App>, Error> {
             min_sdk: 0,
             max_sdk: None,
             abis: Vec::new(),
-            signers: Vec::new(),
+            signers,
             added: updated,
             stable: true,
             paid,

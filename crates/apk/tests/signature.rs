@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use uxdroid_apk::{Error, Scheme, verify_signature};
-use uxdroid_testkit::{Apk, Key, dex, sample_manifest};
+use uxdroid_testkit::{Apk, BLOCK_V3, BLOCK_V31, INSTALLED_DATA, Key, Past, dex, sample_manifest};
 
 fn scratch(name: &str) -> PathBuf {
     let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("signature-{name}"));
@@ -163,4 +163,75 @@ fn a_signing_block_pair_length_near_the_largest_integer_is_refused() {
     let reason = reason(verify("huge-pair", &signed));
 
     assert!(reason.contains("bad size"), "{reason}");
+}
+
+fn rotated(past: &[Past], key: &Key, block: u32) -> Vec<u8> {
+    app().signed_rotated(past, key, block)
+}
+
+fn from(key: &Key, flags: u32) -> Past<'_> {
+    Past {
+        key,
+        flags,
+        forged_by: None,
+    }
+}
+
+#[test]
+fn a_v3_key_rotation_names_the_current_signer_and_the_keys_it_rotated_from() {
+    let (old, new) = (Key::test(), Key::other());
+    for block in [BLOCK_V3, BLOCK_V31] {
+        let signature = verify(
+            "rotated",
+            &rotated(&[from(&old, INSTALLED_DATA)], &new, block),
+        )
+        .unwrap();
+        assert_eq!(signature.scheme, Scheme::V3);
+        assert_eq!(signature.fingerprints(), [new.fingerprint()], "{block:#x}");
+        assert_eq!(
+            signature.past_fingerprints(),
+            [(old.fingerprint(), INSTALLED_DATA)],
+            "{block:#x}"
+        );
+    }
+    let unrotated = verify("unrotated", &rotated(&[], &new, BLOCK_V3)).unwrap();
+    assert_eq!(unrotated.fingerprints(), [new.fingerprint()]);
+    assert!(unrotated.past_fingerprints().is_empty());
+}
+
+#[test]
+fn a_lineage_node_the_previous_key_did_not_sign_is_refused() {
+    let (old, new) = (Key::test(), Key::other());
+    let forged = Past {
+        key: &old,
+        flags: INSTALLED_DATA,
+        forged_by: Some(&new),
+    };
+    assert_eq!(
+        reason(verify("forged", &rotated(&[forged], &new, BLOCK_V31))),
+        "its key rotation proof is not signed by the key it rotated from"
+    );
+}
+
+#[test]
+fn a_lineage_that_does_not_end_with_the_signer_is_refused() {
+    let (old, new) = (Key::test(), Key::other());
+    // A proof that `old` rotated to `new`, carried by an APK that `old` signs.
+    let bytes = app().signed_rotated_ending(&[from(&old, 0)], &new, &old, BLOCK_V3);
+    assert_eq!(
+        reason(verify("elsewhere", &bytes)),
+        "its key rotation proof does not end with the certificate that signed it"
+    );
+}
+
+#[test]
+fn damage_in_a_lineage_fails_without_panicking() {
+    let (old, new) = (Key::test(), Key::other());
+    let good = rotated(&[from(&old, INSTALLED_DATA)], &new, BLOCK_V31);
+    let block = central_directory(&good);
+    for at in (block.saturating_sub(700)..block).step_by(3) {
+        let mut bad = good.clone();
+        bad[at] ^= 0x41;
+        let _ = verify("lineage-damage", &bad);
+    }
 }

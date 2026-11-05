@@ -1,14 +1,14 @@
 //! How the Play source signs in, and what it keeps of it in `<data>/store/play`:
 //!
-//! - `settings.json`: anonymous or an account, and the token dispenser anonymous mode asks.
+//! - `settings.json`: the user's account.
 //! - `token`: the account's AAS token, given by the user; never a password.
 //! - `session.json`: the sign-in in use, for the device profile it was made for.
 //!
 //! The directory is readable only by the user, and so are the token and the session, which are
-//! never printed. Anonymous mode asks a token dispenser, by default Aurora OSS's, which signs in to
-//! one of its shared accounts for the profile it is sent and hands back that sign-in. An account
-//! signs in itself: Android's check-in gives the device an id, `uploadDeviceConfig` registers the
-//! profile, and the AAS token buys an access token for Play.
+//! never printed. Play is signed in to only with the user's own account: Android's check-in gives
+//! the device an id, the AAS token buys an access token for Play, and `uploadDeviceConfig`
+//! registers the profile. Earlier builds could also sign in anonymously through a third party's
+//! token dispenser; their settings still load, and say that an account is needed.
 
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -16,14 +16,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::Profile;
 use super::proto::{Message, Writer};
-use super::{Profile, malformed_json};
-use crate::config::normalize_url;
 use crate::fetch::{Fetch, Request, Status};
 use crate::{Error, write_atomically};
 
-/// Aurora OSS's dispenser, which Aurora Store signs in anonymously with.
-pub const DEFAULT_DISPENSER: &str = "https://auroraoss.com/api/auth";
 /// The SHA-1 of the certificate Google signs its Android apps with, which Google's sign-in asks
 /// a caller to name.
 const GOOGLE_SIGNATURE: &str = "38918a453d07199354f8b19af05ec6562ced5788";
@@ -33,32 +30,25 @@ const MAX_SIGN_IN_BYTES: u64 = 1024 * 1024;
 const MAX_TOKEN: usize = 4096;
 const MAX_EMAIL: usize = 254;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Anonymous,
-    Account,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// How Google Play signs in.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Settings {
-    pub version: u32,
-    pub mode: Mode,
-    pub dispenser: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The user's account, once given.
     pub email: Option<String>,
+    /// Whether the settings were left by a build that signed in anonymously, which no longer
+    /// happens, so the user is told to give an account.
+    pub was_anonymous: bool,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            mode: Mode::Anonymous,
-            dispenser: DEFAULT_DISPENSER.to_string(),
-            email: None,
-        }
-    }
+/// `settings.json` as written, including the fields of the anonymous mode earlier builds had.
+#[derive(Serialize, Deserialize)]
+struct Stored {
+    version: u32,
+    mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dispenser: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
 }
 
 /// A sign-in: what every request to Play carries.
@@ -66,7 +56,8 @@ impl Default for Settings {
 pub(crate) struct Session {
     /// The profile it was made for, by [`Profile::digest`].
     pub profile: String,
-    pub mode: Mode,
+    /// `account`; sessions an earlier build kept from a dispenser say `anonymous` and are not used.
+    pub mode: String,
     pub email: String,
     pub auth_token: String,
     /// The device id, in hex.
@@ -137,32 +128,56 @@ impl Settings {
         directory(root).join("settings.json")
     }
 
-    /// The settings of the store at `root`, or the default ones, anonymous through
-    /// [`DEFAULT_DISPENSER`].
+    /// The settings of the store at `root`; with none, no account is set.
     pub fn load(root: &Path) -> Result<Self, Error> {
         let path = Self::path(root);
         let Some(bytes) = read_small(&path)? else {
             return Ok(Self::default());
         };
-        let settings: Settings = serde_json::from_slice(&bytes)
+        let malformed = || Error::new(format!("{} is malformed", path.display()));
+        let stored: Stored = serde_json::from_slice(&bytes)
             .map_err(|error| Error::new(format!("{} is malformed: {error}", path.display())))?;
-        let valid = settings.version == 1
-            && normalize_url(&settings.dispenser).as_deref() == Ok(settings.dispenser.as_str())
-            && match settings.mode {
-                Mode::Anonymous => settings.email.is_none(),
-                Mode::Account => settings.email.as_deref().is_some_and(valid_email),
-            };
-        if !valid {
-            return Err(Error::new(format!("{} is malformed", path.display())));
+        if stored.version != 1 {
+            return Err(malformed());
         }
-        Ok(settings)
+        match stored.mode.as_str() {
+            "account" => match stored.email {
+                Some(email) if valid_email(&email) => Ok(Self {
+                    email: Some(email),
+                    was_anonymous: false,
+                }),
+                _ => Err(malformed()),
+            },
+            "anonymous" => Ok(Self {
+                email: None,
+                was_anonymous: true,
+            }),
+            _ => Err(malformed()),
+        }
     }
 
     fn save(&self, root: &Path) -> Result<(), Error> {
         private_directory(root)?;
-        let mut bytes = serde_json::to_vec_pretty(self).expect("settings serialize");
+        let stored = Stored {
+            version: 1,
+            mode: "account".to_string(),
+            dispenser: None,
+            email: self.email.clone(),
+        };
+        let mut bytes = serde_json::to_vec_pretty(&stored).expect("settings serialize");
         bytes.push(b'\n');
         write_atomically(&Self::path(root), &bytes)
+    }
+
+    /// Why Play cannot be signed in to with these settings, when it cannot.
+    pub fn missing_account(&self) -> Option<String> {
+        if self.email.is_some() {
+            None
+        } else if self.was_anonymous {
+            Some("this data directory was set to sign in to Google Play anonymously, which uxdroid no longer does: uxdroid sources play --account <email> signs in with your own Google account".to_string())
+        } else {
+            Some("Google Play needs your own Google account: uxdroid sources play --account <email> signs in with it".to_string())
+        }
     }
 }
 
@@ -195,31 +210,6 @@ fn forget(root: &Path) -> Result<(), Error> {
         }
     }
     Ok(())
-}
-
-/// Signs in anonymously from now on, through `dispenser` or the one already set, and forgets any
-/// account token and session.
-pub fn use_anonymous(root: &Path, dispenser: Option<&str>) -> Result<Settings, Error> {
-    let mut settings = Settings::load(root).unwrap_or_default();
-    if let Some(dispenser) = dispenser {
-        settings.dispenser = normalize_url(dispenser)?;
-    }
-    settings.mode = Mode::Anonymous;
-    settings.email = None;
-    forget(root)?;
-    settings.save(root)?;
-    Ok(settings)
-}
-
-/// Changes the dispenser anonymous mode asks, keeping the mode.
-pub fn set_dispenser(root: &Path, dispenser: &str) -> Result<Settings, Error> {
-    let mut settings = Settings::load(root)?;
-    settings.dispenser = normalize_url(dispenser)?;
-    if settings.mode == Mode::Anonymous {
-        forget(root)?;
-    }
-    settings.save(root)?;
-    Ok(settings)
 }
 
 /// Checks a token a user gives: printable, of a known kind, not too long.
@@ -357,9 +347,10 @@ pub fn use_account(
             aas.to_string()
         }
     };
-    let mut settings = Settings::load(root).unwrap_or_default();
-    settings.mode = Mode::Account;
-    settings.email = Some(email.to_string());
+    let settings = Settings {
+        email: Some(email.to_string()),
+        was_anonymous: false,
+    };
     forget(root)?;
     private_directory(root)?;
     write_private(&token_path(root), aas.as_bytes())?;
@@ -371,12 +362,10 @@ pub fn use_account(
 pub(crate) fn kept_session(root: &Path, profile: &Profile, settings: &Settings) -> Option<Session> {
     let bytes = read_small(&session_path(root)).ok()??;
     let session: Session = serde_json::from_slice(&bytes).ok()?;
-    let email_matches = match settings.mode {
-        Mode::Anonymous => true,
-        Mode::Account => settings.email.as_deref() == Some(session.email.as_str()),
-    };
-    (session.profile == profile.digest() && session.mode == settings.mode && email_matches)
-        .then_some(session)
+    (session.profile == profile.digest()
+        && session.mode == "account"
+        && settings.email.as_deref() == Some(session.email.as_str()))
+    .then_some(session)
 }
 
 pub(crate) fn keep_session(root: &Path, session: &Session) -> Result<(), Error> {
@@ -385,84 +374,12 @@ pub(crate) fn keep_session(root: &Path, session: &Session) -> Result<(), Error> 
     write_private(&session_path(root), &bytes)
 }
 
-/// What a dispenser answers; only these fields are read.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Dispensed {
-    #[serde(default)]
-    email: String,
-    #[serde(default)]
-    auth_token: String,
-    #[serde(default)]
-    gsf_id: String,
-    #[serde(default)]
-    device_check_in_consistency_token: String,
-    #[serde(default)]
-    device_config_token: String,
-    #[serde(default)]
-    dfe_cookie: String,
-}
-
-/// Header values must be printable and of a bounded size, so a dispenser cannot forge headers.
+/// Header values must be printable and of a bounded size, so a server cannot forge headers.
 fn header_value(value: &str) -> bool {
     value.len() <= 16 * 1024
         && value
             .bytes()
             .all(|byte| byte.is_ascii_graphic() || byte == b' ')
-}
-
-/// Asks the dispenser for a sign-in for `profile`.
-pub(crate) fn dispense(
-    fetch: &dyn Fetch,
-    settings: &Settings,
-    profile: &Profile,
-) -> Result<Session, Error> {
-    let body = serde_json::to_vec(&profile.properties()).expect("properties serialize");
-    let request = Request::post(&settings.dispenser, body)
-        .header("Content-Type", "application/json")
-        .header("User-Agent", concat!("uxdroid/", env!("CARGO_PKG_VERSION")));
-    let mut answer = Vec::new();
-    let dispenser = &settings.dispenser;
-    match fetch.send(&request, MAX_SIGN_IN_BYTES, &mut answer)? {
-        Status::Ok(_) => {}
-        Status::Other(code) => {
-            return Err(Error::new(format!(
-                "the token dispenser {dispenser} answered {code}, so Google Play cannot be signed in to anonymously now; try again later, or use your own account with uxdroid sources play --account <email>"
-            )));
-        }
-    }
-    let dispensed: Dispensed =
-        serde_json::from_slice(&answer).map_err(|error| malformed_json(dispenser, &error))?;
-    let gsf_valid = !dispensed.gsf_id.is_empty()
-        && dispensed.gsf_id.len() <= 16
-        && dispensed
-            .gsf_id
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit());
-    let headers_valid = [
-        &dispensed.auth_token,
-        &dispensed.device_check_in_consistency_token,
-        &dispensed.device_config_token,
-        &dispensed.dfe_cookie,
-        &dispensed.email,
-    ]
-    .iter()
-    .all(|value| header_value(value));
-    if dispensed.auth_token.is_empty() || !gsf_valid || !headers_valid {
-        return Err(Error::new(format!(
-            "the token dispenser {dispenser} gave a malformed sign-in, so it is not used"
-        )));
-    }
-    Ok(Session {
-        profile: profile.digest(),
-        mode: Mode::Anonymous,
-        email: dispensed.email,
-        auth_token: dispensed.auth_token,
-        gsf_id: dispensed.gsf_id.to_ascii_lowercase(),
-        checkin_token: dispensed.device_check_in_consistency_token,
-        device_config_token: dispensed.device_config_token,
-        dfe_cookie: dispensed.dfe_cookie,
-    })
 }
 
 /// Signs in with the account's kept AAS token: check-in, then the access token, then the profile.
@@ -473,7 +390,10 @@ pub(crate) fn sign_in(
     settings: &Settings,
     profile: &Profile,
 ) -> Result<Session, Error> {
-    let email = settings.email.clone().unwrap_or_default();
+    let email = settings
+        .email
+        .clone()
+        .ok_or_else(|| Error::new(settings.missing_account().unwrap_or_default()))?;
     let aas = read_small(&token_path(root))?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .ok_or_else(|| {
@@ -523,7 +443,7 @@ pub(crate) fn sign_in(
         .to_string();
     let mut session = Session {
         profile: profile.digest(),
-        mode: Mode::Account,
+        mode: "account".to_string(),
         email,
         auth_token,
         gsf_id,

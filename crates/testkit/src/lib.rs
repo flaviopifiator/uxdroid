@@ -313,6 +313,23 @@ impl Apk {
         signing::sign_v2(&self.bytes(), key)
     }
 
+    /// The archive signed with APK Signature Scheme v3, in `block` (`BLOCK_V3` or `BLOCK_V31`), by
+    /// `key`, which rotated from the `past` keys, oldest first, as apksigner signs a rotated key.
+    pub fn signed_rotated(&self, past: &[Past], key: &Key, block: u32) -> Vec<u8> {
+        signing::sign_v3(&self.bytes(), key, past, key, block)
+    }
+
+    /// As [`Apk::signed_rotated`], with a lineage that ends with `last` instead of `key`.
+    pub fn signed_rotated_ending(
+        &self,
+        past: &[Past],
+        last: &Key,
+        key: &Key,
+        block: u32,
+    ) -> Vec<u8> {
+        signing::sign_v3(&self.bytes(), key, past, last, block)
+    }
+
     pub fn write_signed(&self, path: &Path, key: &Key) {
         std::fs::write(path, self.signed_bytes(key)).unwrap();
     }
@@ -324,7 +341,7 @@ impl Apk {
     }
 }
 
-pub use signing::Key;
+pub use signing::{BLOCK_V3, BLOCK_V31, INSTALLED_DATA, Key, Past};
 
 /// The manifest of a split APK of `package`: `split` names it, `config_for` is the feature split
 /// a configuration split belongs to.

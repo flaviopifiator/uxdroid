@@ -8,7 +8,7 @@ use std::process::{Command, Output, Stdio};
 
 use uxdroid_testkit::fdroid::{self, Version};
 use uxdroid_testkit::play::{AAS_TOKEN, Answer, FakePlay, OAUTH_TOKEN, PlayApp, Proto};
-use uxdroid_testkit::{Apk, Key, app_manifest, dex, split_manifest};
+use uxdroid_testkit::{Apk, BLOCK_V31, Key, Past, app_manifest, dex, split_manifest};
 
 const FIRST: u64 = 1_793_000_000_000;
 const UPDATED: u64 = 1_793_273_970_519; // 2026-10-29
@@ -128,6 +128,32 @@ fn chat(code: u32, name: &'static str, key: &Key) -> PlayApp {
     )
 }
 
+/// Chat as an app whose key rotated from `old` to `new` signs it, as Signal's did: Play names `old`.
+fn rotated_chat(old: &Key, new: &Key) -> PlayApp {
+    let past = [Past {
+        key: old,
+        flags: uxdroid_testkit::INSTALLED_DATA,
+        forged_by: None,
+    }];
+    let signed = |apk: Apk| apk.signed_rotated(&past, new, BLOCK_V31);
+    PlayApp::new(
+        CHAT,
+        "Chat Messenger",
+        5,
+        "5.0",
+        signed(
+            Apk::new()
+                .manifest(&app_manifest(CHAT, 5, "5.0"))
+                .file("classes.dex", &dex(1, 1)),
+        ),
+        &old.fingerprint(),
+    )
+    .split(
+        "config.x86_64",
+        signed(split(CHAT, 5, "config.x86_64").native_lib("x86_64", "libchat.so")),
+    )
+}
+
 struct Fixture {
     data: PathBuf,
     play: FakePlay,
@@ -181,7 +207,7 @@ fn fixture(name: &str) -> Fixture {
     Fixture { data, play }
 }
 
-/// Enables Play and points it at the fake: the API address in the source, the dispenser by option.
+/// Enables Play, points it at the fake, and signs in with an account whose AAS token is given.
 fn enable_play(fixture: &Fixture) -> Output {
     let enabled = uxdroid(&fixture.data, &["sources", "enable", "play"]);
     let path = fixture.data.join("store/sources.json");
@@ -193,9 +219,10 @@ fn enable_play(fixture: &Fixture) -> Output {
         }
     }
     std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-    ok(&uxdroid(
+    ok(&uxdroid_with(
         &fixture.data,
-        &["sources", "play", "--dispenser", &fixture.play.dispenser()],
+        &["sources", "play", "--account", "me@example.org"],
+        &format!("{AAS_TOKEN}\n"),
     ));
     fixture.play.take();
     enabled
@@ -258,7 +285,11 @@ fn play_is_off_until_enabled_which_warns_once() {
         warning.starts_with("warning: Google Play's terms allow only Google's own store app, so Google may limit or block the accounts"),
         "{warning}"
     );
-    assert!(warning.contains("third-party service"), "{warning}");
+    assert!(
+        warning.contains("uxdroid signs in only with your own Google account"),
+        "{warning}"
+    );
+    assert!(!warning.contains("anonymous"), "{warning}");
     assert!(fixture.play.take().is_empty(), "enabling asks nothing");
 
     ok(&uxdroid(data, &["sources", "disable", "play"]));
@@ -266,10 +297,7 @@ fn play_is_off_until_enabled_which_warns_once() {
     assert_eq!(text(&again.stderr), "", "the warning comes once");
     let listed = ok(&uxdroid(data, &["sources"]));
     assert!(
-        listed.ends_with(&format!(
-            "play signs in anonymously through the token dispenser {}\n",
-            fixture.play.dispenser()
-        )),
+        listed.ends_with("play signs in as me@example.org\n"),
         "{listed}"
     );
 }
@@ -291,13 +319,13 @@ fn search_merges_the_sources_and_names_each() {
          Notes  com.example.notes  test    2.0      2026-10-29\n\
          Notes  com.example.notes  play    2.0      2025-03-10\n"
     );
-    // The device described to the dispenser is this machine as the installer sees it.
+    // The device checked in is this machine as the installer sees it: its ABI and locale.
     let state = fixture.play.state();
-    let profile = &state.profiles[0];
-    assert_eq!(profile["Platforms"], "x86_64");
-    assert_eq!(profile["Build.VERSION.SDK_INT"], "36");
-    assert_eq!(profile["Screen.Density"], "160");
-    assert_eq!(profile["Locales"], "en");
+    let checkin = String::from_utf8_lossy(&state.checkins[0]).into_owned();
+    assert!(
+        checkin.contains("x86_64") && checkin.contains("r\u{2}en"),
+        "{checkin:?}"
+    );
     let search = state
         .requests
         .iter()
@@ -306,7 +334,7 @@ fn search_merges_the_sources_and_names_each() {
     assert_eq!(search.path, "/fdfe/search?c=3&q=notes&ksm=1");
     assert_eq!(search.header("Authorization"), Some("Bearer fake-auth-1"));
     assert_eq!(search.header("X-DFE-Device-Id"), Some("3787d285572b6434"));
-    assert_eq!(state.dispensed, 1, "the sign-in is kept between commands");
+    assert_eq!(state.signed_in, 1, "the sign-in is kept between commands");
 }
 
 #[test]
@@ -371,7 +399,9 @@ fn an_app_only_on_play_installs_from_it_with_its_splits_updates_and_goes() {
     assert_eq!(
         paths,
         [
-            "/api/auth",
+            "/checkin",
+            "/auth",
+            "/fdfe/uploadDeviceConfig",
             "/fdfe/details",
             "/fdfe/purchase",
             "/fdfe/delivery",
@@ -409,21 +439,50 @@ fn an_app_only_on_play_installs_from_it_with_its_splits_updates_and_goes() {
 }
 
 #[test]
-fn the_certificate_play_names_does_not_stop_an_app_that_rotated_its_key() {
-    // Play names an app's original certificate, which for a rotated key is not the APK's signer.
+fn an_app_whose_key_rotated_from_the_certificate_play_names_installs() {
+    // Play names the certificate a rotated key started from, as for Signal.
     let fixture = fixture("rotated");
     enable_play(&fixture);
-    let mut app = chat(5, "5.0", &Key::test());
-    app.signer = Key::other().fingerprint();
-    fixture.play.add(app);
+    fixture.play.add(rotated_chat(&Key::test(), &Key::other()));
     ok(&uxdroid(
         &fixture.data,
         &["install", CHAT, "--from", "play"],
     ));
     assert_eq!(
         std::fs::read_to_string(fixture.data.join("app/.com.example.chat.signer")).unwrap(),
-        format!("{}\n", Key::test().fingerprint())
+        format!("{}\n", Key::other().fingerprint())
     );
+}
+
+#[test]
+fn an_app_signed_by_another_certificate_than_play_names_is_refused() {
+    let fixture = fixture("wrong-signer");
+    enable_play(&fixture);
+    let mut app = chat(5, "5.0", &Key::test());
+    app.signer = Key::other().fingerprint();
+    fixture.play.add(app);
+    let error = refused(&uxdroid(
+        &fixture.data,
+        &["install", CHAT, "--from", "play"],
+    ));
+    assert!(
+        error.contains(&format!(
+            "the APK of com.example.chat from play is signed by {}, and its index says {}, so it is refused",
+            Key::test().fingerprint(),
+            Key::other().fingerprint()
+        )),
+        "{error}"
+    );
+    // A rotated key whose lineage does not start from the named certificate is refused too.
+    let mut app = rotated_chat(&Key::test(), &Key::other());
+    app.signer = "00".repeat(32);
+    fixture.play.add(app);
+    let error = refused(&uxdroid(
+        &fixture.data,
+        &["install", CHAT, "--from", "play"],
+    ));
+    assert!(error.contains("from play is signed by"), "{error}");
+    assert!(installed(&fixture.data, CHAT).is_none());
 }
 
 #[test]
@@ -586,16 +645,18 @@ fn malformed_and_oversized_answers_from_play_are_refused() {
         assert!(error.contains(expected), "{name}: {error}");
         assert!(installed(&fixture.data, CHAT).is_none(), "{name}");
     }
-    // A malformed dispenser answer is not kept as a sign-in.
-    let fixture = fixture("answer-dispenser");
+    // An access token that would forge a header is not kept as a sign-in.
+    let fixture = fixture("answer-auth");
     enable_play(&fixture);
-    fixture.play.answer(
-        "/api/auth",
-        Answer::Raw(br#"{"authToken": "x\r\nInjected: 1", "gsfId": "12"}"#.to_vec()),
-    );
-    let error = refused(&uxdroid(&fixture.data, &["search", "chat"]));
+    fixture
+        .play
+        .answer("/auth", Answer::Raw(b"Auth=x\rInjected: 1\n".to_vec()));
+    let error = refused(&uxdroid(
+        &fixture.data,
+        &["install", CHAT, "--from", "play"],
+    ));
     assert!(
-        error.contains("gave a malformed sign-in, so it is not used"),
+        error.contains("Google's sign-in gave no access token for Google Play"),
         "{error}"
     );
     assert!(!fixture.data.join("store/play/session.json").exists());
@@ -616,19 +677,25 @@ fn an_expired_sign_in_is_renewed_once() {
         .map(|request| request.path.split('?').next().unwrap().to_string())
         .filter(|path| !path.starts_with("/repo/"))
         .collect();
-    assert_eq!(paths, ["/fdfe/search", "/api/auth", "/fdfe/search"]);
+    assert_eq!(
+        paths,
+        [
+            "/fdfe/search",
+            "/checkin",
+            "/auth",
+            "/fdfe/uploadDeviceConfig",
+            "/fdfe/search"
+        ]
+    );
 
-    fixture.play.answer("/api/auth", Answer::Status(503));
+    fixture.play.answer("/auth", Answer::Status(403));
     fixture.play.expire();
     let error = refused(&uxdroid(
         &fixture.data,
         &["install", CHAT, "--from", "play"],
     ));
     assert!(
-        error.contains(&format!(
-            "the token dispenser {} answered 503, so Google Play cannot be signed in to anonymously now",
-            fixture.play.dispenser()
-        )),
+        error.contains("Google's sign-in refused the account's token (it answered 403)"),
         "{error}"
     );
 }
@@ -638,6 +705,7 @@ fn an_account_signs_in_with_its_own_token_which_stays_private() {
     let fixture = fixture("account");
     let data = &fixture.data;
     enable_play(&fixture);
+    // An OAuth token from Google's sign-in page is traded for the AAS token, which alone is kept.
     let out = uxdroid_with(
         data,
         &["sources", "play", "--account", "me@example.org"],
@@ -698,18 +766,6 @@ fn an_account_signs_in_with_its_own_token_which_stays_private() {
     assert_eq!(session.permissions().mode() & 0o777, 0o600);
     assert_eq!(installed(data, CHAT).unwrap()["source"], "play");
 
-    assert_eq!(
-        ok(&uxdroid(data, &["sources", "play", "--anonymous"])),
-        format!(
-            "play signs in anonymously through the token dispenser {}\n",
-            fixture.play.dispenser()
-        )
-    );
-    assert!(
-        !token.exists(),
-        "going anonymous forgets the account's token"
-    );
-
     let bad = refused(&uxdroid_with(
         data,
         &["sources", "play", "--account", "me@example.org"],
@@ -725,6 +781,55 @@ fn an_account_signs_in_with_its_own_token_which_stays_private() {
         none.contains("no token was given for me@example.org"),
         "{none}"
     );
+    assert_eq!(
+        std::fs::read_to_string(&token).unwrap(),
+        AAS_TOKEN,
+        "a refused token leaves the kept one"
+    );
+}
+
+#[test]
+fn settings_of_the_removed_anonymous_mode_load_and_ask_for_an_account() {
+    let fixture = fixture("was-anonymous");
+    let data = &fixture.data;
+    enable_play(&fixture);
+    // What an earlier build kept: anonymous settings and a dispensed session.
+    for name in ["token", "session.json"] {
+        let _ = std::fs::remove_file(data.join("store/play").join(name));
+    }
+    std::fs::write(
+        data.join("store/play/settings.json"),
+        "{\n  \"version\": 1,\n  \"mode\": \"anonymous\",\n  \"dispenser\": \"https://auroraoss.com/api/auth\"\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("store/play/session.json"),
+        r#"{"profile":"x","mode":"anonymous","email":"shared@example.org","auth_token":"t","gsf_id":"12"}"#,
+    )
+    .unwrap();
+    let advice = "this data directory was set to sign in to Google Play anonymously, which uxdroid no longer does: uxdroid sources play --account <email> signs in with your own Google account";
+    let listed = ok(&uxdroid(data, &["sources"]));
+    assert!(
+        listed.ends_with(&format!("play has no account: {advice}\n")),
+        "{listed}"
+    );
+    let error = refused(&uxdroid(data, &["install", CHAT, "--from", "play"]));
+    assert!(error.contains(advice), "{error}");
+    assert!(
+        fixture
+            .play
+            .take()
+            .iter()
+            .all(|request| !request.path.starts_with("/fdfe")),
+        "nothing is asked of Play without an account"
+    );
+    // Giving an account replaces them.
+    ok(&uxdroid_with(
+        data,
+        &["sources", "play", "--account", "me@example.org"],
+        &format!("{AAS_TOKEN}\n"),
+    ));
+    ok(&uxdroid(data, &["install", CHAT, "--from", "play"]));
 }
 
 #[test]
@@ -732,32 +837,32 @@ fn sources_play_options_are_checked() {
     let fixture = fixture("options");
     let data = &fixture.data;
     for args in [
+        &["sources", "play", "--anonymous"][..],
         &[
             "sources",
             "play",
-            "--anonymous",
-            "--account",
-            "me@example.org",
-        ][..],
+            "--dispenser",
+            "https://auroraoss.com/api/auth",
+        ],
         &["sources", "play", "extra"],
-        &["sources", "--anonymous"],
-        &["sources", "enable", "play", "--anonymous"],
+        &["sources", "--account", "me@example.org"],
+        &["sources", "enable", "play", "--account", "me@example.org"],
         &["sources", "play", "--fingerprint", "00"],
     ] {
         let out = uxdroid(data, args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
-        assert!(text(&out.stderr).contains("uxdroid sources play [--anonymous | --account <email>] [--dispenser <url>] [--data <dir>]"));
+        assert!(
+            text(&out.stderr).contains("uxdroid sources play [--account <email>] [--data <dir>]\n"),
+            "{args:?}"
+        );
     }
     let out = ok(&uxdroid(data, &["sources", "play"]));
     assert_eq!(
         out,
-        "play signs in anonymously through the token dispenser https://auroraoss.com/api/auth\nplay is not enabled: uxdroid sources enable play enables it\n"
+        "play has no account: Google Play needs your own Google account: uxdroid sources play --account <email> signs in with it\nplay is not enabled: uxdroid sources enable play enables it\n"
     );
-    let error = refused(&uxdroid(
-        data,
-        &["sources", "play", "--dispenser", "http://example.org/auth"],
-    ));
-    assert!(error.contains("is not a repository address"), "{error}");
+    let error = refused(&uxdroid(data, &["install", CHAT, "--from", "play"]));
+    assert!(error.contains("there is no source named play"), "{error}");
 }
 
 fn listing(directory: &Path) -> Vec<String> {

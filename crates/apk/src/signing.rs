@@ -55,11 +55,23 @@ impl std::fmt::Display for Scheme {
     }
 }
 
+/// The v3 signer attribute that proves a key rotation: the signing certificate lineage.
+const PROOF_OF_ROTATION: u32 = 0x3ba0_6f8c;
+/// Real lineages hold a handful of certificates; the limit stops a crafted one from costing time.
+const MAX_LINEAGE: usize = 16;
+/// The capability of a past signer whose apps' installed data the new key may keep, which is what
+/// lets an app signed by the new key update one installed with the old.
+pub const INSTALLED_DATA: u32 = 1;
+
 /// A verified signature: the scheme checked and each signer's certificate, DER encoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     pub scheme: Scheme,
     pub certificates: Vec<Vec<u8>>,
+    /// For a v3 signer whose key rotated, the certificates it rotated from, oldest first, each
+    /// with the capabilities the lineage gives it; checked to be a chain where each key signed the
+    /// next, ending with the signer's own.
+    pub rotated_from: Vec<(Vec<u8>, u32)>,
 }
 
 impl Signature {
@@ -71,6 +83,24 @@ impl Signature {
             .map(|certificate| hex(&Sha256::digest(certificate)))
             .collect();
         set.into_iter().collect()
+    }
+    /// The SHA-256 of each certificate the signer's key rotated from, oldest first, with its
+    /// capabilities.
+    pub fn past_fingerprints(&self) -> Vec<(String, u32)> {
+        self.rotated_from
+            .iter()
+            .map(|(certificate, flags)| (hex(&Sha256::digest(certificate)), *flags))
+            .collect()
+    }
+
+    /// Whether the certificate with SHA-256 `fingerprint` signs this, or signed an earlier key it
+    /// rotated from with every capability in `needed`.
+    pub fn descends_from(&self, fingerprint: &str, needed: u32) -> bool {
+        self.fingerprints().iter().any(|own| own == fingerprint)
+            || self
+                .past_fingerprints()
+                .iter()
+                .any(|(past, flags)| past == fingerprint && flags & needed == needed)
     }
 }
 
@@ -116,9 +146,14 @@ pub fn verify_signature(path: &Path) -> Result<Signature, Error> {
     if let Some(signer) = v3 {
         let signer = signer?;
         verify_signers(&mut file, &sections, &block, &[signer])?;
+        let rotated_from = match signer.lineage {
+            Some(lineage) => past_signers(lineage, signer.certificate)?,
+            None => Vec::new(),
+        };
         return Ok(Signature {
             scheme: Scheme::V3,
             certificates: vec![signer.certificate.to_vec()],
+            rotated_from,
         });
     }
     if let Some(value) = find(BLOCK_V2) {
@@ -132,6 +167,7 @@ pub fn verify_signature(path: &Path) -> Result<Signature, Error> {
         return Ok(Signature {
             scheme: Scheme::V2,
             certificates: signers.iter().map(|s| s.certificate.to_vec()).collect(),
+            rotated_from: Vec::new(),
         });
     }
     verify_jar(path, &mut file)
@@ -288,6 +324,8 @@ struct Signer<'a> {
     public_key: &'a [u8],
     certificate: &'a [u8],
     claims_v3: bool,
+    /// A v3 signer's proof of rotation, unchecked.
+    lineage: Option<&'a [u8]>,
 }
 
 fn v2_signers(value: &[u8]) -> Result<Vec<Signer<'_>>, Error> {
@@ -336,8 +374,25 @@ fn v3_signer(value: &[u8]) -> Result<Option<Signer<'_>>, Error> {
             return Err(bad("a v3 signer's SDK range differs from its signed one"));
         }
         if (min..=max).contains(&PLATFORM_SDK) {
-            return signer_from(signed_data, digests, certificates, signatures, public_key)
-                .map(Some);
+            // Older signers have no attributes after the SDK range.
+            let attributes = if data.0.is_empty() {
+                Vec::new()
+            } else {
+                Prefixed(data.next()?).all()?
+            };
+            let mut lineage = None;
+            for attribute in attributes {
+                if le32(attribute, 0) == Some(PROOF_OF_ROTATION) {
+                    if lineage.is_some() {
+                        return Err(bad("its v3 signer proves a key rotation twice"));
+                    }
+                    lineage = Some(&attribute[4..]);
+                }
+            }
+            let mut signer =
+                signer_from(signed_data, digests, certificates, signatures, public_key)?;
+            signer.lineage = lineage;
+            return Ok(Some(signer));
         }
     }
     Ok(None)
@@ -399,7 +454,63 @@ fn signer_from<'a>(
         public_key,
         certificate,
         claims_v3: false,
+        lineage: None,
     })
+}
+
+/// Checks a proof of rotation, as Android does, and returns the certificates before `signer`'s:
+/// version 1, then one node per certificate from the oldest, each node's certificate and the
+/// algorithm that signs it signed by the key before it, with that key's capabilities and the
+/// algorithm it signs the next node with; the last certificate must be the signer's own.
+fn past_signers(lineage: &[u8], signer: &[u8]) -> Result<Vec<(Vec<u8>, u32)>, Error> {
+    let refused = |why: &str| bad(format!("its key rotation proof {why}"));
+    let mut fields = Prefixed(lineage);
+    if fields.u32()? != 1 {
+        return Err(refused("has a version this verifier does not know"));
+    }
+    let nodes = fields.all()?;
+    if nodes.is_empty() || nodes.len() > MAX_LINEAGE {
+        return Err(refused("has no certificates, or too many"));
+    }
+    let mut chain: Vec<(&[u8], u32)> = Vec::new();
+    let mut previous: Option<(&[u8], u32)> = None;
+    for node in nodes {
+        let mut node = Prefixed(node);
+        let signed = node.next()?;
+        let (flags, next_algorithm) = (node.u32()?, node.u32()?);
+        let signature = node.next()?;
+        let mut contents = Prefixed(signed);
+        let certificate = contents.next()?;
+        let signed_with = contents.u32()?;
+        if let Some((key, algorithm)) = previous {
+            if signed_with != algorithm {
+                return Err(refused(
+                    "names another algorithm than the one that signs it",
+                ));
+            }
+            let algorithm = Algorithm::from_id(algorithm).ok_or_else(|| {
+                refused("uses a signature algorithm this verifier does not support")
+            })?;
+            let key = der::certificate(key)
+                .map_err(|reason| refused(&format!("has a malformed certificate: {reason}")))?;
+            algorithm
+                .verify(key.public_key, signed, signature)
+                .map_err(|_| refused("is not signed by the key it rotated from"))?;
+        }
+        if chain.iter().any(|(seen, _)| *seen == certificate) {
+            return Err(refused("names a certificate twice"));
+        }
+        chain.push((certificate, flags));
+        previous = Some((certificate, next_algorithm));
+    }
+    let (last, _) = chain.pop().expect("one node at least");
+    if last != signer {
+        return Err(refused("does not end with the certificate that signed it"));
+    }
+    Ok(chain
+        .into_iter()
+        .map(|(certificate, flags)| (certificate.to_vec(), flags))
+        .collect())
 }
 
 fn verify_signers(
@@ -846,6 +957,7 @@ fn verify_jar<R: Read + Seek>(path: &Path, file: &mut R) -> Result<Signature, Er
     Ok(Signature {
         scheme: Scheme::V1,
         certificates,
+        rotated_from: Vec::new(),
     })
 }
 

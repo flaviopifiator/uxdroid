@@ -326,16 +326,6 @@ impl Store {
         play::Settings::load(&self.root)
     }
 
-    /// Signs in to Google Play anonymously from now on, through `dispenser` when it is given.
-    pub fn play_anonymous(&self, dispenser: Option<&str>) -> Result<play::Settings, Error> {
-        play::use_anonymous(&self.root, dispenser)
-    }
-
-    /// Changes the token dispenser anonymous sign-ins ask.
-    pub fn play_dispenser(&self, dispenser: &str) -> Result<play::Settings, Error> {
-        play::set_dispenser(&self.root, dispenser)
-    }
-
     /// Signs in to Google Play as `email` from now on, with an AAS or OAuth `token`.
     pub fn play_account(&self, email: &str, token: &str) -> Result<play::Settings, Error> {
         let api = self

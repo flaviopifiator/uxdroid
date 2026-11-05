@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use uxdroid_store::config::{Config, DEFAULT_REFRESH_AFTER_HOURS, PLAY};
-use uxdroid_store::play::{Mode, Profile, Settings};
+use uxdroid_store::play::{Profile, Settings};
 use uxdroid_store::{App, Device, Installed, Refresh, Release, Store, Want, valid_package};
 
 use crate::install::{FromStore, HOST_DENSITY, Origin, host_languages, install, lock_package};
@@ -24,7 +24,7 @@ pub(crate) const SOURCES_USAGE: &str = "usage: uxdroid sources [--data <dir>]\n 
      uxdroid sources add <name> <url> --fingerprint <sha256> [--data <dir>]\n       \
      uxdroid sources enable|disable <name> [--data <dir>]\n       \
      uxdroid sources refresh-after <hours> [--data <dir>]\n       \
-     uxdroid sources play [--anonymous | --account <email>] [--dispenser <url>] [--data <dir>]";
+     uxdroid sources play [--account <email>] [--data <dir>]";
 const DEFAULT_LIMIT: usize = 20;
 const NAME_WIDTH: usize = 32;
 
@@ -898,16 +898,14 @@ fn remove(data: &Path, package: &str) -> Result<(), String> {
 }
 
 /// What `uxdroid sources enable play` says the first time.
-pub(crate) const PLAY_WARNING: &str = "Google Play's terms allow only Google's own store app, so Google may limit or block the accounts that sign in with another client such as uxdroid. Anonymous mode signs in to shared accounts handed out by a third-party service, Aurora OSS's token dispenser (https://auroraoss.com), which uxdroid does not control and which may stop working at any time. uxdroid sources play --account <email> signs in with your own account instead, at your own risk.";
+pub(crate) const PLAY_WARNING: &str = "Google Play's terms allow only Google's own store app, so Google may limit or block the accounts that sign in with another client such as uxdroid. uxdroid signs in only with your own Google account, at your own risk: uxdroid sources play --account <email> gives it.";
 
 pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
     let Some(parsed) = Args::parse(
         args,
         &[
             ("--fingerprint", true),
-            ("--anonymous", false),
             ("--account", true),
-            ("--dispenser", true),
             ("--data", true),
         ],
     ) else {
@@ -918,19 +916,13 @@ pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
         .value("--fingerprint")
         .and_then(|value| value.to_str());
     let account = parsed.value("--account").map(|value| value.to_str());
-    let dispenser = parsed.value("--dispenser").map(|value| value.to_str());
-    let play_flags = parsed.has("--anonymous") || account.is_some() || dispenser.is_some();
+    let play_flags = account.is_some();
     let valid = match words[..] {
         [] | ["enable", _] | ["disable", _] | ["refresh-after", _] => {
             !parsed.has("--fingerprint") && !play_flags
         }
         ["add", _, _] => fingerprint.is_some() && !play_flags,
-        ["play"] => {
-            !parsed.has("--fingerprint")
-                && !(parsed.has("--anonymous") && account.is_some())
-                && account.is_none_or(|account| account.is_some())
-                && dispenser.is_none_or(|dispenser| dispenser.is_some())
-        }
+        ["play"] => !parsed.has("--fingerprint") && account.is_none_or(|account| account.is_some()),
         _ => false,
     };
     if !valid {
@@ -978,12 +970,7 @@ pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
                 Some(format!("disabled {name}"))
             }
             ["play"] => {
-                return play_settings(
-                    &store,
-                    parsed.has("--anonymous"),
-                    account.flatten(),
-                    dispenser.flatten(),
-                );
+                return play_settings(&store, account.flatten());
             }
             _ => None,
         };
@@ -1015,39 +1002,25 @@ pub(crate) fn run_sources(args: &[OsString]) -> ExitCode {
 
 /// How Google Play is signed in to, in one line.
 fn play_line(settings: &Settings) -> String {
-    match (settings.mode, &settings.email) {
-        (Mode::Account, Some(email)) => format!("{PLAY} signs in as {email}\n"),
-        _ => format!(
-            "{PLAY} signs in anonymously through the token dispenser {}\n",
-            settings.dispenser
-        ),
+    match (&settings.email, settings.missing_account()) {
+        (Some(email), _) => format!("{PLAY} signs in as {email}\n"),
+        (None, Some(missing)) => format!("{PLAY} has no account: {missing}\n"),
+        (None, None) => String::new(),
     }
 }
 
-/// `uxdroid sources play`: shows or changes how Google Play is signed in to. An account's token is
-/// read from standard input, never from the command line, which other users can see.
-fn play_settings(
-    store: &Store,
-    anonymous: bool,
-    account: Option<&str>,
-    dispenser: Option<&str>,
-) -> Result<String, String> {
-    let settings = if let Some(email) = account {
-        let token = read_token(email)?;
-        let settings = store.play_account(email, &token).map_err(|error| error.0)?;
-        if let Some(dispenser) = dispenser {
-            store.play_dispenser(dispenser).map_err(|error| error.0)?;
+/// `uxdroid sources play`: shows how Google Play is signed in to, or signs in with `account`. Its
+/// token is read from standard input, never from the command line, which other users can see.
+fn play_settings(store: &Store, account: Option<&str>) -> Result<String, String> {
+    let settings = match account {
+        Some(email) => {
+            let token = read_token(email)?;
+            store.play_account(email, &token).map_err(|error| error.0)?
         }
-        settings
-    } else if anonymous {
-        store.play_anonymous(dispenser).map_err(|error| error.0)?
-    } else if let Some(dispenser) = dispenser {
-        store.play_dispenser(dispenser).map_err(|error| error.0)?
-    } else {
-        store.play_settings().map_err(|error| error.0)?
+        None => store.play_settings().map_err(|error| error.0)?,
     };
     let mut out = play_line(&settings);
-    if settings.mode == Mode::Account && account.is_some() {
+    if account.is_some() {
         out.push_str("its token is kept readable only by you, and is never printed\n");
     }
     if store.config().play().is_none_or(|source| !source.enabled) {

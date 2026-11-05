@@ -31,9 +31,9 @@ Over the Internet, from the same machine to f-droid.org on 2026-11-04, a search 
 
 ## Google Play
 
-`play.sh` times `uxdroid search` and `uxdroid install <package> --from play` against the real Google Play, anonymously. It needs the network, so it runs in a copy of the sandbox with the project's default network instead of none (a compose override such as `services: {sandbox-net: {extends: {file: compose.yaml, service: sandbox}, network_mode: !reset null, networks: [default]}}`); the default bridge network resolved names 5 s slower here. No app code runs: the install compiles the app and parses its manifest, and nothing starts it. `DATA` can name a data directory already signed in, since every request costs a shared account a little.
+`play.sh` times `uxdroid search` and `uxdroid install <package> --from play` against the real Google Play, signed in with an account. It needs the network, so it runs in a copy of the sandbox with the project's default network instead of none (a compose override such as `services: {sandbox-net: {extends: {file: compose.yaml, service: sandbox}, network_mode: !reset null, networks: [default]}}`); the default bridge network resolved names 5 s slower here. No app code runs: the install compiles the app and parses its manifest, and nothing starts it. `DATA` names a data directory where Play is enabled and signed in with `uxdroid sources play --account <email>`.
 
-2026-11-05, release build, from the same machine as above, anonymous, 5 runs each, medians:
+2026-11-05, release build, from the same machine as above, 5 runs each, medians, signed in to a shared account through a development probe of Aurora OSS's token dispenser, which uxdroid itself no longer does:
 
 | Workload | Time |
 |----------|------|
@@ -43,4 +43,4 @@ Over the Internet, from the same machine to f-droid.org on 2026-11-04, a search 
 
 The F-Droid figures above were measured the day before over the same connection: Markor's install from F-Droid took 9.5 to 25.8 s and a search with no cached index 15 to 62 s, both dominated by f-droid.org's transfer, while a search of the cached index took 0.071 s.
 
-Not measured: Aurora Store's own flow, an Android app that would need the network to run here, where untrusted apps run offline; F-Droid on the same day, since only Google Play's hosts and the token dispenser were open for this run; Play's compressed downloads, which uxdroid does not use yet.
+Not measured: Aurora Store's own flow, an Android app that would need the network to run here, where untrusted apps run offline; F-Droid on the same day, since only Google Play's hosts were open for this run; Play's compressed downloads, which uxdroid does not use yet.

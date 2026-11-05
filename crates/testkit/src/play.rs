@@ -1,5 +1,5 @@
-//! A fake Google Play for tests: a local HTTP server that answers as Play's API, its token
-//! dispenser and Google's sign-in do, with the protocol buffer fields uxdroid reads, so no test needs
+//! A fake Google Play for tests: a local HTTP server that answers as Play's API, Android's check-in
+//! and Google's sign-in do, with the protocol buffer fields uxdroid reads, so no test needs
 //! the network or a Google account. It also serves the files of a directory under `/repo/`, so one
 //! server can hold an F-Droid repository too.
 //!
@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 
 use sha2::{Digest, Sha256};
 
-/// The device id the fake dispenser and check-in give.
+/// The device id the fake check-in gives.
 pub const GSF_ID: &str = "3787d285572b6434";
 /// What the fake sign-in takes as the account's tokens.
 pub const AAS_TOKEN: &str = "aas_et/fake-account-token";
@@ -227,16 +227,16 @@ pub struct State {
     pub requests: Vec<Recorded>,
     pub answers: Vec<(String, Answer)>,
     /// Sign-ins handed out; the last is the only one the API takes.
-    pub dispensed: u32,
+    pub signed_in: u32,
     /// Packages acquired, which a delivery needs.
     pub acquired: Vec<String>,
-    /// The bodies the dispenser was sent.
-    pub profiles: Vec<serde_json::Value>,
+    /// The bodies the check-in was sent: the device as uxdroid describes it.
+    pub checkins: Vec<Vec<u8>>,
 }
 
 impl State {
     fn token(&self) -> String {
-        format!("fake-auth-{}", self.dispensed)
+        format!("fake-auth-{}", self.signed_in)
     }
 }
 
@@ -285,10 +285,6 @@ impl FakePlay {
         format!("{}/fdfe", self.origin())
     }
 
-    pub fn dispenser(&self) -> String {
-        format!("{}/api/auth", self.origin())
-    }
-
     pub fn repo(&self) -> String {
         format!("{}/repo", self.origin())
     }
@@ -314,7 +310,7 @@ impl FakePlay {
 
     /// Makes every sign-in handed out so far expire.
     pub fn expire(&self) {
-        self.state().dispensed += 1;
+        self.state().signed_in += 1;
     }
 }
 
@@ -458,29 +454,8 @@ fn serve(stream: TcpStream, state: &Mutex<State>, port: u16, repo: Option<&Path>
         }
         return;
     }
-    if route == "/api/auth" && request.method == "POST" {
-        if let Ok(profile) = serde_json::from_slice(&request.body) {
-            state.profiles.push(profile);
-        }
-        state.dispensed += 1;
-        let answer = serde_json::json!({
-            "email": "shared@example.org",
-            "authToken": state.token(),
-            "gsfId": GSF_ID,
-            "deviceCheckInConsistencyToken": "fake-checkin",
-            "deviceConfigToken": "fake-config",
-            "dfeCookie": "fake-cookie",
-            "isAnonymous": false,
-        });
-        respond(
-            &stream,
-            200,
-            "application/json",
-            answer.to_string().as_bytes(),
-        );
-        return;
-    }
     if route == "/checkin" {
+        state.checkins.push(request.body.clone());
         let answer = Proto::new()
             .uint(1, 1)
             .fixed64(7, u64::from_str_radix(GSF_ID, 16).unwrap())
@@ -499,7 +474,7 @@ fn serve(stream: TcpStream, state: &Mutex<State>, port: u16, repo: Option<&Path>
             Some(AAS_TOKEN)
                 if field("service").is_some_and(|scope| scope.contains("googleplay")) =>
             {
-                state.dispensed += 1;
+                state.signed_in += 1;
                 format!("Auth={}\nExpiry=0\n", state.token())
             }
             _ => {
