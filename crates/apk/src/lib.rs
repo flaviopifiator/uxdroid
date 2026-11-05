@@ -1,6 +1,8 @@
 //! Reads APK files and plans how to execute them on this machine.
 
+mod der;
 mod manifest;
+mod signing;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -12,8 +14,9 @@ use zip::ZipArchive;
 use zip::result::ZipError;
 
 pub use manifest::{Manifest, parse_manifest};
+pub use signing::{PLATFORM_SDK, Scheme, Signature, verify_signature};
 
-const MANIFEST_ENTRY: &str = "AndroidManifest.xml";
+pub(crate) const MANIFEST_ENTRY: &str = "AndroidManifest.xml";
 /// Larger manifests do not occur in practice; the limit stops decompression bombs.
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 /// The largest real library seen in samples is 54 MiB. The limit stops decompression bombs.
@@ -31,6 +34,9 @@ pub enum Error {
     MalformedManifest(&'static str),
     MalformedDex(String),
     CannotExtract(String),
+    /// Neither a v2 or v3 signing block nor a JAR signature.
+    Unsigned,
+    BadSignature(String),
 }
 
 impl fmt::Display for Error {
@@ -44,6 +50,8 @@ impl fmt::Display for Error {
             Error::MalformedManifest(reason) => write!(f, "malformed manifest: {reason}"),
             Error::MalformedDex(entry) => write!(f, "malformed DEX {entry}"),
             Error::CannotExtract(reason) => write!(f, "cannot extract native library: {reason}"),
+            Error::Unsigned => write!(f, "it is not signed, and Android installs only signed APKs"),
+            Error::BadSignature(reason) => write!(f, "its signature does not verify: {reason}"),
         }
     }
 }
