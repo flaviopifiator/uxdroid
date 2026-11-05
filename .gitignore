@@ -1,3 +1,9 @@
 target/
 /samples/
 .atl/
+
+# Local agent tooling and work plans, kept out of the repository
+/.claude/
+/AGENTS.md
+/CLAUDE.md
+/odd/
