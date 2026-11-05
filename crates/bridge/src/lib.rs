@@ -26,3 +26,4 @@ mod paths;
 pub mod table;
 
 pub use loader::{Error, Library, is_guest_address, load};
+pub use shims::{HostBinding, host_binding};

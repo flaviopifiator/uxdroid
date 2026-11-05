@@ -12,6 +12,7 @@ use std::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::sync::{Mutex, OnceLock};
 
 use crate::loader;
+use crate::table::Table;
 
 /// The Android API level uxdroid reports to libraries.
 const API_LEVEL: &CStr = c"35";
@@ -32,20 +33,91 @@ unsafe impl Sync for Target {}
 /// A function glibc has but nobody audited gets a trap that names it when called, because it may
 /// corrupt memory silently. A data symbol cannot trap, so it counts as not found.
 pub fn resolve(name: &CStr, is_data: bool) -> Option<usize> {
-    let text = name.to_str().ok()?;
-    match table().get(text) {
-        Some(Target::Function(address)) => Some(*address as usize),
-        Some(Target::Alias(target)) => host_symbol(target),
-        None => {
-            let address = host_symbol(name)?;
-            if audited().contains(text) {
-                Some(address)
-            } else if is_data {
-                None
-            } else {
-                unaudited_trap(text)
-            }
+    match decide(name, is_data) {
+        Decision::Bound(address, _) => Some(address),
+        Decision::Unaudited(text) => unaudited_trap(text),
+        Decision::Missing(_) => None,
+    }
+}
+
+/// How the bridge binds an import of a host library, for audits such as the coverage example.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostBinding {
+    /// A function or object of a signature table, by its library.
+    Table(&'static str),
+    /// Code uxdroid writes for bionic's ABI, or glibc's operation under its glibc name.
+    Shim,
+    /// glibc's own symbol, audited as compatible.
+    Glibc,
+    /// A stub that stops the program naming the function when called, with why.
+    Trap(&'static str),
+    /// Nothing binds: the load fails, or a weak import is null; with why.
+    Missing(&'static str),
+}
+
+const NOT_AUDITED: &str = "glibc has it, not audited for bionic";
+
+/// How a host library whose scope has `tables` binds `name`, decided as the loader does after the
+/// libraries in scope, and without making a trap. liblog is always in scope, as on Android.
+pub fn host_binding(name: &str, tables: &[&'static Table], is_data: bool) -> HostBinding {
+    let liblog = crate::table::liblog();
+    let in_scope = tables
+        .iter()
+        .copied()
+        .chain((!tables.iter().any(|table| std::ptr::eq(*table, liblog))).then_some(liblog));
+    for table in in_scope {
+        if let Some(export) = table.find(name.as_bytes()) {
+            return match export.bind() {
+                Some(_) => HostBinding::Table(table.library),
+                None => HostBinding::Missing("its table's host library lacks it"),
+            };
         }
+    }
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return HostBinding::Missing("not a C string");
+    };
+    match decide(&name, is_data) {
+        Decision::Bound(_, binding) => binding,
+        Decision::Unaudited(_) => HostBinding::Trap(NOT_AUDITED),
+        Decision::Missing(why) => HostBinding::Missing(why),
+    }
+}
+
+enum Decision<'a> {
+    Bound(usize, HostBinding),
+    /// glibc has the function, but it binds to a trap naming it.
+    Unaudited(&'a str),
+    Missing(&'static str),
+}
+
+/// What `resolve` binds `name` to, before any trap is made.
+fn decide(name: &CStr, is_data: bool) -> Decision<'_> {
+    let Ok(text) = name.to_str() else {
+        return Decision::Missing("not UTF-8");
+    };
+    match table().get(text) {
+        Some(Target::Function(address)) => {
+            let trapped = TRAPS
+                .iter()
+                .any(|&(known, trap)| known == text && std::ptr::eq(trap, *address));
+            let binding = match trapped {
+                true => HostBinding::Trap("an incompatible ABI and no shim yet"),
+                false => HostBinding::Shim,
+            };
+            Decision::Bound(*address as usize, binding)
+        }
+        Some(Target::Alias(target)) => match host_symbol(target) {
+            Some(address) => Decision::Bound(address, HostBinding::Shim),
+            None => Decision::Missing("glibc lacks the name it is an alias of"),
+        },
+        None => match host_symbol(name) {
+            None => Decision::Missing("no shim, and glibc lacks it"),
+            Some(address) if audited().contains(text) => {
+                Decision::Bound(address, HostBinding::Glibc)
+            }
+            Some(_) if is_data => Decision::Missing("glibc data, not audited, cannot trap"),
+            Some(_) => Decision::Unaudited(text),
+        },
     }
 }
 

@@ -76,6 +76,8 @@ The window, audio and GPU stay behind this layer, so a later macOS port does not
 
 ### Android's system libraries are signature tables
 
+How much of each NDK library is bound, per symbol and for both ABIs, is measured against the NDK's own export lists by `cargo run -p uxdroid-cli --example coverage` ([coverage.md](coverage.md)).
+
 App libraries name `liblog.so`, `libandroid.so`, `libjnigraphics.so`, `libEGL.so`, `libGLESv2.so`, `libGLESv3.so`, `libOpenSLES.so`, `libaaudio.so`, `libmediandk.so` and `libz.so` in `DT_NEEDED`, or open them with `dlopen`, as oboe opens `libaaudio.so`. None of them is a file. Each is a table of `uxdroid_bridge::table`: every export with its host address and its signature in a closed vocabulary, such as `i32(i32,ptr,ptr,...)` for `__android_log_print` or `ptr` for an object like `SL_IID_ENGINE`. `liblog`'s table is in the bridge, next to the printf machinery it shares with bionic's libc, and every library sees it, as on Android, where `app_process` links it. The others are in `crates/ndk`, and `crates/nativebridge` hands them to the loader before the first app library loads. A library searches its loaded dependencies first, then the tables it needs, then the shims, and a name its table lacks is reported missing like any other. The EGL and GLES tables are generated from the NDK's headers and stubs by `crates/ndk/generate.sh`.
 
 | Library | Served by |
