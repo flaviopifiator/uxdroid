@@ -40,5 +40,6 @@ libjpeg-turbo external/libjpeg-turbo LICENSE.md
 expat external/expat COPYING
 sqlite external/sqlite LICENSE
 roboto-fonts external/roboto-fonts NOTICE
+tagsoup external/tagsoup LICENSE
 NOTICES
 ls -la "$DL"

@@ -28,7 +28,7 @@ timeout 60 "$RUNTIME/bin/dalvikvm64" "${ART_FLAGS[@]}" -cp "$CP" dev.uxdroid.sys
     "$RUNTIME" "$TARGET/libuxdroid_system.so" "$ANDROID_DATA/app/com.example.compat/base.apk" >"$WORK/out" 2>&1 \
     || fail "exit $?"
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
-grep -E "^(identity|process|telephony|managers|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|graphics|graphics31|graphics32|features|textservices|pending|activity|no activity|launched|result|broadcast|provider|stores|packages) " "$WORK/out"
+grep -E "^(identity|process|telephony|managers|database|factory|network|notification|alarm|appops|shortcuts|game|device|khronos|html|graphics|graphics31|graphics32|features|textservices|pending|activity|no activity|launched|result|broadcast|provider|stores|packages) " "$WORK/out"
 
 # 1. The app runs under an application uid of its own, as Android gives each installed app, whatever
 # the Linux uid: the framework treats 1000 as the system and refuses it WebView.
@@ -95,6 +95,7 @@ expect "^device fingerprint uxdroid/uxdroid/uxdroid:16/[A-Z0-9.]+/1:user/release
     "Build does not describe uxdroid"
 expect "^khronos javax\.microedition\.khronos\.opengles\.GL10 javax\.microedition\.khronos\.egl\.EGLContext$" \
     "the javax.microedition.khronos classes are missing"
+expect "^html bold text bold spans 1$" "Html.fromHtml did not parse: TagSoup is missing from the framework"
 
 # 9. EGL10 and GLES20 of the framework reach the host's EGL and GLES: an ES 2 context on a pbuffer is
 # cleared to orange and read back, a shader compiles, and an array too short for what GL would write

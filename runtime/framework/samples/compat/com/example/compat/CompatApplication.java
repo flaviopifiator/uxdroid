@@ -306,6 +306,10 @@ public class CompatApplication extends Application {
             found = "missing " + e.getMessage();
         }
         System.out.println("khronos " + found);
+        // Html parses with TagSoup, which Android's framework carries; ten catalog apps stopped without it.
+        android.text.Spanned html = android.text.Html.fromHtml("<b>bold</b> text", android.text.Html.FROM_HTML_MODE_LEGACY);
+        System.out.println("html " + html + " bold spans "
+                + html.getSpans(0, html.length(), android.text.style.StyleSpan.class).length);
     }
 
     /** The services the corpus apps stopped on when they were missing. */

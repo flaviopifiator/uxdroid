@@ -24,9 +24,11 @@ BEFORE="$W/before"
 mkdir -p "$RUNTIME/framework/oat/$ARCH" "$RUNTIME/etc" "$RUNTIME/fonts" "$RUNTIME/usr/icu" "$RUNTIME/notices/framework"
 
 # Framework classes. What ART's boot class path already has stays out, so the boot copy is the one used.
-# javax.microedition.khronos is the platform's too: GLSurfaceView hands its renderer a GL10.
+# javax.microedition.khronos is the platform's too: GLSurfaceView hands its renderer a GL10, and so is
+# TagSoup, which Html.fromHtml parses with.
 mkdir "$W/classes"
-unzip -q "$ALL" 'android/*' 'com/*' 'javax/microedition/khronos/*' -x 'android/icu/*' -d "$W/classes"
+unzip -q "$ALL" 'android/*' 'com/*' 'javax/microedition/khronos/*' 'org/ccil/cowan/tagsoup/*' -x 'android/icu/*' \
+    -d "$W/classes"
 python3 "$TOOLS/rewrite_classes.py" "$W/classes" "$RUNTIME"
 find "$W/classes" -name '*.class' > "$W/list"
 "$JDK/bin/java" -Xmx12g -cp prebuilts/r8/r8.jar com.android.tools.r8.D8 --min-api 30 --release \
