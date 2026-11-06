@@ -31,12 +31,21 @@ pub(crate) fn home_dir(variable: &str, fallback: &str) -> Result<PathBuf, String
     Ok(Path::new(&home).join(fallback))
 }
 
-/// `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime`.
+/// `UXDROID_RUNTIME`, then `$XDG_DATA_HOME/uxdroid/runtime`, then, when the user has none, the
+/// `runtime` directory beside this program, where the `uxdroid-runtime` package installs it.
 pub(crate) fn default_runtime() -> Result<PathBuf, String> {
-    match std::env::var_os("UXDROID_RUNTIME").filter(|value| !value.is_empty()) {
-        Some(runtime) => Ok(PathBuf::from(runtime)),
-        None => Ok(home_dir("XDG_DATA_HOME", ".local/share")?.join("uxdroid/runtime")),
+    if let Some(runtime) = std::env::var_os("UXDROID_RUNTIME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(runtime));
     }
+    let user = home_dir("XDG_DATA_HOME", ".local/share")?.join("uxdroid/runtime");
+    if user.exists() {
+        return Ok(user);
+    }
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("runtime")))
+        .filter(|runtime| runtime.is_dir());
+    Ok(beside.unwrap_or(user))
 }
 
 pub(crate) fn boot_class_path(runtime: &Path) -> String {

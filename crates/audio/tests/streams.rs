@@ -385,6 +385,8 @@ fn the_presented_frame_trails_the_position_by_the_device_latency() {
     output.write(&[0.5; 400], true);
     output.start();
     std::thread::sleep(Duration::from_millis(30));
+    // Paused, so the clock cannot move between the two reads.
+    output.pause();
     let (position, presented) = (output.position(), output.presented());
     // A clock device has no latency of its own.
     assert_eq!(presented, position);

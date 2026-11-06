@@ -44,6 +44,16 @@ Measured on this project's test machine; each benchmark is under [`benches/`](be
 
 Not measured yet: arm64 hardware (arm64 numbers so far come from QEMU), Waydroid and Android Translation Layer on the same apps.
 
+## Install
+
+Each release has a `.deb` and a `.tar.gz` for amd64 and arm64. CI installs and uses them on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04.
+
+```bash
+sudo apt install ./uxdroid_<version>_amd64.deb ./uxdroid-runtime_<version>_amd64.deb
+```
+
+`uxdroid` is the program and its libraries, about 3 MB. `uxdroid-runtime` is ART and the Android framework, about 190 MB, installed in `/usr/lib/uxdroid/runtime`. The tarball runs from wherever it is unpacked, for distributions without apt; a runtime works only at the path it was built for, so with the tarball, unpack the runtime package's files into `/usr/lib/uxdroid/runtime` and set `UXDROID_RUNTIME` to that directory. [Packages](docs/guide.md#packages) explains how they are built.
+
 ## Quick start
 
 uxdroid builds and tests entirely in Docker; the only host requirement is Docker with Compose.
@@ -115,11 +125,11 @@ The [architecture](docs/architecture.md) explains each layer, its decisions and 
 
 ## Project status
 
-uxdroid is under active development and not yet packaged for distributions.
+uxdroid is under active development. It ships as packages for Debian and Ubuntu, and as a tarball for other distributions.
 
 | Done | In progress | Not planned |
 |------|-------------|-------------|
-| Framework, graphics, audio, input, services, store, split installs, arm64 hosts, arm64 translation | Google Play source (opt-in), apps starting other apps' activities, x86-to-arm64 translation, distribution packages | Google Mobile Services (licensed by Google only), Play Integrity |
+| Framework, graphics, audio, input, services, store, split installs, arm64 hosts, arm64 translation | Google Play source (opt-in), apps starting other apps' activities, x86-to-arm64 translation, the arm64 translator in the amd64 package | Google Mobile Services (licensed by Google only), Play Integrity |
 
 Apps that require Play Integrity attestation, such as many banking apps, cannot work on uxdroid. WebView is not implemented yet.
 
@@ -137,6 +147,7 @@ Apps that require Play Integrity attestation, such as many banking apps, cannot 
 | `system/java` | the Java side of the platform |
 | `runtime/` | AOSP build scripts, patches and smoke tests |
 | `benches/` | repeatable benchmarks |
+| `packaging/`, `.github/workflows` | package builds, the distribution install check and CI |
 
 ## Contributing
 

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=uxdroid
+GenericName=Android app store
+Comment=Find, install and run Android apps as native Linux processes
+Exec=uxdroid tui
+Icon=uxdroid
+Terminal=true
+Categories=System;Settings;PackageManager;
+Keywords=android;apk;fdroid;apps;

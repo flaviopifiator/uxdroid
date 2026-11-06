@@ -869,6 +869,78 @@ fn a_signed_single_apk_installs_as_before_and_its_signer_is_recorded() {
     );
 }
 
+/// As a package installs it: `uxdroid` and its runtime directory side by side.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn a_runtime_beside_the_program_is_used_when_the_user_has_none() {
+    let dir = scratch("beside");
+    let program = dir.join("lib/uxdroid/uxdroid");
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_uxdroid"), &program).unwrap();
+    let runtime = dir.join("lib/uxdroid/runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let apk = dir.join("app.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib(ABI, "liba.so")
+        .write_signed(&apk, &Key::test());
+    let data = dir.join("data");
+
+    let output = Command::new(&program)
+        .arg("install")
+        .arg(&apk)
+        .arg("--data")
+        .arg(&data)
+        .env("XDG_DATA_HOME", dir.join("share"))
+        .env_remove("UXDROID_RUNTIME")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "note: no framework in {}, so com.example.app is not prepared: its manifest is parsed, \
+             its default bodies made and its code run uncompiled at each start\n",
+            runtime.display()
+        )
+    );
+}
+
+/// The user's own runtime wins over one beside the program.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn the_user_s_runtime_wins_over_one_beside_the_program() {
+    let dir = scratch("user-runtime");
+    let program = dir.join("lib/uxdroid/uxdroid");
+    std::fs::create_dir_all(dir.join("lib/uxdroid/runtime")).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_uxdroid"), &program).unwrap();
+    let user = dir.join("share/uxdroid/runtime");
+    std::fs::create_dir_all(&user).unwrap();
+    let apk = dir.join("app.apk");
+    Apk::new()
+        .manifest(&sample_manifest())
+        .native_lib(ABI, "liba.so")
+        .write_signed(&apk, &Key::test());
+
+    let output = Command::new(&program)
+        .arg("install")
+        .arg(&apk)
+        .arg("--data")
+        .arg(dir.join("data"))
+        .env("XDG_DATA_HOME", dir.join("share"))
+        .env_remove("UXDROID_RUNTIME")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stderr).starts_with(&format!("note: no framework in {}, ", user.display())),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
 #[test]
 fn an_unsigned_apk_is_refused() {
     let dir = scratch("unsigned");
