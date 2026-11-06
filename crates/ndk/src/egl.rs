@@ -11,7 +11,11 @@
 //!   imports no dmabufs, swapping reads it back and posts it through the window, which shows it in
 //!   the Activity's Wayland window;
 //! - configs report `EGL_WINDOW_BIT` where they support pbuffers, and the visual ID Android gives,
-//!   which is the `ANativeWindow` format of their color sizes.
+//!   which is the `ANativeWindow` format of their color sizes. Multisampled configs offer no
+//!   window: Mesa 25.0 gives a multisampled pbuffer's pixels to neither `glReadPixels`
+//!   (`GL_INVALID_OPERATION`) nor `glBlitFramebuffer` (which resolves it to zeros), so its frames
+//!   could not be shown. A window asked for with samples has no config, as on a device without
+//!   multisampling, and Flutter's Impeller then asks again for one sample.
 //!
 //! The readback costs a copy per frame, and three more on the way to Wayland; the dmabuf path none.
 //! Every other EGL function goes straight to the host's EGL.
@@ -40,6 +44,7 @@ const TRUE: Boolean = 1;
 const NONE: i32 = 0x3038;
 const DONT_CARE: i32 = -1;
 const SURFACE_TYPE: i32 = 0x3033;
+const SAMPLE_BUFFERS: i32 = 0x3032;
 const PBUFFER_BIT: i32 = 0x0001;
 const WINDOW_BIT: i32 = 0x0004;
 const NATIVE_VISUAL_ID: i32 = 0x302E;
@@ -373,11 +378,14 @@ pub unsafe extern "C" fn choose_config(
     };
     let mut translated = Vec::with_capacity(pairs.len() * 2 + 3);
     let mut surface_type = false;
+    // EGL asks for a window when the surface type is not given.
+    let mut window = true;
     for (key, value) in pairs {
         match key {
             RECORDABLE_ANDROID | FRAMEBUFFER_TARGET_ANDROID => continue,
             SURFACE_TYPE => {
                 surface_type = true;
+                window = value != DONT_CARE && value & WINDOW_BIT != 0;
                 let value = if value != DONT_CARE && value & WINDOW_BIT != 0 {
                     (value & !WINDOW_BIT) | PBUFFER_BIT
                 } else {
@@ -392,8 +400,64 @@ pub unsafe extern "C" fn choose_config(
         translated.extend([SURFACE_TYPE, PBUFFER_BIT]);
     }
     translated.push(NONE);
-    // SAFETY: forwards to Mesa with a terminated list and the caller's output arguments.
-    unsafe { (mesa.choose_config)(display, translated.as_ptr(), configs, size, count) }
+    if !window {
+        // SAFETY: forwards to Mesa with a terminated list and the caller's output arguments.
+        return unsafe { (mesa.choose_config)(display, translated.as_ptr(), configs, size, count) };
+    }
+    if count.is_null() {
+        return FALSE;
+    }
+    // A window is single-sampled (the module's documentation says why): Mesa's matches are
+    // fetched whole, in its order, and the multisampled ones left out.
+    let mut matching = 0;
+    // SAFETY: Mesa's function, counting into a local.
+    if unsafe {
+        (mesa.choose_config)(
+            display,
+            translated.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut matching,
+        )
+    } != TRUE
+    {
+        return FALSE;
+    }
+    let mut all = vec![std::ptr::null_mut(); matching.max(0) as usize];
+    // SAFETY: Mesa's function, filling a local array of the size it gave.
+    if unsafe {
+        (mesa.choose_config)(
+            display,
+            translated.as_ptr(),
+            all.as_mut_ptr(),
+            matching,
+            &mut matching,
+        )
+    } != TRUE
+    {
+        return FALSE;
+    }
+    all.truncate(matching.max(0) as usize);
+    all.retain(|&config| !multisampled(mesa, display, config));
+    let written = if configs.is_null() {
+        all.len()
+    } else {
+        let written = all.len().min(size.max(0) as usize);
+        // SAFETY: EGL's contract makes `configs` hold `size` configs.
+        unsafe { std::ptr::copy_nonoverlapping(all.as_ptr(), configs, written) };
+        written
+    };
+    // SAFETY: checked non-null above; EGL's contract makes it writable.
+    unsafe { *count = written as i32 };
+    TRUE
+}
+
+/// Whether `config` has sample buffers, so it offers no window.
+fn multisampled(mesa: &Mesa, display: Display, config: Config) -> bool {
+    let mut buffers = 0;
+    // SAFETY: Mesa's function with a local output.
+    unsafe { (mesa.get_config_attrib)(display, config, SAMPLE_BUFFERS, &mut buffers) };
+    buffers > 0
 }
 
 /// `EGLBoolean eglGetConfigAttrib(...)`.
@@ -436,7 +500,7 @@ pub unsafe extern "C" fn get_config_attrib(
             let Some(kind) = size(SURFACE_TYPE) else {
                 return FALSE;
             };
-            if kind & PBUFFER_BIT != 0 {
+            if kind & PBUFFER_BIT != 0 && !multisampled(mesa, display, config) {
                 kind | WINDOW_BIT
             } else {
                 kind
@@ -498,6 +562,10 @@ fn window_surface(
     else {
         return std::ptr::null_mut();
     };
+    if multisampled(mesa, display, config) {
+        // Such a config reports no EGL_WINDOW_BIT, so EGL refuses it (EGL_BAD_MATCH).
+        return std::ptr::null_mut();
+    }
     let Ok((width, height, _)) = window.buffer_size(jni) else {
         return std::ptr::null_mut();
     };

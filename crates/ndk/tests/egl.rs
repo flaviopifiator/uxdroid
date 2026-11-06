@@ -58,3 +58,8 @@ fn invalidating_the_default_framebuffer_of_a_multisampled_config_returns() {
 fn an_apps_own_framebuffer_is_still_invalidated_through_gl() {
     assert_eq!(call("discard_own_framebuffer"), Some(0));
 }
+
+#[test]
+fn configs_for_windows_are_single_sampled() {
+    assert_eq!(call("window_configs_are_single_sampled"), Some(0));
+}

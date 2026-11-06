@@ -100,3 +100,48 @@ int discard_own_framebuffer(void) {
     release();
     return 0;
 }
+
+// A window surface is a pbuffer, and Mesa 25.0 reads, blits and discards no multisampled one, so
+// configs for windows are single-sampled: a window asked for with samples has no config, as on a
+// device without multisampling, and Impeller then asks again for one sample.
+int window_configs_are_single_sampled(void) {
+    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (display == EGL_NO_DISPLAY || !eglInitialize(display, NULL, NULL)) return 1;
+    EGLint count = -1;
+    const EGLint multisampled_window[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_STENCIL_SIZE, 8, EGL_SAMPLE_BUFFERS, 1, EGL_SAMPLES, 4, EGL_NONE};
+    EGLConfig configs[256];
+    if (!eglChooseConfig(display, multisampled_window, configs, 256, &count)) return 2;
+    if (count != 0) return 3;
+    if (!eglChooseConfig(display, multisampled_window, NULL, 0, &count) || count != 0) return 4;
+
+    // EGL asks for a window when the surface type is not given.
+    const EGLint any_window[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE};
+    if (!eglChooseConfig(display, any_window, configs, 256, &count) || count < 1) return 5;
+    for (EGLint i = 0; i < count; i++) {
+        EGLint buffers = -1, type = 0;
+        eglGetConfigAttrib(display, configs[i], EGL_SAMPLE_BUFFERS, &buffers);
+        eglGetConfigAttrib(display, configs[i], EGL_SURFACE_TYPE, &type);
+        if (buffers != 0 || !(type & EGL_WINDOW_BIT)) return 6;
+    }
+    EGLint counted = -1;
+    if (!eglChooseConfig(display, any_window, NULL, 0, &counted) || counted != count) return 7;
+
+    // A pbuffer may still be multisampled.
+    const EGLint multisampled_pbuffer[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_SAMPLE_BUFFERS, 1, EGL_SAMPLES, 4, EGL_NONE};
+    if (!eglChooseConfig(display, multisampled_pbuffer, configs, 1, &count) || count != 1) return 8;
+
+    // Listed configs do not offer a window when they are multisampled.
+    if (!eglGetConfigs(display, configs, 256, &count) || count < 1) return 9;
+    for (EGLint i = 0; i < count; i++) {
+        EGLint buffers = -1, type = 0;
+        eglGetConfigAttrib(display, configs[i], EGL_SAMPLE_BUFFERS, &buffers);
+        eglGetConfigAttrib(display, configs[i], EGL_SURFACE_TYPE, &type);
+        if (buffers > 0 && (type & EGL_WINDOW_BIT)) return 10;
+    }
+    return 0;
+}
