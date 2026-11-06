@@ -27,6 +27,13 @@ class Check:
     def setUp(self):
         pass
 
+    def addCleanup(self, function):
+        self.__dict__.setdefault("cleanups", []).append(function)
+
+    def doCleanups(self):
+        for function in reversed(self.__dict__.pop("cleanups", [])):
+            function()
+
     def assertEqual(self, a, b):
         assert a == b, f"{a!r} != {b!r}"
 
@@ -73,6 +80,8 @@ def main():
                 failed += 1
                 print(f"FAIL {case.__name__}.{name}")
                 traceback.print_exc()
+            finally:
+                test.doCleanups()
     print(f"{run} tests, {failed} failed")
     sys.exit(1 if failed else 0)
 
@@ -346,6 +355,71 @@ class BlockerTest(Check):
         self.assertIn("blocked: 7", out)
 
 
+class FrameworkTest(Check):
+    """Apps are counted by the framework they are built with, read from the native libraries the
+    install extracted, so a framework that stops many apps shows apart from the apps."""
+
+    def libraries(self, *names):
+        base = os.environ.get("TMPDIR", "/tmp")
+        self.made = getattr(self, "made", 0) + 1
+        directory = os.path.join(base, f"corpus-libs-{os.getpid()}-{id(self)}-{self.made}")
+        os.makedirs(directory)
+        for name in names:
+            open(os.path.join(directory, name), "w").close()
+
+        def remove():
+            for name in names:
+                os.remove(os.path.join(directory, name))
+            os.rmdir(directory)
+        self.addCleanup(remove)
+        return directory
+
+    def test_each_framework_is_named_by_its_runtime_library(self):
+        cases = {
+            ("libapp.so", "libflutter.so"): "flutter",
+            ("libhermes.so", "libreactnativejni.so"): "react-native",
+            ("libjsc.so", "libreactnative.so"): "react-native",
+            ("libil2cpp.so", "libunity.so", "libmain.so"): "unity",
+            ("libcronet.120.0.6099.43.so",): "cronet",
+            ("libgodot_android.so",): "godot",
+            ("libgdx.so", "libgdx-box2d.so"): "libgdx",
+            ("libmonodroid.so", "libmonosgen-2.0.so"): "xamarin",
+            ("libQt6Core_arm64-v8a.so",): "qt",
+            ("libpython3.11.so", "libSDL2.so"): "python",
+            ("libSDL2.so", "libmain.so"): "sdl",
+            ("libcocos2djs.so",): "cocos",
+            ("libUnreal.so",): "unreal",
+            ("libsqlcipher.so",): "native",
+        }
+        for names, framework in cases.items():
+            self.assertEqual((names, corpus.framework(self.libraries(*names))), (names, framework))
+
+    def test_an_app_without_native_libraries_is_java(self):
+        self.assertEqual(corpus.framework(self.libraries()), "java")
+
+    def test_no_library_directory_is_unknown(self):
+        self.assertEqual(corpus.framework("/nonexistent/lib"), "-")
+
+    def test_the_framework_command_prints_it(self):
+        out = subprocess.run([sys.executable, "-I", os.path.join(HERE, "corpus.py"), "framework",
+                              self.libraries("libflutter.so")], check=True, capture_output=True, text=True)
+        self.assertEqual(out.stdout, "flutter\n")
+
+    def test_the_ranking_counts_apps_by_framework(self):
+        def app(framework, frame, alive, tap):
+            return {"package": "p", "installed": "yes", "first_frame_ms": frame, "alive": alive,
+                    "flat": "no", "tap_changed": tap, "blocker": "-", "framework": framework}
+        rows = [app("flutter", "100", "yes", "yes"), app("flutter", "-", "no", "-"),
+                app("java", "50", "yes", "no")]
+        out = corpus.format_ranking(rows)
+        self.assertIn("by framework (apps, first frame, alive, tap changed the UI):\n"
+                      "flutter: 2, 1, 1, 1\njava: 1, 1, 1, 0\n", out)
+
+    def test_a_report_from_before_frameworks_still_ranks(self):
+        rows = corpus.read_report(os.path.join(FIXTURES, "report.tsv"))
+        self.assertIn("-: 8, 2,", corpus.format_ranking(rows))
+
+
 class Collect(Check):
     """What the sandbox writes is data from untrusted apps: the host copies only regular files with
     expected names out of it, never follows a link and never writes where the sandbox can."""
@@ -366,7 +440,7 @@ class Collect(Check):
             f.write(text)
 
     def row(self, package, blocker="-"):
-        return "\t".join([package, "1", "x86_64", "yes", "100", "yes", "no", "yes", blocker])
+        return "\t".join([package, "1", "x86_64", "yes", "100", "yes", "no", "yes", blocker, "flutter"])
 
     def test_rows_and_logs_of_the_run_are_copied(self):
         self.write("rows/b-0.tsv", self.row("org.a") + "\n")

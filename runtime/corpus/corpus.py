@@ -12,7 +12,9 @@ Commands (see docs/corpus.md):
                                                      window when no node is clickable; exits 1 if none
   changed <ui-before> <ui-after> <shot-a> <shot-b> <shot-after>   yes or no
   blocker <install.log> <run.log> <installed> <alive> <frame> <flat>   what stopped the app, or -
-  rank <report.tsv>                                  outcome counts and blockers by apps stopped
+  framework <lib dir>                                the framework of an installed app, by its libraries
+  rank <report.tsv>                                  outcome counts, by framework too, and blockers by
+                                                     apps stopped
 """
 
 import hashlib
@@ -29,9 +31,27 @@ SDK = 36
 ABIS = ("x86_64", "arm64-v8a")
 REPO = "https://f-droid.org/repo"
 COLUMNS = ["package", "version", "version_name", "abi", "file", "sha256", "size"]
+# A report written before frameworks were counted has no framework column; it still reads.
 REPORT_COLUMNS = ["package", "version", "abi", "installed", "first_frame_ms", "alive", "flat",
-                  "tap_changed", "blocker"]
+                  "tap_changed", "blocker", "framework"]
 FLAT_SHARE = 0.98
+
+# The framework an app is built with, by the runtime library it ships, in this order: an app of an
+# engine also carries the libraries it builds on, such as Python's SDL or a game's Cronet.
+FRAMEWORKS = [
+    ("flutter", r"libflutter\.so"),
+    ("react-native", r"libreactnative(jni)?\.so"),
+    ("unity", r"libunity\.so"),
+    ("unreal", r"libUE4\.so|libUnreal\.so"),
+    ("godot", r"libgodot_android\.so"),
+    ("cocos", r"libcocos2d\w*\.so"),
+    ("xamarin", r"libmonodroid\.so"),
+    ("qt", r"libQt[56]Core[\w.-]*\.so"),
+    ("python", r"libpython\d[\d.]*\.so"),
+    ("libgdx", r"libgdx\.so"),
+    ("sdl", r"libSDL[23]\.so"),
+    ("cronet", r"libcronet\b[\w.]*\.so"),
+]
 
 # The same rules as uxdroid's store (crates/store): a package is letters, digits, `.` and `_`; a file
 # is a plain path inside the repository.
@@ -371,9 +391,24 @@ def rank(rows):
     return sorted(((sig, sorted(pkgs)) for sig, pkgs in groups.items()), key=lambda g: (-len(g[1]), g[0]))
 
 
+def framework(libraries):
+    """The framework of an installed app from the names in its library directory: `java` with none,
+    `native` with only libraries of no known framework, `-` when the install left no directory."""
+    try:
+        names = os.listdir(libraries)
+    except OSError:
+        return "-"
+    if not names:
+        return "java"
+    for name, pattern in FRAMEWORKS:
+        if any(re.fullmatch(pattern, file) for file in names):
+            return name
+    return "native"
+
+
 def format_ranking(rows, examples=3):
-    def count(test):
-        return sum(1 for row in rows if test(row))
+    def count(test, among=rows):
+        return sum(1 for row in among if test(row))
 
     lines = [
         f"apps: {len(rows)}",
@@ -384,8 +419,16 @@ def format_ranking(rows, examples=3):
         f"tap changed the UI: {count(lambda r: r.get('tap_changed') == 'yes')}",
         f"blocked: {count(lambda r: r.get('blocker', '-') != '-')}",
         "",
-        "blockers, by how many apps each stops:",
+        "by framework (apps, first frame, alive, tap changed the UI):",
     ]
+    frameworks = {}
+    for row in rows:
+        frameworks.setdefault(row.get("framework") or "-", []).append(row)
+    for name, among in sorted(frameworks.items(), key=lambda f: (-len(f[1]), f[0])):
+        lines.append(f"{name}: {len(among)}, {count(lambda r: r.get('first_frame_ms', '-') != '-', among)}, "
+                     f"{count(lambda r: r.get('alive') == 'yes', among)}, "
+                     f"{count(lambda r: r.get('tap_changed') == 'yes', among)}")
+    lines += ["", "blockers, by how many apps each stops:"]
     for signature, packages in rank(rows):
         shown = ", ".join(packages[:examples]) + (", ..." if len(packages) > examples else "")
         lines.append(f"{signature}: {len(packages)} app{'s' if len(packages) != 1 else ''} ({shown})")
@@ -449,8 +492,6 @@ def download(release, directory, repo=REPO, attempts=2):
 
 # Results written by the sandbox
 
-REPORT_COLUMNS = ["package", "version", "abi", "installed", "first_frame_ms", "alive", "flat",
-                  "tap_changed", "blocker"]
 # What each staging subdirectory may hold, and the largest file accepted from it.
 STAGED = {"rows": (".tsv", 1 << 20), "logs": (".log", 32 << 20), "shots": (".png", 32 << 20)}
 STAGED_NAME = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
@@ -634,6 +675,8 @@ def main(args):
         flat = {"yes": True, "no": False}.get(args[5])
         outcome = {"installed": yes[0], "alive": yes[1], "frame": yes[2], "flat": flat}
         print(find_blocker(read_text(args[0]), read_text(args[1]), outcome))
+    elif command == "framework":
+        print(framework(args[0]))
     elif command == "rank":
         output = option(args, "--output")
         ranking = format_ranking(read_report(args[0]))

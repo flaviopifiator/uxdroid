@@ -40,12 +40,23 @@ In `--out` (default `<catalog>-out/<date>`; the catalog defaults to `~/uxdroid-s
 | `flat` | `yes` when one color covers at least 98% of the screenshot's pixels (a blank or splash screen); `-` without a screenshot |
 | `tap_changed` | `yes` when the tap changed the `ui` tree (snapshot and node numbers aside), or changed the screen when the screen was still before it; `-` when it was not tapped |
 | `blocker` | What stopped the app, or `-` when it passed: installed, a first frame, alive, not flat |
+| `framework` | What the app is built with, from the libraries its install extracted: `flutter`, `react-native`, `unity`, `unreal`, `godot`, `cocos`, `xamarin`, `qt`, `python`, `libgdx`, `sdl` or `cronet`; `native` for other libraries, `java` for none, `-` when it did not install. Reports from before this column read as `-` |
 
 The tap goes to the center of the first visible clickable node with no clickable node under it, in the topmost window; with none, as in a game's `SurfaceView`, to the window's center. A tap that changes nothing is not a blocker, since some first screens have nothing to tap.
 
 The blocker is the line that best names the failure: for a Java crash, its last `Caused by:` (the root cause); then uxdroid's refusals (`not audited`, `no shim`, `unresolved symbols`, `which was not found`), a native `Fatal signal`, a launch error, any `Caused by:`; for a failed install, its error. With nothing logged, it names the check that failed, such as `exited (no error logged)`.
 
-`ranking.txt` counts each outcome, then groups the blockers by signature, with addresses, pids, thread names, paths and numbers replaced, and lists them by how many apps each stops:
+`ranking.txt` counts each outcome, then the apps of each framework and how many of them reached each check, so a framework uxdroid fails shows apart from its apps:
+
+```text
+by framework (apps, first frame, alive, tap changed the UI):
+native: 5, 4, 4, 2
+flutter: 3, 0, 0, 0
+java: 3, 2, 2, 0
+react-native: 1, 1, 0, 0
+```
+
+Then it groups the blockers by signature, with addresses, pids, thread names, paths and numbers replaced, and lists them by how many apps each stops:
 
 ```text
 Caused by: java.security.KeyStoreException: AndroidKeyStore not found: 3 apps (org.b, org.c, org.f)
@@ -61,7 +72,7 @@ Measured on a 12-CPU, 30 GB machine, a 150-app sample with 3 jobs and 60 s each 
 docker compose run --rm dev python3 runtime/corpus/test_corpus.py
 ```
 
-They cover the index selection, the PNG decoder and flat check, the choice of tap target, the UI comparison, and blocker extraction, normalization and ranking, with fixtures in `runtime/corpus/fixtures`. The containers' Python is python3-minimal, so `corpus.py` and its tests use no `unittest` or `urllib`; the download runs in the host's Python.
+They cover the index selection, the PNG decoder and flat check, the choice of tap target, the UI comparison, and blocker extraction, normalization and ranking, framework detection, with fixtures in `runtime/corpus/fixtures`. The containers' Python is python3-minimal, so `corpus.py` and its tests use no `unittest` or `urllib`; the download runs in the host's Python.
 
 ## Not yet
 

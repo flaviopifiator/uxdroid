@@ -43,7 +43,9 @@ trap 'kill $(jobs -p) 2>/dev/null' EXIT
 say() { echo "$(date '+%F %T') $*" | tee -a "$OUT/run.log"; }
 
 say "building uxdroid"
-docker compose run --rm -T dev cargo build --release -p uxdroid-cli >"$OUT/build.log" 2>&1 \
+# The CLI does not depend on the libraries an app loads at run time, so each is built by name.
+docker compose run --rm -T dev cargo build --release -p uxdroid-cli -p uxdroid-nativebridge -p uxdroid-system \
+    -p uxdroid-platform >"$OUT/build.log" 2>&1 \
     || { tail -20 "$OUT/build.log"; exit 1; }
 
 # arm64-v8a code runs through Dynarmic, which the `translation` image builds; the sandbox gets a copy.
@@ -65,7 +67,7 @@ if [ ! -f "$OUT/apps.tsv" ]; then
     "${CORPUS[@]}" select "$INDEX" ${SAMPLE:+--sample "$SAMPLE" --seed "$SEED"} \
         >"$OUT/apps.tsv.part" 2> >(tee -a "$OUT/run.log" >&2) && mv "$OUT/apps.tsv.part" "$OUT/apps.tsv"
 fi
-[ -f "$OUT/report.tsv" ] || printf "package\tversion\tabi\tinstalled\tfirst_frame_ms\talive\tflat\ttap_changed\tblocker\n" \
+[ -f "$OUT/report.tsv" ] || printf "package\tversion\tabi\tinstalled\tfirst_frame_ms\talive\tflat\ttap_changed\tblocker\tframework\n" \
     >"$OUT/report.tsv"
 # Rows of a run that stopped half way through a batch are kept.
 for stage in "$STAGE"/*/; do

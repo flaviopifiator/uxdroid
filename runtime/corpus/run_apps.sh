@@ -27,8 +27,10 @@ agent() {
     timeout 30 "$TARGET/uxdroid" app "$package" "$@" 2>/dev/null
 }
 
+# The row ends with the app's framework, read from the libraries its install extracted.
 row() {
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$package" "$version" "$abi" "$@" >> "$ROWS"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$package" "$version" "$abi" "$@" \
+        "$("${CORPUS[@]}" framework "$ANDROID_DATA/data/$package/lib")" >> "$ROWS"
 }
 
 while IFS=$'\t' read -r -u 3 package version _ abi _ _ _; do
