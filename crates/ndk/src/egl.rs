@@ -15,6 +15,12 @@
 //!
 //! The readback costs a copy per frame, and three more on the way to Wayland; the dmabuf path none.
 //! Every other EGL function goes straight to the host's EGL.
+//!
+//! Two GLES functions are wrapped too, `glDiscardFramebufferEXT` and `glInvalidateFramebuffer`:
+//! Mesa 25.0 dereferences a null surface when they discard the depth or stencil of framebuffer 0 of
+//! a multisampled config, which Flutter's Impeller does at the end of every frame. A discard is
+//! only a hint, so on framebuffer 0 they discard nothing; on an app's own framebuffer they go to
+//! Mesa as before.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
@@ -55,6 +61,9 @@ const MAX_ATTRIBUTES: usize = 256;
 
 const GL_FRAMEBUFFER: u32 = 0x8D40;
 const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
+const GL_DRAW_FRAMEBUFFER: u32 = 0x8CA9;
+const GL_READ_FRAMEBUFFER: u32 = 0x8CA8;
+const GL_READ_FRAMEBUFFER_BINDING: u32 = 0x8CAA;
 const GL_PACK_ALIGNMENT: u32 = 0x0D05;
 const GL_PACK_ROW_LENGTH: u32 = 0x0D02;
 const GL_PACK_SKIP_ROWS: u32 = 0x0D03;
@@ -103,9 +112,103 @@ pub fn egl_symbol(name: &CStr) -> Option<*const c_void> {
     lookup(libegl(), name).or_else(|| proc_address(name))
 }
 
-/// Binds a GLES export to Mesa.
+/// Binds a GLES export: the wrapped functions to their wrappers, every other one to Mesa.
 pub fn gles_symbol(name: &CStr) -> Option<*const c_void> {
+    own_gles(name).or_else(|| mesa_gles(name))
+}
+
+/// Mesa's own GLES function of this name.
+fn mesa_gles(name: &CStr) -> Option<*const c_void> {
     lookup(libgles(), name).or_else(|| proc_address(name))
+}
+
+/// The GLES functions answered here before Mesa, by name.
+fn own_gles(name: &CStr) -> Option<*const c_void> {
+    match name.to_bytes() {
+        b"glDiscardFramebufferEXT" => Some(discard_framebuffer as *const c_void),
+        b"glInvalidateFramebuffer" => Some(invalidate_framebuffer as *const c_void),
+        _ => None,
+    }
+}
+
+/// `void glDiscardFramebufferEXT(GLenum, GLsizei, const GLenum*)` and `glInvalidateFramebuffer`.
+type Discard = unsafe extern "C" fn(u32, i32, *const u32);
+
+/// `glDiscardFramebufferEXT`, which discards nothing on framebuffer 0 (`discard`).
+unsafe extern "C" fn discard_framebuffer(target: u32, count: i32, attachments: *const u32) {
+    static MESA: OnceLock<Option<Discard>> = OnceLock::new();
+    // SAFETY: the caller's arguments, under the same contract.
+    unsafe {
+        discard(
+            &MESA,
+            c"glDiscardFramebufferEXT",
+            target,
+            count,
+            attachments,
+        )
+    }
+}
+
+/// `glInvalidateFramebuffer`, which discards nothing on framebuffer 0 (`discard`).
+unsafe extern "C" fn invalidate_framebuffer(target: u32, count: i32, attachments: *const u32) {
+    static MESA: OnceLock<Option<Discard>> = OnceLock::new();
+    // SAFETY: the caller's arguments, under the same contract.
+    unsafe {
+        discard(
+            &MESA,
+            c"glInvalidateFramebuffer",
+            target,
+            count,
+            attachments,
+        )
+    }
+}
+
+/// Calls Mesa's discard function `name`, with no attachments when `target` is bound to framebuffer
+/// 0: Mesa 25.0 crashes discarding the depth or stencil of a multisampled framebuffer 0, and a
+/// discard only allows GL to drop contents, so keeping them is always correct. Mesa still checks
+/// the target. Framebuffer 0 is a pbuffer here, whose contents a swap reads anyway.
+///
+/// # Safety
+/// The arguments must meet the contract of `glDiscardFramebufferEXT`.
+unsafe fn discard(
+    mesa: &OnceLock<Option<Discard>>,
+    name: &CStr,
+    target: u32,
+    count: i32,
+    attachments: *const u32,
+) {
+    let function = mesa.get_or_init(|| {
+        // SAFETY: Mesa's function of this name has this signature.
+        mesa_gles(name)
+            .map(|address| unsafe { std::mem::transmute::<*const c_void, Discard>(address) })
+    });
+    let Some(function) = *function else {
+        return;
+    };
+    let count = if bound_framebuffer(target) == Some(0) {
+        0
+    } else {
+        count
+    };
+    // SAFETY: forwards the caller's arguments, or none of its attachments, to Mesa.
+    unsafe { function(target, count, attachments) }
+}
+
+/// The framebuffer bound to `target` on this thread's context, or `None` for a target GL does not
+/// know or no context. Only `GL_READ_FRAMEBUFFER` queries a binding OpenGL ES 2 may lack, and
+/// there the discard itself fails with the same error.
+fn bound_framebuffer(target: u32) -> Option<i32> {
+    let binding = match target {
+        GL_FRAMEBUFFER | GL_DRAW_FRAMEBUFFER => GL_FRAMEBUFFER_BINDING,
+        GL_READ_FRAMEBUFFER => GL_READ_FRAMEBUFFER_BINDING,
+        _ => return None,
+    };
+    let mesa = mesa()?;
+    let mut name = -1;
+    // SAFETY: Mesa's function with a local output; without a context it leaves it untouched.
+    unsafe { (mesa.get_integer)(binding, &mut name) };
+    (name >= 0).then_some(name)
 }
 
 macro_rules! mesa {
@@ -132,7 +235,7 @@ macro_rules! mesa {
 
 pub(crate) fn gles_or_egl(name: &CStr) -> Option<*const c_void> {
     if name.to_bytes().starts_with(b"gl") {
-        gles_symbol(name)
+        mesa_gles(name)
     } else {
         egl_symbol(name)
     }
@@ -661,6 +764,7 @@ pub unsafe extern "C" fn get_proc_address(name: *const c_char) -> *const c_void 
             uxdroid_bridge::table::Address::Function(address) => Some(address.cast::<c_void>()),
             _ => None,
         });
-    own.or_else(|| proc_address(name))
+    own.or_else(|| own_gles(name))
+        .or_else(|| proc_address(name))
         .unwrap_or(std::ptr::null())
 }
