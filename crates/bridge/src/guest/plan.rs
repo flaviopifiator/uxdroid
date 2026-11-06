@@ -54,6 +54,9 @@ pub enum Binding {
     /// The host has it but guest code cannot call it yet: it binds to a stub that stops the
     /// program naming it if called.
     Stub(&'static str),
+    /// A function on the official list of this NDK library, which uxdroid does not have yet: it
+    /// binds to a stub that stops the program naming the library and the function if called.
+    Unimplemented(&'static str),
     /// Found nowhere. A weak import is null; any other fails the load.
     Unresolved,
 }
@@ -250,12 +253,13 @@ pub fn read(name: &str, file: &[u8]) -> Result<GuestLibrary, ElfError> {
     })
 }
 
-/// Whether the loader provides `name` itself, as libc, a signature table or liblog, so an app need
-/// not ship it.
+/// Whether the loader provides `name` itself, as libc, a signature table, liblog or an NDK library
+/// whose functions all stop the program naming them, so an app need not ship it.
 pub fn provided(name: &str, tables: &[&'static Table]) -> bool {
     crate::loader::is_system_library(name)
         || name == crate::table::liblog().library
         || tables.iter().any(|table| table.library == name)
+        || crate::unimplemented::is_ndk_library(name)
 }
 
 /// The libraries `root` needs, by name among `libraries`, breadth first as the loader searches.
@@ -296,6 +300,13 @@ pub fn plan(libraries: &[GuestLibrary], tables: &[&'static Table]) -> Vec<Librar
                 })
                 .chain(std::iter::once(crate::table::liblog()))
                 .collect();
+            // The NDK libraries the loader serves rather than the app's files, as it searches them.
+            let needed_ndk: Vec<&str> = order
+                .iter()
+                .flat_map(|lib| &lib.needed)
+                .map(String::as_str)
+                .filter(|name| !libraries.iter().any(|library| library.name == *name))
+                .collect();
             let imports = library
                 .symbols
                 .iter()
@@ -308,7 +319,18 @@ pub fn plan(libraries: &[GuestLibrary], tables: &[&'static Table]) -> Vec<Librar
                     });
                     let binding = match owner {
                         Some(owner) => Binding::App(owner.name.clone()),
-                        None => super::binding(&symbol.name, &needed_tables, symbol.object),
+                        None => match super::binding(&symbol.name, &needed_tables, symbol.object) {
+                            Binding::Unresolved => crate::unimplemented::find(
+                                needed_ndk.iter().copied(),
+                                &symbol.name,
+                                symbol.object,
+                                symbol.weak,
+                            )
+                            .map_or(Binding::Unresolved, |function| {
+                                Binding::Unimplemented(function.library)
+                            }),
+                            binding => binding,
+                        },
                     };
                     Import {
                         name: symbol.name.clone(),

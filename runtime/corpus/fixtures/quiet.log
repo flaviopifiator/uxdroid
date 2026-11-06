@@ -1,0 +1,2 @@
+uxdroid: unhandled IPackageManager.notifyDexLoad returned its default
+E FeatureFlagsImplExport: android.os.flagging.AconfigStorageReadException: ERROR_PACKAGE_NOT_FOUND: package android.xr cannot be found on the device

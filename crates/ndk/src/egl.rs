@@ -11,10 +11,20 @@
 //!   imports no dmabufs, swapping reads it back and posts it through the window, which shows it in
 //!   the Activity's Wayland window;
 //! - configs report `EGL_WINDOW_BIT` where they support pbuffers, and the visual ID Android gives,
-//!   which is the `ANativeWindow` format of their color sizes.
+//!   which is the `ANativeWindow` format of their color sizes. Multisampled configs offer no
+//!   window: Mesa 25.0 gives a multisampled pbuffer's pixels to neither `glReadPixels`
+//!   (`GL_INVALID_OPERATION`) nor `glBlitFramebuffer` (which resolves it to zeros), so its frames
+//!   could not be shown. A window asked for with samples has no config, as on a device without
+//!   multisampling, and Flutter's Impeller then asks again for one sample.
 //!
 //! The readback costs a copy per frame, and three more on the way to Wayland; the dmabuf path none.
 //! Every other EGL function goes straight to the host's EGL.
+//!
+//! Two GLES functions are wrapped too, `glDiscardFramebufferEXT` and `glInvalidateFramebuffer`:
+//! Mesa 25.0 dereferences a null surface when they discard the depth or stencil of framebuffer 0 of
+//! a multisampled config, which Flutter's Impeller does at the end of every frame. A discard is
+//! only a hint, so on framebuffer 0 they discard nothing; on an app's own framebuffer they go to
+//! Mesa as before.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
@@ -34,6 +44,7 @@ const TRUE: Boolean = 1;
 const NONE: i32 = 0x3038;
 const DONT_CARE: i32 = -1;
 const SURFACE_TYPE: i32 = 0x3033;
+const SAMPLE_BUFFERS: i32 = 0x3032;
 const PBUFFER_BIT: i32 = 0x0001;
 const WINDOW_BIT: i32 = 0x0004;
 const NATIVE_VISUAL_ID: i32 = 0x302E;
@@ -55,6 +66,9 @@ const MAX_ATTRIBUTES: usize = 256;
 
 const GL_FRAMEBUFFER: u32 = 0x8D40;
 const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
+const GL_DRAW_FRAMEBUFFER: u32 = 0x8CA9;
+const GL_READ_FRAMEBUFFER: u32 = 0x8CA8;
+const GL_READ_FRAMEBUFFER_BINDING: u32 = 0x8CAA;
 const GL_PACK_ALIGNMENT: u32 = 0x0D05;
 const GL_PACK_ROW_LENGTH: u32 = 0x0D02;
 const GL_PACK_SKIP_ROWS: u32 = 0x0D03;
@@ -103,9 +117,103 @@ pub fn egl_symbol(name: &CStr) -> Option<*const c_void> {
     lookup(libegl(), name).or_else(|| proc_address(name))
 }
 
-/// Binds a GLES export to Mesa.
+/// Binds a GLES export: the wrapped functions to their wrappers, every other one to Mesa.
 pub fn gles_symbol(name: &CStr) -> Option<*const c_void> {
+    own_gles(name).or_else(|| mesa_gles(name))
+}
+
+/// Mesa's own GLES function of this name.
+fn mesa_gles(name: &CStr) -> Option<*const c_void> {
     lookup(libgles(), name).or_else(|| proc_address(name))
+}
+
+/// The GLES functions answered here before Mesa, by name.
+fn own_gles(name: &CStr) -> Option<*const c_void> {
+    match name.to_bytes() {
+        b"glDiscardFramebufferEXT" => Some(discard_framebuffer as *const c_void),
+        b"glInvalidateFramebuffer" => Some(invalidate_framebuffer as *const c_void),
+        _ => None,
+    }
+}
+
+/// `void glDiscardFramebufferEXT(GLenum, GLsizei, const GLenum*)` and `glInvalidateFramebuffer`.
+type Discard = unsafe extern "C" fn(u32, i32, *const u32);
+
+/// `glDiscardFramebufferEXT`, which discards nothing on framebuffer 0 (`discard`).
+unsafe extern "C" fn discard_framebuffer(target: u32, count: i32, attachments: *const u32) {
+    static MESA: OnceLock<Option<Discard>> = OnceLock::new();
+    // SAFETY: the caller's arguments, under the same contract.
+    unsafe {
+        discard(
+            &MESA,
+            c"glDiscardFramebufferEXT",
+            target,
+            count,
+            attachments,
+        )
+    }
+}
+
+/// `glInvalidateFramebuffer`, which discards nothing on framebuffer 0 (`discard`).
+unsafe extern "C" fn invalidate_framebuffer(target: u32, count: i32, attachments: *const u32) {
+    static MESA: OnceLock<Option<Discard>> = OnceLock::new();
+    // SAFETY: the caller's arguments, under the same contract.
+    unsafe {
+        discard(
+            &MESA,
+            c"glInvalidateFramebuffer",
+            target,
+            count,
+            attachments,
+        )
+    }
+}
+
+/// Calls Mesa's discard function `name`, with no attachments when `target` is bound to framebuffer
+/// 0: Mesa 25.0 crashes discarding the depth or stencil of a multisampled framebuffer 0, and a
+/// discard only allows GL to drop contents, so keeping them is always correct. Mesa still checks
+/// the target. Framebuffer 0 is a pbuffer here, whose contents a swap reads anyway.
+///
+/// # Safety
+/// The arguments must meet the contract of `glDiscardFramebufferEXT`.
+unsafe fn discard(
+    mesa: &OnceLock<Option<Discard>>,
+    name: &CStr,
+    target: u32,
+    count: i32,
+    attachments: *const u32,
+) {
+    let function = mesa.get_or_init(|| {
+        // SAFETY: Mesa's function of this name has this signature.
+        mesa_gles(name)
+            .map(|address| unsafe { std::mem::transmute::<*const c_void, Discard>(address) })
+    });
+    let Some(function) = *function else {
+        return;
+    };
+    let count = if bound_framebuffer(target) == Some(0) {
+        0
+    } else {
+        count
+    };
+    // SAFETY: forwards the caller's arguments, or none of its attachments, to Mesa.
+    unsafe { function(target, count, attachments) }
+}
+
+/// The framebuffer bound to `target` on this thread's context, or `None` for a target GL does not
+/// know or no context. Only `GL_READ_FRAMEBUFFER` queries a binding OpenGL ES 2 may lack, and
+/// there the discard itself fails with the same error.
+fn bound_framebuffer(target: u32) -> Option<i32> {
+    let binding = match target {
+        GL_FRAMEBUFFER | GL_DRAW_FRAMEBUFFER => GL_FRAMEBUFFER_BINDING,
+        GL_READ_FRAMEBUFFER => GL_READ_FRAMEBUFFER_BINDING,
+        _ => return None,
+    };
+    let mesa = mesa()?;
+    let mut name = -1;
+    // SAFETY: Mesa's function with a local output; without a context it leaves it untouched.
+    unsafe { (mesa.get_integer)(binding, &mut name) };
+    (name >= 0).then_some(name)
 }
 
 macro_rules! mesa {
@@ -132,7 +240,7 @@ macro_rules! mesa {
 
 pub(crate) fn gles_or_egl(name: &CStr) -> Option<*const c_void> {
     if name.to_bytes().starts_with(b"gl") {
-        gles_symbol(name)
+        mesa_gles(name)
     } else {
         egl_symbol(name)
     }
@@ -270,11 +378,14 @@ pub unsafe extern "C" fn choose_config(
     };
     let mut translated = Vec::with_capacity(pairs.len() * 2 + 3);
     let mut surface_type = false;
+    // EGL asks for a window when the surface type is not given.
+    let mut window = true;
     for (key, value) in pairs {
         match key {
             RECORDABLE_ANDROID | FRAMEBUFFER_TARGET_ANDROID => continue,
             SURFACE_TYPE => {
                 surface_type = true;
+                window = value != DONT_CARE && value & WINDOW_BIT != 0;
                 let value = if value != DONT_CARE && value & WINDOW_BIT != 0 {
                     (value & !WINDOW_BIT) | PBUFFER_BIT
                 } else {
@@ -289,8 +400,64 @@ pub unsafe extern "C" fn choose_config(
         translated.extend([SURFACE_TYPE, PBUFFER_BIT]);
     }
     translated.push(NONE);
-    // SAFETY: forwards to Mesa with a terminated list and the caller's output arguments.
-    unsafe { (mesa.choose_config)(display, translated.as_ptr(), configs, size, count) }
+    if !window {
+        // SAFETY: forwards to Mesa with a terminated list and the caller's output arguments.
+        return unsafe { (mesa.choose_config)(display, translated.as_ptr(), configs, size, count) };
+    }
+    if count.is_null() {
+        return FALSE;
+    }
+    // A window is single-sampled (the module's documentation says why): Mesa's matches are
+    // fetched whole, in its order, and the multisampled ones left out.
+    let mut matching = 0;
+    // SAFETY: Mesa's function, counting into a local.
+    if unsafe {
+        (mesa.choose_config)(
+            display,
+            translated.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut matching,
+        )
+    } != TRUE
+    {
+        return FALSE;
+    }
+    let mut all = vec![std::ptr::null_mut(); matching.max(0) as usize];
+    // SAFETY: Mesa's function, filling a local array of the size it gave.
+    if unsafe {
+        (mesa.choose_config)(
+            display,
+            translated.as_ptr(),
+            all.as_mut_ptr(),
+            matching,
+            &mut matching,
+        )
+    } != TRUE
+    {
+        return FALSE;
+    }
+    all.truncate(matching.max(0) as usize);
+    all.retain(|&config| !multisampled(mesa, display, config));
+    let written = if configs.is_null() {
+        all.len()
+    } else {
+        let written = all.len().min(size.max(0) as usize);
+        // SAFETY: EGL's contract makes `configs` hold `size` configs.
+        unsafe { std::ptr::copy_nonoverlapping(all.as_ptr(), configs, written) };
+        written
+    };
+    // SAFETY: checked non-null above; EGL's contract makes it writable.
+    unsafe { *count = written as i32 };
+    TRUE
+}
+
+/// Whether `config` has sample buffers, so it offers no window.
+fn multisampled(mesa: &Mesa, display: Display, config: Config) -> bool {
+    let mut buffers = 0;
+    // SAFETY: Mesa's function with a local output.
+    unsafe { (mesa.get_config_attrib)(display, config, SAMPLE_BUFFERS, &mut buffers) };
+    buffers > 0
 }
 
 /// `EGLBoolean eglGetConfigAttrib(...)`.
@@ -333,7 +500,7 @@ pub unsafe extern "C" fn get_config_attrib(
             let Some(kind) = size(SURFACE_TYPE) else {
                 return FALSE;
             };
-            if kind & PBUFFER_BIT != 0 {
+            if kind & PBUFFER_BIT != 0 && !multisampled(mesa, display, config) {
                 kind | WINDOW_BIT
             } else {
                 kind
@@ -395,6 +562,10 @@ fn window_surface(
     else {
         return std::ptr::null_mut();
     };
+    if multisampled(mesa, display, config) {
+        // Such a config reports no EGL_WINDOW_BIT, so EGL refuses it (EGL_BAD_MATCH).
+        return std::ptr::null_mut();
+    }
     let Ok((width, height, _)) = window.buffer_size(jni) else {
         return std::ptr::null_mut();
     };
@@ -638,6 +809,13 @@ pub unsafe extern "C" fn presentation_time(
     TRUE
 }
 
+/// `EGLClientBuffer eglGetNativeClientBufferANDROID(const AHardwareBuffer*)`: hardware buffers live
+/// in process memory (`hardware_buffer.rs`), which no GPU can import yet, so there is no client
+/// buffer to give, and the extension's failure value says so. Libraries that link it still load.
+pub unsafe extern "C" fn get_native_client_buffer(_buffer: *const c_void) -> *const c_void {
+    std::ptr::null()
+}
+
 /// `__eglMustCastToProperFunctionPointerType eglGetProcAddress(const char*)`: the translated
 /// functions for their names, Mesa's for the rest.
 pub unsafe extern "C" fn get_proc_address(name: *const c_char) -> *const c_void {
@@ -654,6 +832,7 @@ pub unsafe extern "C" fn get_proc_address(name: *const c_char) -> *const c_void 
             uxdroid_bridge::table::Address::Function(address) => Some(address.cast::<c_void>()),
             _ => None,
         });
-    own.or_else(|| proc_address(name))
+    own.or_else(|| own_gles(name))
+        .or_else(|| proc_address(name))
         .unwrap_or(std::ptr::null())
 }

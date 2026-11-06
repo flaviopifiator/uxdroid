@@ -806,6 +806,7 @@ pub(super) const SPECIALS: &[(&str, super::libc::Special)] = &[
     ("epoll_ctl", epoll_ctl),
     ("epoll_wait", epoll_wait),
     ("epoll_pwait", epoll_pwait),
+    ("epoll_pwait64", epoll_pwait),
     ("ioctl", ioctl),
     ("tcgetattr", tcgetattr),
     ("tcsetattr", tcsetattr),

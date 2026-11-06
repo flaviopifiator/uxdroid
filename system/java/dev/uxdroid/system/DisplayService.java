@@ -31,6 +31,11 @@ public final class DisplayService {
         return new int[] {Display.DEFAULT_DISPLAY};
     }
 
+    /** No Wi-Fi display: MediaRouter reads this status when it is made, and apps make one for casting. */
+    public android.hardware.display.WifiDisplayStatus getWifiDisplayStatus() {
+        return new android.hardware.display.WifiDisplayStatus();
+    }
+
     public DisplayInfo getDisplayInfo(int displayId) {
         if (displayId != Display.DEFAULT_DISPLAY) return null;
         DisplayInfo info = new DisplayInfo();

@@ -512,6 +512,18 @@ public final class Launcher {
             return Broadcasts.register(receiver, filter);
         }
 
+        /**
+         * The app's one process, in the foreground: apps such as Instagram find their main process here
+         * by name before they initialize.
+         */
+        public java.util.List<android.app.ActivityManager.RunningAppProcessInfo> getRunningAppProcesses() {
+            android.app.ActivityManager.RunningAppProcessInfo info = new android.app.ActivityManager.RunningAppProcessInfo(
+                    app.application.processName, android.os.Process.myPid(), new String[] {app.application.packageName});
+            info.uid = app.application.uid;
+            info.importance = android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+            return java.util.List.of(info);
+        }
+
         /** The framework publishes the providers it installed; they are already in the only process. */
         public void publishContentProviders(IApplicationThread caller,
                 java.util.List<android.app.ContentProviderHolder> providers) {}

@@ -1,0 +1,71 @@
+{
+  "packages": {
+    "org.example.plain": {
+      "versions": {
+        "aa01": {"file": {"name": "/org.example.plain_3.apk", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "size": 1000},
+                 "manifest": {"versionCode": 3, "versionName": "1.3", "usesSdk": {"minSdkVersion": 21}}},
+        "aa02": {"file": {"name": "/org.example.plain_2.apk", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "size": 900},
+                 "manifest": {"versionCode": 2, "versionName": "1.2", "nativecode": ["x86_64"]}}
+      }
+    },
+    "org.example.both": {
+      "versions": {
+        "bb01": {"file": {"name": "/org.example.both_10.apk", "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "size": 2000},
+                 "manifest": {"versionCode": 10, "versionName": "2.0", "nativecode": ["arm64-v8a", "x86_64"]}}
+      }
+    },
+    "org.example.arm": {
+      "versions": {
+        "cc01": {"file": {"name": "/org.example.arm_5.apk", "sha256": "4444444444444444444444444444444444444444444444444444444444444444", "size": 3000},
+                 "manifest": {"versionCode": 5, "versionName": "5", "nativecode": ["armeabi-v7a", "arm64-v8a"]}}
+      }
+    },
+    "org.example.armonly": {
+      "versions": {
+        "dd01": {"file": {"name": "/org.example.armonly_7.apk", "sha256": "5555555555555555555555555555555555555555555555555555555555555555", "size": 100},
+                 "manifest": {"versionCode": 7, "nativecode": ["armeabi-v7a"]}},
+        "dd02": {"file": {"name": "/org.example.armonly_6.apk", "sha256": "6666666666666666666666666666666666666666666666666666666666666666", "size": 100},
+                 "manifest": {"versionCode": 6, "nativecode": ["x86_64"]}}
+      }
+    },
+    "org.example.beta": {
+      "versions": {
+        "ee01": {"file": {"name": "/org.example.beta_9.apk", "sha256": "7777777777777777777777777777777777777777777777777777777777777777", "size": 100},
+                 "releaseChannels": ["Beta"],
+                 "manifest": {"versionCode": 9, "nativecode": ["x86_64"]}},
+        "ee02": {"file": {"name": "/org.example.beta_8.apk", "sha256": "8888888888888888888888888888888888888888888888888888888888888888", "size": 100},
+                 "manifest": {"versionCode": 8, "versionName": "8.0"}}
+      }
+    },
+    "org.example.futuresdk": {
+      "versions": {
+        "ff01": {"file": {"name": "/org.example.futuresdk_1.apk", "sha256": "9999999999999999999999999999999999999999999999999999999999999999", "size": 100},
+                 "manifest": {"versionCode": 1, "usesSdk": {"minSdkVersion": 37}}}
+      }
+    },
+    "org.example.oldsdk": {
+      "versions": {
+        "gg01": {"file": {"name": "/org.example.oldsdk_1.apk", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 100},
+                 "manifest": {"versionCode": 1, "maxSdkVersion": 28}}
+      }
+    },
+    "org.example.escape": {
+      "versions": {
+        "hh01": {"file": {"name": "/../../etc/passwd", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 100},
+                 "manifest": {"versionCode": 1}}
+      }
+    },
+    "org.example.nohash": {
+      "versions": {
+        "ii01": {"file": {"name": "/org.example.nohash_1.apk", "size": 100},
+                 "manifest": {"versionCode": 1}}
+      }
+    },
+    "not a/package": {
+      "versions": {
+        "jj01": {"file": {"name": "/x_1.apk", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "size": 100},
+                 "manifest": {"versionCode": 1}}
+      }
+    }
+  }
+}

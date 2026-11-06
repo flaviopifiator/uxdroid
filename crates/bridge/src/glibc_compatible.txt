@@ -75,5 +75,14 @@ waitpid wcrtomb wcscasecmp wcscat wcschr wcscmp wcscoll wcscoll_l wcscpy wcscspn
 wcsncat wcsncmp wcsncpy wcsnlen wcsnrtombs wcspbrk wcsrchr wcsrtombs wcsspn wcsstr wcstod wcstof
 wcstok wcstol wcstoll wcstombs wcstoul wcstoull wcsxfrm wcsxfrm_l wctob wctomb wctype wcwidth
 wmemchr wmemcmp wmemcpy wmemmove wmemset write writev
+# Audited for Instagram 454: kernel structures or plain integers on both hosts (sysinfo, sigevent,
+# itimerspec, eventfd_t, clockid_t), fenv's flags are the CPU's, ldiv_t is two longs returned in
+# registers, and aligned_alloc's memory is glibc's malloc as every app allocation already is.
+aligned_alloc alarm eventfd_read eventfd_write execle feclearexcept fetestexcept getpriority ldiv
+pthread_getcpuclockid readahead sysinfo tgkill timer_create timer_delete timer_settime
+# Audited for the F-Droid catalog: the same five arguments and the same abort on overflow.
+__pread64_chk __pread_chk
+# The real-time signals free in this process are glibc's, which reserves its own as bionic does.
+__libc_current_sigrtmax __libc_current_sigrtmin
 # Data with the same type in both libcs.
 __progname daylight in6addr_any in6addr_loopback optarg opterr optind optopt signgam timezone tzname

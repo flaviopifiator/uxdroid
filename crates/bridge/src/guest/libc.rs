@@ -17,6 +17,8 @@ pub(super) enum Import {
     Special(fn(&dyn Cpu)),
     /// An object guest code reads in place, such as the legacy `__sF` streams.
     Data,
+    /// An object whose arm64 layout differs from x86_64's, at this address.
+    Object(usize),
 }
 
 /// Signatures written by hand, ahead of the generated table (`libc_table.py`): functions with no
@@ -45,7 +47,6 @@ const FUNCTIONS: &[(&str, &str)] = &[
     ("strnlen", "u64(ptr,u64)"),
     // Process, time and files by descriptor
     ("__stack_chk_fail", "void()"),
-    ("android_set_abort_message", "void(ptr)"),
     ("getpid", "i32()"),
     ("gettid", "i32()"),
     ("getuid", "u32()"),
@@ -98,7 +99,26 @@ const DATA: &[&str] = &[
     "in6addr_any",
     "in6addr_loopback",
     "signgam",
+    "_ctype_",
+    "sys_signame",
+    "sys_siglist",
+    "optreset",
+    "__stack_chk_guard",
+    "error_message_count",
+    "error_one_per_line",
+    "error_print_progname",
+    "__p_class_syms",
+    "__p_type_syms",
+    "_ZSt7nothrow",
 ];
+
+/// Objects with an arm64 layout of their own, which guest code gets instead of the host's.
+fn objects() -> [(&'static str, usize); 1] {
+    [(
+        "__fe_dfl_env",
+        std::ptr::from_ref(&crate::shims::data::FE_DFL_ENV_ARM64) as usize,
+    )]
+}
 
 /// `v` functions of the printf family and the variadic function that serves each: the guest's
 /// `va_list` is read by the format and the twin gets the arguments as if called directly.
@@ -139,11 +159,15 @@ const SPECIALS: &[(&str, Special)] = &[
     ("dl_iterate_phdr", dl_iterate_phdr),
     ("getauxval", getauxval),
     ("syscall", syscall),
+    ("__system_property_foreach", system_property_foreach),
 ];
 
 pub(super) fn find(name: &str) -> Option<Import> {
     if DATA.contains(&name) {
         return Some(Import::Data);
+    }
+    if let Some(&(_, address)) = objects().iter().find(|(known, _)| *known == name) {
+        return Some(Import::Object(address));
     }
     let specials = SPECIALS.iter().chain(super::convert::SPECIALS);
     if let Some(&(_, special)) = specials.clone().find(|(known, _)| *known == name) {
@@ -344,6 +368,24 @@ fn dl_iterate_phdr(cpu: &dyn Cpu) {
             Some(std::mem::transmute::<usize, Visit>(visit)),
             cpu.x(1) as usize as *mut c_void,
         )
+    };
+    set_i32(cpu, status);
+}
+
+/// The host visits the properties with a host thunk for the guest's callback.
+fn system_property_foreach(cpu: &dyn Cpu) {
+    type Foreach = unsafe extern "C" fn(usize, *mut c_void) -> i32;
+    let visit = host_callback(cpu, cpu.x(0), "void(ptr,ptr)");
+    let Some(address) = crate::shims::resolve(c"__system_property_foreach", false) else {
+        super::fail(
+            cpu,
+            format_args!("the host has no __system_property_foreach"),
+        );
+    };
+    // SAFETY: the host's function has this signature; the thunk has the callback's, and the
+    // cookie is the guest's, passed back unread.
+    let status = unsafe {
+        std::mem::transmute::<usize, Foreach>(address)(visit, cpu.x(1) as usize as *mut c_void)
     };
     set_i32(cpu, status);
 }

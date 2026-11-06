@@ -29,6 +29,8 @@ public class NdkActivity extends Activity implements SurfaceHolder.Callback2 {
     static native String drawCpu(android.view.Surface surface, int color);
 
     /** Clears the surface through EGL and GLES, with the top-left quarter white. */
+    static native String ownSignalStack();
+
     static native String drawGl(android.view.Surface surface, float red, float green, float blue);
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -42,6 +44,16 @@ public class NdkActivity extends Activity implements SurfaceHolder.Callback2 {
         bitmap.setPixel(0, 0, 0xFF102030);
         System.out.println("ndk check: " + check(getAssets(), bitmap));
         System.out.println("ndk bitmap pixel written natively: " + Integer.toHexString(bitmap.getPixel(1, 0)));
+        // A thread whose native code swaps the alternate signal stack must still end cleanly.
+        String[] stack = new String[1];
+        Thread thread = new Thread(() -> stack[0] = ownSignalStack());
+        thread.start();
+        try {
+            thread.join();
+        } catch (InterruptedException e) {
+            throw new IllegalStateException(e);
+        }
+        System.out.println("ndk own signal stack " + stack[0] + ", thread ended");
     }
 
     @Override

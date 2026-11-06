@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -324,4 +325,15 @@ JNIEXPORT jstring JNICALL Java_com_example_ndk_NdkActivity_drawGl(JNIEnv* env, j
     eglDestroySurface(display, egl_surface);
     ANativeWindow_release(window);
     return (*env)->NewStringUTF(env, report);
+}
+
+/* What Instagram's crash reporter does on a thread of its own: an alternate signal stack of its
+ * memory, installed with the system call itself, left in place when the thread ends. */
+JNIEXPORT jstring JNICALL Java_com_example_ndk_NdkActivity_ownSignalStack(JNIEnv* env, jclass class) {
+    size_t size = 64 * 1024;
+    void* memory = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (memory == MAP_FAILED) return (*env)->NewStringUTF(env, "mmap failed");
+    stack_t stack = {.ss_sp = memory, .ss_flags = 0, .ss_size = size};
+    if (syscall(SYS_sigaltstack, &stack, NULL) != 0) return (*env)->NewStringUTF(env, "sigaltstack failed");
+    return (*env)->NewStringUTF(env, "installed");
 }

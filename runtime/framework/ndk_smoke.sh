@@ -52,6 +52,8 @@ expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
 wait_for "ndk cpu frame:"
 expect "^ndk check: assets bitmap opensl looper choreographer ok$" "the native checks failed"
 expect "^ndk bitmap pixel written natively: ff405060$" "AndroidBitmap_unlockPixels did not write back"
+expect "^ndk own signal stack installed, thread ended$" \
+    "a thread whose native code installed its own alternate signal stack did not end cleanly"
 expect "^I/ndksample: liblog print 42$" "__android_log_print"
 expect "^W/ndksample: liblog write$" "__android_log_write"
 expect "^E/ndksample: liblog buf_write$" "__android_log_buf_write"

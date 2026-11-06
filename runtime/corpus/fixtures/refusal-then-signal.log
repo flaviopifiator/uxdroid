@@ -1,0 +1,5 @@
+uxdroid: first frame posted on org.example/org.example.Main 400x700, 120 ms after the framework started
+uxdroid: __pread_chk is not audited for bionic compatibility yet
+*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
+Fatal signal 6 (SIGABRT), code -6 (SI_TKILL)
+Thread: 128 "flutter-worker-"

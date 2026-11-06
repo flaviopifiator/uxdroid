@@ -106,10 +106,10 @@ pub static EGL: Table = Table {
         Export::resolved(c"eglGetCurrentSurface", "ptr(i32)", egl::egl_symbol),
         Export::function(c"eglGetDisplay", "ptr(ptr)", egl::get_display as *const ()),
         Export::resolved(c"eglGetError", "i32()", egl::egl_symbol),
-        Export::resolved(
+        Export::function(
             c"eglGetNativeClientBufferANDROID",
             "ptr(ptr)",
-            egl::egl_symbol,
+            egl::get_native_client_buffer as *const (),
         ),
         Export::function(
             c"eglGetPlatformDisplay",

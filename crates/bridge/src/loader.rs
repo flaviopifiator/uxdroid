@@ -23,6 +23,7 @@ use crate::guest;
 use crate::image::Image;
 use crate::shims;
 use crate::table::{self, Table};
+use crate::unimplemented;
 
 /// libraries that uxdroid provides from glibc and the shims instead of loading a file. The other
 /// Android system libraries, such as `liblog.so` or `libandroid.so`, are signature tables.
@@ -125,6 +126,9 @@ pub struct Library {
     dependencies: OnceLock<Vec<&'static Library>>,
     /// The signature tables among this library's dependencies, in `DT_NEEDED` order.
     tables: OnceLock<Vec<&'static Table>>,
+    /// The NDK libraries among its dependencies that uxdroid serves instead of a file, in
+    /// `DT_NEEDED` order: their functions nothing binds stop the program naming them.
+    ndk: OnceLock<Vec<String>>,
 }
 
 impl Library {
@@ -496,13 +500,21 @@ fn map_and_link(
             .map_err(|error| library.invalid(error))?;
         let mut dependencies = Vec::new();
         let mut tables = Vec::new();
+        let mut ndk = Vec::new();
         for name in needed {
+            let is_ndk = unimplemented::is_ndk_library(&name);
             if SYSTEM_LIBRARIES.contains(&name.as_str()) {
+                if is_ndk {
+                    ndk.push(name);
+                }
                 continue;
             }
             // Android's own libraries come from the host even when an app ships a file of that name.
             if let Some(table) = table::find(&name) {
                 tables.push(table);
+                if is_ndk {
+                    ndk.push(name);
+                }
                 continue;
             }
             let known = registry
@@ -517,11 +529,17 @@ fn map_and_link(
                     if pending.len() >= MAX_LIBRARIES_PER_LOAD {
                         return Err(Error::TooManyLibraries);
                     }
-                    let path =
-                        find_dependency(&name, registry).ok_or_else(|| Error::MissingLibrary {
+                    let Some(path) = find_dependency(&name, registry) else {
+                        // An NDK library uxdroid has no table for: every function of it is a stub.
+                        if is_ndk {
+                            ndk.push(name);
+                            continue;
+                        }
+                        return Err(Error::MissingLibrary {
                             needed: name.clone(),
                             by: library.name.clone(),
-                        })?;
+                        });
+                    };
                     let dependency = map_library(&path)?;
                     pending.push(dependency);
                     dependency
@@ -536,6 +554,7 @@ fn map_and_link(
         }
         let _ = library.dependencies.set(dependencies);
         let _ = library.tables.set(tables);
+        let _ = library.ndk.set(ndk);
     }
 
     let root = pending[0];
@@ -552,15 +571,23 @@ fn map_and_link(
     let scope = Scope::of(root);
     let ordered = dependencies_first(root, pending);
     let mut unresolved = Vec::new();
+    let mut warnings = Vec::new();
     for library in &ordered {
-        let mut missing = BTreeSet::new();
-        relocate(library, &scope, &mut missing).map_err(|error| library.invalid(error))?;
-        if !missing.is_empty() {
-            unresolved.push((library.name.clone(), missing.into_iter().collect()));
+        let mut imports = Imports::default();
+        relocate(library, &scope, &mut imports).map_err(|error| library.invalid(error))?;
+        if !imports.missing.is_empty() {
+            unresolved.push((library.name.clone(), imports.missing.into_iter().collect()));
+        }
+        if !imports.unimplemented.is_empty() {
+            let names: Vec<&str> = imports.unimplemented.iter().map(String::as_str).collect();
+            warnings.push(unimplemented::warning(&library.name, &names));
         }
     }
     if !unresolved.is_empty() {
         return Err(Error::UnresolvedSymbols(unresolved));
+    }
+    for warning in warnings {
+        crate::output::write_stderr(format_args!("warning: {warning}\n"));
     }
     for library in &ordered {
         library
@@ -658,6 +685,7 @@ fn map_library(path: &Path) -> Result<&'static Library, Error> {
         dynamic,
         dependencies: OnceLock::new(),
         tables: OnceLock::new(),
+        ndk: OnceLock::new(),
     })))
 }
 
@@ -665,6 +693,9 @@ fn map_library(path: &Path) -> Result<&'static Library, Error> {
 struct Scope {
     libraries: Vec<&'static Library>,
     tables: Vec<&'static Table>,
+    /// The NDK libraries they need that uxdroid serves, whose official lists name the functions
+    /// that bind to stubs when nothing else has them.
+    ndk: Vec<&'static str>,
 }
 
 impl Scope {
@@ -683,7 +714,19 @@ impl Scope {
         if !tables.iter().any(|seen| std::ptr::eq(*seen, liblog)) {
             tables.push(liblog);
         }
-        Scope { libraries, tables }
+        let mut ndk: Vec<&'static str> = Vec::new();
+        for library in &libraries {
+            for needed in library.ndk.get().map_or(&[][..], Vec::as_slice) {
+                if !ndk.contains(&needed.as_str()) {
+                    ndk.push(needed);
+                }
+            }
+        }
+        Scope {
+            libraries,
+            tables,
+            ndk,
+        }
     }
 }
 
@@ -783,10 +826,19 @@ fn resolve_ifunc(machine: Machine, resolver: u64) -> Result<u64, ElfError> {
     Ok(unsafe { call_resolver(resolver) })
 }
 
+/// A library's imports that did not bind to a definition, by name.
+#[derive(Default)]
+struct Imports {
+    /// Found nowhere: the load fails.
+    missing: BTreeSet<String>,
+    /// Bound to stubs that stop the program naming them.
+    unimplemented: BTreeSet<String>,
+}
+
 fn relocate(
     library: &'static Library,
     scope: &Scope,
-    missing: &mut BTreeSet<String>,
+    imports: &mut Imports,
 ) -> Result<(), ElfError> {
     let image = &library.image;
     let dynamic = &library.dynamic;
@@ -802,7 +854,7 @@ fn relocate(
     let mut cache = HashMap::new();
     let mut ifuncs = Vec::new();
     let mut apply =
-        |rela: Rela| apply_relocation(library, scope, rela, &mut cache, &mut ifuncs, missing);
+        |rela: Rela| apply_relocation(library, scope, rela, &mut cache, &mut ifuncs, imports);
 
     if dynamic.android_relasz != 0 {
         let span = library
@@ -845,7 +897,7 @@ fn apply_relocation(
     rela: Rela,
     cache: &mut HashMap<u32, u64>,
     ifuncs: &mut Vec<(u64, u64)>,
-    missing: &mut BTreeSet<String>,
+    imports: &mut Imports,
 ) -> Result<(), ElfError> {
     let image = &library.image;
     let bias = image.bias() as u64;
@@ -859,7 +911,7 @@ fn apply_relocation(
             let address = match cache.get(&rela.symbol) {
                 Some(&address) => address,
                 None => {
-                    let address = symbol_address(library, scope, rela, missing)?;
+                    let address = symbol_address(library, scope, rela, imports)?;
                     cache.insert(rela.symbol, address);
                     address
                 }
@@ -928,7 +980,7 @@ fn symbol_address(
     library: &'static Library,
     scope: &Scope,
     rela: Rela,
-    missing: &mut BTreeSet<String>,
+    imports: &mut Imports,
 ) -> Result<u64, ElfError> {
     let index = rela.symbol;
     if index == 0 {
@@ -941,9 +993,20 @@ fn symbol_address(
     if let Some(address) = resolve(scope, name, is_data, library.machine)? {
         return Ok(address);
     }
+    let weak = symbol.bind == STB_WEAK;
+    let text = String::from_utf8_lossy(name);
+    if let Some(function) = unimplemented::find(scope.ndk.iter().copied(), &text, is_data, weak) {
+        let address = if library.machine == Machine::HOST {
+            unimplemented::host_stub(&function) as u64
+        } else {
+            guest::unimplemented(function)?
+        };
+        imports.unimplemented.insert(function.name.to_string());
+        return Ok(address);
+    }
     // The limit bounds the memory of an error report for a crafted file.
-    if symbol.bind != STB_WEAK && missing.len() < MAX_REPORTED_SYMBOLS {
-        missing.insert(String::from_utf8_lossy(name).into_owned());
+    if !weak && imports.missing.len() < MAX_REPORTED_SYMBOLS {
+        imports.missing.insert(text.into_owned());
     }
     Ok(0)
 }
@@ -1078,6 +1141,7 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
         Scope {
             libraries,
             tables: table::all(),
+            ndk: Vec::new(),
         }
     } else if let Some(library) = libraries
         .iter()
@@ -1088,12 +1152,14 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
         Scope {
             libraries: Vec::new(),
             tables: vec![table],
+            ndk: Vec::new(),
         }
     } else {
         // SYSTEM_HANDLE or RTLD_NEXT: only the host remains to search.
         Scope {
             libraries: Vec::new(),
             tables: Vec::new(),
+            ndk: Vec::new(),
         }
     };
     match resolve(&scope, symbol.to_bytes(), false, Machine::HOST) {
@@ -1102,6 +1168,59 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut
             set_dl_error(format!("undefined symbol: {}", symbol.to_string_lossy()));
             std::ptr::null_mut()
         }
+    }
+}
+
+/// The linker's own entry points, which bionic's libdl.so forwards to with the caller's address, the
+/// namespace hint: libraries such as Meta's crash reporter look them up there by name. This loader
+/// has one namespace, so the hint is not needed.
+pub(crate) mod linker {
+    use std::ffi::{c_char, c_int, c_void};
+
+    /// # Safety
+    /// As `dlopen`.
+    pub unsafe extern "C" fn dlopen(
+        name: *const c_char,
+        flags: c_int,
+        _caller: *const c_void,
+    ) -> *mut c_void {
+        // SAFETY: the same contract.
+        unsafe { super::dlopen(name, flags) }
+    }
+
+    /// # Safety
+    /// As `android_dlopen_ext`.
+    pub unsafe extern "C" fn android_dlopen_ext(
+        name: *const c_char,
+        flags: c_int,
+        info: *const c_void,
+        _caller: *const c_void,
+    ) -> *mut c_void {
+        // SAFETY: the same contract.
+        unsafe { super::android_dlopen_ext(name, flags, info) }
+    }
+
+    /// # Safety
+    /// As `dlsym`.
+    pub unsafe extern "C" fn dlsym(
+        handle: *mut c_void,
+        name: *const c_char,
+        _caller: *const c_void,
+    ) -> *mut c_void {
+        // SAFETY: the same contract.
+        unsafe { super::dlsym(handle, name) }
+    }
+
+    /// # Safety
+    /// As `dlsym`. Libraries here carry no symbol versions, so every version is the one symbol.
+    pub unsafe extern "C" fn dlvsym(
+        handle: *mut c_void,
+        name: *const c_char,
+        _version: *const c_char,
+        _caller: *const c_void,
+    ) -> *mut c_void {
+        // SAFETY: the same contract.
+        unsafe { super::dlsym(handle, name) }
     }
 }
 
@@ -1119,6 +1238,7 @@ pub(crate) fn guest_symbol(handle: *mut c_void, name: &[u8]) -> Option<u64> {
         Scope {
             libraries,
             tables: table::all(),
+            ndk: Vec::new(),
         }
     } else if let Some(library) = libraries
         .iter()
@@ -1129,12 +1249,14 @@ pub(crate) fn guest_symbol(handle: *mut c_void, name: &[u8]) -> Option<u64> {
         Scope {
             libraries: Vec::new(),
             tables: vec![table],
+            ndk: Vec::new(),
         }
     } else {
         // SYSTEM_HANDLE: libc, libm and libdl, which the guest's own table serves.
         Scope {
             libraries: Vec::new(),
             tables: Vec::new(),
+            ndk: Vec::new(),
         }
     };
     let found = resolve(&scope, name, false, Machine::Aarch64)

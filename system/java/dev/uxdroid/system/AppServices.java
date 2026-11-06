@@ -32,6 +32,28 @@ final class AppServices {
         Services.register("game", android.app.IGameManagerService.class, new Games(app));
         Services.register("textservices", com.android.internal.textservice.ITextServicesManager.class,
                 new TextServices());
+        // A desktop has no SIM or radio: listeners Instagram adds are kept by no one and never called.
+        Services.register("telephony.registry", com.android.internal.telephony.ITelephonyRegistry.class, null);
+        // Services every Android device has, whose managers apps get and cast without a null check
+        // (Instagram's KeyguardManager): their defaults are a desktop with no lock screen, location,
+        // device admin, roles, biometrics, USB devices, restrictions or blobs, and nothing recorded.
+        Services.register("trust", android.app.trust.ITrustManager.class, null);
+        Services.register("location", android.location.ILocationManager.class, null);
+        Services.register("usagestats", android.app.usage.IUsageStatsManager.class, null);
+        Services.register("uimode", android.app.IUiModeManager.class, null);
+        Services.register("device_policy", android.app.admin.IDevicePolicyManager.class, null);
+        Services.register("batterystats", com.android.internal.app.IBatteryStats.class, null);
+        Services.register("batteryproperties", android.os.IBatteryPropertiesRegistrar.class, null);
+        Services.register("storagestats", android.app.usage.IStorageStatsManager.class, null);
+        Services.register("role", android.app.role.IRoleManager.class, null);
+        Services.register("auth", android.hardware.biometrics.IAuthService.class, null);
+        Services.register("usb", android.hardware.usb.IUsbManager.class, null);
+        Services.register("search", android.app.ISearchManager.class, null);
+        Services.register("restrictions", android.content.IRestrictionsManager.class, null);
+        Services.register("app_hibernation", android.apphibernation.IAppHibernationService.class, null);
+        Services.register("blob_store", android.app.blob.IBlobStoreManager.class, null);
+        // MediaRouter, which apps make for casting: no route but the default one.
+        Services.register("media_router", android.media.IMediaRouterService.class, null);
     }
 
     /**

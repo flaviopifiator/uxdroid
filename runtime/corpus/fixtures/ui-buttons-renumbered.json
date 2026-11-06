@@ -1,0 +1,10 @@
+{"snapshot": 5, "windows": [{"root": {"id": 11, "class": "android.widget.FrameLayout", "bounds": [0, 0, 400, 700], "visible": true,
+  "children": [
+    {"id": 12, "class": "android.widget.LinearLayout", "bounds": [0, 0, 400, 300], "visible": true, "clickable": true,
+     "children": [
+       {"id": 13, "class": "android.widget.Button", "text": "Hidden", "bounds": [0, 0, 100, 40], "visible": false, "clickable": true},
+       {"id": 14, "class": "android.widget.Button", "text": "Empty", "bounds": [50, 50, 50, 90], "visible": true, "clickable": true},
+       {"id": 15, "class": "android.widget.Button", "text": "Next", "bounds": [100, 200, 300, 260], "visible": true, "clickable": true}
+     ]},
+    {"id": 16, "class": "android.widget.TextView", "text": "Welcome", "bounds": [0, 300, 400, 340], "visible": true}
+  ]}}]}

@@ -35,6 +35,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::elf::ElfError;
 use crate::table::{Signature, Table, Type};
+use crate::unimplemented::Unimplemented;
 use abi::{Class, GuestVaList, Slot, guest_layout, host_layout, normalize};
 
 pub use jni::{method_trampoline as jni_method_trampoline, trampoline as jni_trampoline};
@@ -270,6 +271,8 @@ enum Service {
     JniCall(jni::MethodCall),
     /// A function the host has but guest code cannot call yet; stops the program naming it.
     Missing(String),
+    /// A function of an NDK library uxdroid does not have yet; stops the program naming both.
+    Unimplemented(Unimplemented),
 }
 
 static SERVICES: [AtomicPtr<Service>; MAX_SERVICES] =
@@ -351,6 +354,7 @@ fn supervisor(cpu: &dyn Cpu, number: u32) -> bool {
             "uxdroid: {} has no guest signature yet, so arm64 code cannot call it\n",
             name.escape_debug()
         )),
+        Service::Unimplemented(function) => crate::unimplemented::stop(function),
     }
 }
 
@@ -419,15 +423,31 @@ fn resolve_import(
         }
         Some(libc::Import::Special(special)) => add_service(Service::Special(special)).map(Some),
         Some(libc::Import::Data) => Ok(host_address(name, true).map(|address| address as u64)),
+        Some(libc::Import::Object(address)) => Ok(Some(address as u64)),
         None if is_data => Ok(None),
-        None => match host_address(name, false) {
-            Some(_) => {
-                record_missing(name);
-                add_service(Service::Missing(name.to_string())).map(Some)
-            }
-            None => Ok(None),
-        },
+        // Only whether the host has it: taking an unaudited function's stub here would waste one.
+        None if crate::shims::has_function(name) => {
+            record_missing(name);
+            add_service(Service::Missing(name.to_string())).map(Some)
+        }
+        None => Ok(None),
     }
+}
+
+/// The guest stub for an import of a function uxdroid does not have yet, one service per function.
+pub(crate) fn unimplemented(function: Unimplemented) -> Result<u64, ElfError> {
+    static STUBS: Mutex<Option<HashMap<(&'static str, &'static str), u64>>> = Mutex::new(None);
+    let mut stubs = STUBS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stubs = stubs.get_or_insert_with(HashMap::new);
+    let key = (function.library, function.name);
+    if let Some(&stub) = stubs.get(&key) {
+        return Ok(stub);
+    }
+    let stub = add_service(Service::Unimplemented(function))?;
+    stubs.insert(key, stub);
+    Ok(stub)
 }
 
 /// A `v` function served by its variadic twin, found the way an import of the twin would be.
@@ -540,12 +560,17 @@ pub(crate) fn binding(name: &str, tables: &[&'static Table], is_data: bool) -> p
     };
     match libc::find(name) {
         Some(libc::Import::Function(_)) if crate::shims::is_audited(name) => Binding::Libc,
-        Some(libc::Import::Function(_)) => Binding::Stub("the host function is not audited"),
+        Some(libc::Import::Function(_)) if crate::shims::has_function(name) => {
+            Binding::Stub("the host function is not audited")
+        }
+        // The load finds no host function to call, as `resolve_import` does.
+        Some(libc::Import::Function(_)) => Binding::Unresolved,
         Some(libc::Import::Special(_)) => Binding::Libc,
         Some(libc::Import::Data) if host_address(name, true).is_some() => Binding::Libc,
         Some(libc::Import::Data) => Binding::Unresolved,
+        Some(libc::Import::Object(_)) => Binding::Libc,
         None if is_data => Binding::Unresolved,
-        None if host_address(name, false).is_some() => Binding::Stub(unsigned_reason()),
+        None if crate::shims::has_function(name) => Binding::Stub(unsigned_reason()),
         None => Binding::Unresolved,
     }
 }

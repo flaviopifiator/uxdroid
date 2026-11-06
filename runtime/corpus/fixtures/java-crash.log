@@ -1,0 +1,13 @@
+uxdroid: unimplemented native android.os.Binder.setThreadStrictModePolicy(I)V returned its default
+W ContextImpl: Failed to ensure /tmp/tmp.DcXeMVIpuv/data/data/org.example.app/cache: chown failed: EPERM (Operation not permitted)
+Caused by: android.system.GaiException: android_getaddrinfo failed: EAI_AGAIN (Temporary failure in name resolution)
+Exception in thread "main" java.lang.RuntimeException: Unable to create application org.example.App: java.lang.IllegalStateException: init failed
+	at android.app.ActivityThread.handleBindApplication(ActivityThread.java:7835)
+	at dev.uxdroid.system.Launcher.main(Launcher.java:117)
+Caused by: java.lang.IllegalStateException: init failed
+	at org.example.App.onCreate(App.kt:12)
+	... 7 more
+Caused by: java.security.KeyStoreException: AndroidKeyStore not found
+	at java.security.KeyStore.getInstance(KeyStore.java:904)
+	... 9 more
+11-05 17:42:39.077  1707  1710 W dalvikvm64: java_vm_ext.cc:96 Error while unloading native library

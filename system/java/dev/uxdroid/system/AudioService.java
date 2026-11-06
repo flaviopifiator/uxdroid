@@ -57,4 +57,9 @@ public final class AudioService {
             String callingPackage) {
         return AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
     }
+
+    /** MediaRouter's routes: sound comes out of the desktop's default output, a speaker, and never changes. */
+    public android.media.AudioRoutesInfo startWatchingRoutes(android.media.IAudioRoutesObserver observer) {
+        return new android.media.AudioRoutesInfo();
+    }
 }

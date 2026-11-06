@@ -525,6 +525,81 @@ fn all_unresolved_symbols_are_listed() {
     assert_eq!(stdout(&output), "");
 }
 
+/// A library that needs Vulkan, which uxdroid has no table for, and calls one of its functions.
+const VULKAN_SOURCE: &str = "#include <vulkan/vulkan.h>\n\
+     int make(void) {\n\
+       VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};\n\
+       VkInstance instance;\n\
+       return vkCreateInstance(&info, 0, &instance);\n\
+     }\n";
+
+#[test]
+fn a_library_needing_an_ndk_library_uxdroid_lacks_loads_and_stops_naming_the_call() {
+    let dir = build_root().join("vulkan");
+    let source = dir.join("vulkan.c");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&source, VULKAN_SOURCE).unwrap();
+    ndk_build(
+        &dir,
+        "libvk.so",
+        "24",
+        &[source.to_str().unwrap()],
+        &["-lvulkan"],
+    );
+    let warning = "warning: libvk.so calls functions uxdroid does not have yet, \
+                   and stops if it reaches one: vkCreateInstance\n";
+
+    let loaded = uxdroid(&["load", dir.join("libvk.so").to_str().unwrap()]);
+    let called = load_and_call(&dir.join("libvk.so"), "make");
+
+    assert_eq!(loaded.status.code(), Some(0), "{}", stderr(&loaded));
+    assert_eq!(stderr(&loaded), warning);
+    assert!(
+        stdout(&loaded).contains("needs: libvulkan.so"),
+        "{}",
+        stdout(&loaded)
+    );
+    assert_eq!(called.status.code(), None, "must die from abort");
+    // QEMU user, on an x86_64 machine testing the aarch64 build, reports the abort after it.
+    assert!(
+        stderr(&called).starts_with(&format!(
+            "{warning}uxdroid: libvulkan.so vkCreateInstance is not implemented yet\n"
+        )),
+        "{}",
+        stderr(&called)
+    );
+}
+
+/// Only Android's official exports of a needed library are stubbed: any other name is no API.
+#[test]
+fn a_name_on_no_ndk_list_still_fails_the_load_beside_a_needed_ndk_library() {
+    let dir = build_root().join("not-listed");
+    let source = dir.join("not_listed.c");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        "#include <android/trace.h>\n\
+         int ATrace_notAnApi(void);\n\
+         int entry(void) { ATrace_beginSection(\"x\"); return ATrace_notAnApi(); }\n",
+    )
+    .unwrap();
+    ndk_build(
+        &dir,
+        "libnotlisted.so",
+        "24",
+        &[source.to_str().unwrap()],
+        &["-landroid", "-Wl,-z,undefs"],
+    );
+
+    let output = uxdroid(&["load", dir.join("libnotlisted.so").to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "error: libnotlisted.so: unresolved symbols: ATrace_notAnApi\n"
+    );
+}
+
 #[test]
 fn missing_dependencies_are_named_and_search_dirs_find_them() {
     let dir = build_root().join("search");
@@ -779,6 +854,36 @@ fn an_arm64_library_runs_through_the_translator() {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_arm64_library_needing_an_ndk_library_uxdroid_lacks_stops_naming_the_call() {
+    if std::env::var_os("UXDROID_TRANSLATOR").is_none() {
+        eprintln!("skipped: UXDROID_TRANSLATOR is not set; run in the translation service");
+        return;
+    }
+    let dir = build_root().join("arm64-vulkan");
+    let source = dir.join("vulkan.c");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&source, VULKAN_SOURCE).unwrap();
+    let status = Command::new(toolchain().join("bin/aarch64-linux-android24-clang"))
+        .arg(&source)
+        .args(["-shared", "-fPIC", "-O2", "-lvulkan", "-o"])
+        .arg(dir.join("libvk.so"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build the arm64 library");
+
+    let output = load_and_call(&dir.join("libvk.so"), "make");
+
+    assert_eq!(output.status.code(), None, "must die from abort");
+    assert_eq!(
+        stderr(&output),
+        "warning: libvk.so calls functions uxdroid does not have yet, \
+         and stops if it reaches one: vkCreateInstance\n\
+         uxdroid: libvulkan.so vkCreateInstance is not implemented yet\n"
+    );
+}
+
 /// On an arm64 host the spike's library is host code: it loads and runs with no translator,
 /// even when the one named cannot be opened.
 #[cfg(target_arch = "aarch64")]
@@ -828,5 +933,122 @@ fn an_x86_64_library_on_an_arm64_host_is_refused_by_name() {
         stderr(&output),
         "error: libforeign.so is x86_64 code, which needs the translator: \
          an arm64 host has no translator for x86_64 code yet\n"
+    );
+}
+
+/// The API level `gaps.c` is built for: the newest, as its newest calls need.
+const GAPS_SDK: &str = "37";
+
+/// The NDK's `libstdc++.so` for `triple` at `GAPS_SDK`, named by path: `-lstdc++` would find the
+/// static archive, which brings in libc++.
+fn stdcxx_stub(triple: &str) -> String {
+    toolchain()
+        .join(format!("sysroot/usr/lib/{triple}/{GAPS_SDK}/libstdc++.so"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Link flags for a group's library, given the target's NDK triple.
+type GapFlags = fn(&str) -> Vec<String>;
+
+fn no_flags(_triple: &str) -> Vec<String> {
+    Vec::new()
+}
+
+/// `gaps.c`'s group `group` (`-DGAP_<GROUP>`) as its own library, for this host's CPU.
+fn gap_library(group: &str, flags: GapFlags) -> PathBuf {
+    let dir = build_root().join(format!("gaps-{group}"));
+    let mut all_flags = vec![format!("-DGAP_{}", group.to_ascii_uppercase())];
+    all_flags.extend(flags(HOST_TRIPLE));
+    let all_flags: Vec<&str> = all_flags.iter().map(String::as_str).collect();
+    let name = format!("libgap{group}.so");
+    ndk_build(&dir, &name, GAPS_SDK, &["gaps.c"], &all_flags);
+    dir.join(name)
+}
+
+/// The same group built for arm64-v8a, which runs through the translator on an x86_64 host.
+#[cfg(target_arch = "x86_64")]
+fn arm64_gap_library(group: &str, flags: GapFlags) -> PathBuf {
+    let dir = build_root().join(format!("arm64-gaps-{group}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = dir.join(format!("libgap{group}.so"));
+    let status =
+        Command::new(toolchain().join(format!("bin/aarch64-linux-android{GAPS_SDK}-clang")))
+            .arg(fixture("gaps.c"))
+            .arg(format!("-DGAP_{}", group.to_ascii_uppercase()))
+            .args(["-shared", "-fPIC", "-O1", "-D_FORTIFY_SOURCE=2"])
+            .args(flags("aarch64-linux-android"))
+            .arg("-o")
+            .arg(&output)
+            .status()
+            .unwrap();
+    assert!(status.success(), "failed to build {}", output.display());
+    output
+}
+
+/// Calls `test_<group>` in the group's library, which returns 0 when every check holds, for host
+/// code and, where the translator is, for arm64 code.
+fn assert_gap_passes(group: &str, flags: GapFlags) {
+    let check = format!("test_{group}");
+    assert_check_passes(&gap_library(group, flags), &check);
+    #[cfg(target_arch = "x86_64")]
+    if std::env::var_os("UXDROID_TRANSLATOR").is_some() {
+        assert_check_passes(&arm64_gap_library(group, flags), &check);
+    }
+}
+
+/// Data cannot stop the program when read, so bionic's data symbols are bionic's objects.
+#[test]
+fn bionic_data_symbols_have_bionic_layouts_and_values() {
+    assert_gap_passes("data", |triple| vec![stdcxx_stub(triple)]);
+}
+
+#[test]
+fn fdsan_works_as_bionic_s_with_its_checks_off() {
+    assert_gap_passes("fdsan", no_flags);
+}
+
+#[test]
+fn system_properties_are_an_area_that_never_changes() {
+    assert_gap_passes("properties", no_flags);
+}
+
+#[test]
+fn fortified_calls_work_within_their_object() {
+    assert_gap_passes("fortify", no_flags);
+}
+
+#[test]
+fn a_fortified_call_past_its_object_stops_the_program() {
+    let output = load_and_call(&gap_library("fortify", no_flags), "test_fortify_overflow");
+
+    assert_eq!(output.status.code(), None, "must die from abort");
+    assert!(
+        stderr(&output).starts_with("uxdroid: memchr: prevented buffer overflow\n"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn sigset64_calls_take_bionic_s_signal_sets() {
+    assert_gap_passes("sigset64", no_flags);
+}
+
+#[test]
+fn monotonic_waits_time_out_on_the_monotonic_clock() {
+    assert_gap_passes("monotonic", no_flags);
+}
+
+/// Firefox's libmegazord reads `h_errno` through `__get_h_errno`; the rest are as small.
+#[test]
+fn small_bionic_calls_work() {
+    let library = gap_library("misc", no_flags);
+    assert_gap_passes("misc", no_flags);
+    let output = load_and_call(&library, "test_misc");
+    assert!(
+        !stdout(&output).contains("never written"),
+        "fpurge kept the buffer: {}",
+        stdout(&output)
     );
 }
