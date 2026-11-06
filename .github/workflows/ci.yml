@@ -47,6 +47,9 @@ jobs:
     needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -70,6 +73,31 @@ jobs:
         run: >
           docker compose run --rm -T --user "$(id -u):$(id -g)" -e VERSION -e VERSION_SUFFIX
           packager packaging/build.sh ${{ matrix.arch }} /work/dist
+      # The runtime takes AOSP's trees to build, so packaging/publish_runtime.sh pushes it to GHCR
+      # under the key of the sources it was built from. A release cannot go out without it; any other
+      # build packages it when it is published.
+      - name: Package the runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          VERSION_SUFFIX: ${{ !startsWith(github.ref, 'refs/tags/v') && format('+ci.{0}', github.run_number) || '' }}
+        run: |
+          image=ghcr.io/${{ github.repository_owner }}/uxdroid-runtime:$(packaging/runtime_key.sh)-${{ matrix.arch }}
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if ! docker pull -q --platform linux/${{ matrix.arch }} "$image"; then
+            if [ "$RELEASE" = true ]; then
+              echo "::error::$image is not published; run packaging/publish_runtime.sh ${{ matrix.arch }} on this commit"
+              exit 1
+            fi
+            echo "::notice::$image is not published, so this build has no runtime package"
+            exit 0
+          fi
+          container=$(docker create --platform linux/${{ matrix.arch }} "$image" none)
+          docker cp "$container:/runtime" "$RUNNER_TEMP/runtime"
+          docker rm "$container" > /dev/null
+          docker compose run --rm -T --user "$(id -u):$(id -g)" -e VERSION -e VERSION_SUFFIX \
+            -v "$RUNNER_TEMP/runtime:/runtime:ro" packager packaging/runtime.sh ${{ matrix.arch }} /runtime /work/dist
       - name: Summarize the packages
         run: |
           {

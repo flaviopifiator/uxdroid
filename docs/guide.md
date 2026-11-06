@@ -540,22 +540,24 @@ docker compose run --rm translation cargo test -p uxdroid-translate -p uxdroid-c
 ```bash
 docker compose run --rm packager packaging/build.sh amd64 /cache/dist
 docker compose run --rm packager packaging/build.sh arm64 /cache/dist
-
-# The runtime package. The framework's classes and the boot image name the root the runtime was
-# built for, so it is built again for /usr/lib/uxdroid/runtime from the trees of "Run an APK", in a
-# volume of its own (owned by uid 1000), with the steps after build.sh. It needs AOSP's trees, so it
-# is built here and attached to a release by hand, not on CI's hosted runners.
-export RUNTIME=/usr/lib/uxdroid/runtime
-for step in art/package.sh art/compile.sh art/build_platform.sh framework/build.sh framework/build_system.sh; do
-    docker compose --profile art run --rm -T -e RUNTIME -v uxdroid-pkg-runtime:/usr/lib/uxdroid \
-        art-builder bash /work/runtime/$step
-done
-docker compose run --rm -v uxdroid-pkg-runtime:/usr/lib/uxdroid:ro packager \
-    packaging/runtime.sh amd64 /usr/lib/uxdroid/runtime /cache/dist
-gh release upload v<version> <dist>/uxdroid-runtime_<version>_amd64.deb
 ```
 
-The arm64 runtime package is built the same way with `ARCH=arm64` in the `android16-builder` service, from a volume of its own.
+The runtime package needs AOSP's trees, which CI's hosted runners do not have. So the runtime is built on the machine that has the trees from "Run an APK", and published to GHCR as `ghcr.io/flaviopifiator/uxdroid-runtime:<key>-<arch>`. CI then packages it with `packaging/runtime.sh`.
+
+- **The key.** `packaging/runtime_key.sh` prints it: a hash of every repository file the runtime is built from, namely `runtime/art`, `runtime/framework`, `runtime/keys`, `platform/java` and `system/java`. A commit that changes none of them reuses the image already published.
+- **The build.** The framework's classes and the boot image name the root the runtime was built for, so `packaging/publish_runtime.sh` builds the runtime again for `/usr/lib/uxdroid/runtime`.
+- **What the script runs.** It runs the steps after `build.sh`, in a volume of its own per CPU. It then checks the result with `runtime.sh` and pushes the image.
+- **When it runs.** It refuses a working tree with uncommitted changes, and it does nothing if the image for that key is already published.
+
+```bash
+# Once: let Docker push to GHCR with the GitHub CLI's token.
+gh auth refresh -h github.com -s write:packages
+gh auth token | docker login ghcr.io -u <github user> --password-stdin
+
+# Before tagging a release, on the commit to be tagged.
+packaging/publish_runtime.sh amd64
+packaging/publish_runtime.sh arm64
+```
 
 | Package | Installs | Depends on | Recommends |
 |---------|----------|------------|------------|
@@ -567,7 +569,7 @@ The arm64 runtime package is built the same way with `ARCH=arm64` in the `androi
 CI (`.github/workflows/ci.yml`) runs on every push and pull request:
 
 1. **Lint and test**: `cargo fmt`, `clippy` and the workspace's tests, in the dev image.
-2. **Package**: `packaging/build.sh` for amd64 and arm64.
+2. **Package**: `packaging/build.sh` for amd64 and arm64, and `uxdroid-runtime` when its image is published for the commit's key. A tag fails if the image is missing, so a release always carries both packages.
 3. **Install**: on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04, for each CPU (arm64 under QEMU user), `packaging/smoke.sh` installs the `.deb` with apt and checks the following:
    - every recommended library has a package on that distribution;
    - the program's libraries all resolve;
@@ -576,7 +578,7 @@ CI (`.github/workflows/ci.yml`) runs on every push and pull request:
    - removing the package leaves no files.
 4. **Release**: a `v*` tag publishes the packages and their `SHA256SUMS` as a GitHub release.
 
-The install check runs no app, since CI has no runtime package.
+The install check runs no app; it installs only the `uxdroid` package.
 
 ## Performance
 
