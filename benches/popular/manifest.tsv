@@ -1,0 +1,62 @@
+# The popular corpus: well-known apps and games from official sources that need no account.
+# One APK per row. Rows of one `id` with variants x86_64 and arm64 are the same app built per ABI by
+# its developer, run once natively and once through the arm64 translator.
+#
+# source  izzy: IzzyOnDroid's F-Droid repository, through uxdroid's own store (entry.jar checked
+#               against the repository's pinned certificate, the index against the SHA-256 the entry
+#               signs); `url` is the package name and the newest stable release is taken.
+#         direct: the developer's official site or official GitHub release, over HTTPS only.
+# sha256  the file's expected SHA-256, checked before use; `-` for izzy (the verified index's).
+# hash    where the expected SHA-256 comes from:
+#           published <url>  a checksum file or JSON the developer publishes beside the APK
+#           github-digest    the digest GitHub's release API states for the developer's own asset
+#           tofu             no checksum is published; pinned at the first download (2026-11-07),
+#                            and `uxdroid install` checks the APK's signature before anything runs
+# Columns are tab-separated.
+id	kind	source	variant	url	sha256	hash
+jellyfin	app	izzy	auto	org.jellyfin.mobile	-	uxdroid store
+breezyweather	app	izzy	auto	org.breezyweather	-	uxdroid store
+aurora-store	app	izzy	auto	com.aurora.store	-	uxdroid store
+aves	app	izzy	auto	deckers.thibault.aves	-	uxdroid store
+comaps	app	izzy	auto	app.comaps	-	uxdroid store
+thunder	app	izzy	auto	com.hjiangsu.thunder	-	uxdroid store
+obtainium	app	izzy	auto	dev.imranr.obtainium	-	uxdroid store
+metrolist	app	izzy	auto	com.metrolist.music	-	uxdroid store
+ytdlnis	app	izzy	auto	com.deniscerri.ytdl	-	uxdroid store
+signal	app	direct	auto	https://updates.signal.org/android/Signal-Android-website-prod-universal-release-8.34.2.apk	ca516bdc9cda4a9eef95ad772c2f73311922ff791b58c90a76d68033f20bfef6	published https://updates.signal.org/android/latest.json
+telegram	app	direct	auto	https://telegram.org/dl/android/apk	2d1fe6650578aa4e3437c9e775a7e849837f604a7294c6bd66f971d6ba13470e	tofu
+vlc	app	direct	x86_64	https://get.videolan.org/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk	4646633ede40c4784c5584087cffc5c60cc45b16966ae0b36cedd784d7c4a11e	published https://get.videolan.org/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk.sha256
+vlc	app	direct	arm64	https://get.videolan.org/vlc-android/3.7.1/VLC-Android-3.7.1-arm64-v8a.apk	bea9ea0cdecfd8f461ef305d2afe5d1ac1459cfb9156acce2f615788a486de74	published https://get.videolan.org/vlc-android/3.7.1/VLC-Android-3.7.1-arm64-v8a.apk.sha256
+firefox	app	direct	x86_64	https://archive.mozilla.org/pub/fenix/releases/159.0.1/android/fenix-159.0.1-android-x86_64/fenix-159.0.1.multi.android-x86_64.apk	dc4310b6193a5cadf3b7eff119e677aea006071c8484fa7a35874c2613fd18e1	tofu
+firefox	app	direct	arm64	https://archive.mozilla.org/pub/fenix/releases/159.0.1/android/fenix-159.0.1-android-arm64-v8a/fenix-159.0.1.multi.android-arm64-v8a.apk	e607e581c5e6ed6d69b8192d3e3ab6404610635277bb7dc5c0787289489375db	tofu
+tor-browser	app	direct	x86_64	https://dist.torproject.org/torbrowser/16.0/tor-browser-android-x86_64-16.0.apk	f9e79971bc2245f98da6d661915f30a5bd6552a2cf72a9fab6f371d999876df1	published https://dist.torproject.org/torbrowser/16.0/sha256sums-signed-build.txt
+tor-browser	app	direct	arm64	https://dist.torproject.org/torbrowser/16.0/tor-browser-android-aarch64-16.0.apk	2e24d41a54161ee3791477ba021de847844f224231055b2651f93930a0a7573f	published https://dist.torproject.org/torbrowser/16.0/sha256sums-signed-build.txt
+brave	app	direct	x86_64	https://github.com/brave/brave-browser/releases/download/v1.99.55/BraveMonox64.apk	b63384892ae7d5288e53258ce794ba8b3d9dfbac3715719b8fe2f713fe0dbe83	github-digest
+brave	app	direct	arm64	https://github.com/brave/brave-browser/releases/download/v1.99.55/BraveMonoarm64.apk	602986644c7d6d4aac3cba7fb811367ce06f5ad25ac833a2e0be864bf804ff14	github-digest
+kiwix	app	direct	x86_64	https://github.com/kiwix/kiwix-android/releases/download/v3.14.1/v3.14.1-x86_64-standalone.apk	3aa782f421b9aa2c1dbdb7baef000fd766f2cd7adfebcad792253dcef1657ddf	github-digest
+kiwix	app	direct	arm64	https://github.com/kiwix/kiwix-android/releases/download/v3.14.1/v3.14.1-arm64-v8a-standalone.apk	62a9910be260030e642465c17d642537e6ee4ee5f2d4596c248267c2766a88b8	github-digest
+element-x	app	direct	x86_64	https://github.com/element-hq/element-x-android/releases/download/v26.10.1/app-fdroid-x86_64-release-signed.apk	093d3394a9cea4636d5f55c288f7e0f7fac757bfb8933ed1634fd6f06498f16c	github-digest
+element-x	app	direct	arm64	https://github.com/element-hq/element-x-android/releases/download/v26.10.1/app-fdroid-arm64-v8a-release-signed.apk	c5b8618954310b17f844b3130d3d52ef9072b7052e6c890aba3eb55c58798131	github-digest
+bitwarden	app	direct	auto	https://github.com/bitwarden/android/releases/download/v2026.10.1-bwpm/com.x8bit.bitwarden-fdroid.apk	96ff41d05c7da4269909518b30488e1d93deba789f679141af795aef228a1d2e	github-digest
+newpipe	app	direct	auto	https://github.com/TeamNewPipe/NewPipe/releases/download/v0.29.1/NewPipe_v0.29.1.apk	18447bfb1e06d113edc88df93f471827280de06f6f3d4dc42f56f28b9c1bab79	github-digest
+organic-maps	app	direct	auto	https://github.com/organicmaps/organicmaps/releases/download/2026.09.29-32-android/OrganicMaps-26092932-web-release.apk	d7dbdfc3cbfdbcce6d437f11147f2cd15384c03052d2b4594fd8c1c7777dd497	github-digest
+k9mail	app	direct	auto	https://github.com/thunderbird/thunderbird-android/releases/download/K9MAIL_24_0/k9mail-24.0.apk	6b80ec681f0c882ca334f4d533778e6e50e814ee214db798d9e129a369a85af4	github-digest
+duckduckgo	app	direct	auto	https://github.com/duckduckgo/Android/releases/download/5.301.1/duckduckgo-5.301.1-play-release.apk	a9f39c8364557f8a2daae4a7c6e6248d5f0985e46f63751b7631ac6143e2e9f0	github-digest
+nextcloud	app	direct	auto	https://github.com/nextcloud/android/releases/download/stable-35.0.2/nextcloud-350000290.apk	eef8552fb198851d12e357bf590644b45d2923f36c76fe760027a10d9956db7a	github-digest
+keepassdx	app	direct	auto	https://github.com/Kunzisoft/KeePassDX/releases/download/4.5.8/KeePassDX-4.5.8-libre.apk	8aaac6a0c55a9de760147990856726e197efbbcdc5ce2f6bfb4d4ab2a3d65f74	github-digest
+moonlight	app	direct	auto	https://github.com/moonlight-stream/moonlight-android/releases/download/v12.2/app-nonRoot-release.apk	a871f6190365386ef3ac5722a016d4da015ee1555631ec257f6e5dc3f4a45fe0	github-digest
+mullvad	app	direct	auto	https://github.com/mullvad/mullvadvpn-app/releases/download/android%2F2026.12/MullvadVPN-2026.12.apk	0ad70b89b2b48bb0b1ae29115eee57d75277ffeccf95a0d3db98945d740a6d9e	github-digest
+protonvpn	app	direct	auto	https://github.com/ProtonVPN/android-app/releases/download/5.20.98.0/ProtonVPN-5.20.98.0.605209800.-production-vanilla-openSource-release-fdroid.apk	a0aa2adc8d93f7f47a971c886b50ceb7ec77539b1ecc265ee350dce5da8bff27	github-digest
+ppsspp	app	direct	auto	https://www.ppsspp.org/files/1_20_4/ppsspp.apk	dd702a31270ecd68db37afee311d6efe08b1d4da9601d2750ce1a73bbd316c3f	tofu
+retroarch	app	direct	x86_64	https://buildbot.libretro.com/stable/1.22.2/android/RetroArch.apk	2eca60b3a540697cd7676edea2fbabdfaf54c3ae958584168231981099d2868a	tofu
+retroarch	app	direct	arm64	https://buildbot.libretro.com/stable/1.22.2/android/RetroArch_aarch64.apk	7bd5d208dfe93cc8e2ea6c04608948ce1a045980f160a58ca2d0993aa20ad213	tofu
+luanti	game	direct	x86_64	https://github.com/luanti-org/luanti/releases/download/5.18.0/luanti-5.18.0-x86_64.apk	3f7f28910092331aeed5ef90823fdc085a8077f457bbe6df7fae7d883d48c120	github-digest
+luanti	game	direct	arm64	https://github.com/luanti-org/luanti/releases/download/5.18.0/luanti-5.18.0-arm64-v8a.apk	d69b2337b68242572d04a3002be784cbfe8f62fb13124f1f7b96b2e5aa64c92f	github-digest
+supertux	game	direct	x86_64	https://github.com/SuperTux/supertux/releases/download/v0.7.0/SuperTux-v0.7.0-x86_64.apk	70ff619614d9e4f753cd71c643151df95e0e7f23e8ec84b5f70586d00f995f61	github-digest
+supertux	game	direct	arm64	https://github.com/SuperTux/supertux/releases/download/v0.7.0/SuperTux-v0.7.0-arm64-v8a.apk	7dd41db4c38862a22625ca0cb66f382d2c30653254a7a2807887cedde4b8f0f9	github-digest
+supertuxkart	game	direct	auto	https://github.com/supertuxkart/stk-code/releases/download/1.5/SuperTuxKart-1.5.apk	e1f2f49152abfb8f3ed0ced47981e84096758bff9758563aa3b917111a2a3cbd	github-digest
+shattered-pd	game	direct	auto	https://github.com/00-Evan/shattered-pixel-dungeon/releases/download/v4.0.2/ShatteredPD-v4.0.2-Android.apk	ceef4cdd4beddcb3d85379ac004cb4ab5d918b89dc7366b4ce9c4a3585a5e78e	github-digest
+unciv	game	direct	auto	https://github.com/yairm210/Unciv/releases/download/4.22.17/Unciv-signed.apk	06a95e0a7c0e1263939a8c2ee57083549df067ea4ca72a60d401fb4fe4db9f4b	github-digest
+lichess	game	direct	auto	https://github.com/lichess-org/mobile/releases/download/v0.30.3/3003.apk	77dd8ee1465f6bc5c7949d35db77a1a55b0ff2fada88ff863ecb94ab3c063e07	github-digest
+pixelorama	app	direct	auto	https://github.com/Orama-Interactive/Pixelorama/releases/download/v1.2.4/Pixelorama.apk	1249dda14ca15a65af57436c69e2ef13b6591f8e78c02a62230e57b3d94e46e0	github-digest
+libresudoku	game	izzy	auto	com.kaajjo.libresudoku	-	uxdroid store
