@@ -205,9 +205,16 @@ fn exchange(path: &Path, lines: &[&[u8]]) -> Vec<Value> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    // A server that refuses the peer answers and hangs up without reading, so a write can find the
+    // socket closed; the answer is still there to read.
     for line in lines {
-        stream.write_all(line).unwrap();
-        stream.write_all(b"\n").unwrap();
+        if let Err(error) = stream
+            .write_all(line)
+            .and_then(|()| stream.write_all(b"\n"))
+        {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+            break;
+        }
     }
     stream.shutdown(std::net::Shutdown::Write).unwrap();
     BufReader::new(stream)
