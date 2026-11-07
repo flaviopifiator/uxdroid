@@ -39,7 +39,8 @@ ROOT="$WORK/deb"
 mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/lib/uxdroid/runtime" "$ROOT/usr/share/doc/uxdroid-runtime" "$OUT"
 # samples holds the smoke tests' programs, not part of what apps run on.
 tar -C "$RUNTIME" --exclude=./samples -cf - . | tar -C "$ROOT/usr/lib/uxdroid/runtime" -xf -
-install -m 0644 /work/NOTICE "$ROOT/usr/share/doc/uxdroid-runtime/copyright"
+cat /work/NOTICE /work/LICENSE > "$ROOT/usr/share/doc/uxdroid-runtime/copyright"
+chmod 0644 "$ROOT/usr/share/doc/uxdroid-runtime/copyright"
 cat > "$ROOT/DEBIAN/control" <<EOF
 Package: uxdroid-runtime
 Version: $VERSION

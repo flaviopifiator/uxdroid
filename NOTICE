@@ -1,4 +1,7 @@
 uxdroid
+Copyright 2026 the uxdroid developers
+
+Licensed under the Apache License, Version 2.0, in LICENSE.
 
 Third-party code built into uxdroid's artifacts. Sources are downloaded at build time from the
 pinned commits and checksums in docker/translation/sources.txt; none is copied into this

@@ -36,7 +36,9 @@ for file in "${FILES[@]}"; do
     "$STRIP" --strip-unneeded "$ROOT/usr/lib/uxdroid/$file"
 done
 ln -s ../lib/uxdroid/uxdroid "$ROOT/usr/bin/uxdroid"
-install -m 0644 /work/NOTICE "$ROOT/usr/share/doc/uxdroid/copyright"
+# copyright: uxdroid's notice, the third-party code it carries, then its license.
+cat /work/NOTICE /work/LICENSE > "$ROOT/usr/share/doc/uxdroid/copyright"
+chmod 0644 "$ROOT/usr/share/doc/uxdroid/copyright"
 install -m 0644 /work/README.md "$ROOT/usr/share/doc/uxdroid/README.md"
 # The icon and a menu entry that opens the terminal UI.
 install -D -m 0644 /work/docs/logo/icon.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/uxdroid.svg"
@@ -67,7 +69,7 @@ dpkg-deb --root-owner-group -Zxz --build "$ROOT" "$DEB" > /dev/null
 NAME="uxdroid-${VERSION}-linux-${ARCH}"
 mkdir -p "$WORK/$NAME"
 cp -a "$ROOT/usr/lib/uxdroid/." "$WORK/$NAME/"
-cp /work/NOTICE /work/README.md "$WORK/$NAME/"
+cp /work/LICENSE /work/NOTICE /work/README.md "$WORK/$NAME/"
 cp /work/docs/logo/icon.svg "$WORK/$NAME/uxdroid.svg"
 TAR="$OUT/$NAME.tar.gz"
 tar -C "$WORK" --owner=0 --group=0 --numeric-owner -czf "$TAR" "$NAME"

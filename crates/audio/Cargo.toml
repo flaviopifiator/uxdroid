@@ -4,6 +4,7 @@ description = "Audio streams for Android apps on the host sound server, with a f
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 libc = "0.2"

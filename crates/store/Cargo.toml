@@ -4,6 +4,7 @@ description = "Finds, verifies and downloads apps from app sources such as F-Dro
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
