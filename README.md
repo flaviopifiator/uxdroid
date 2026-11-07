@@ -7,8 +7,9 @@
 **Run Android apps on Linux as native processes.**
 
 [![CI](https://github.com/flaviopifiator/uxdroid/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/flaviopifiator/uxdroid/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.1.0-2EA043?logo=github&logoColor=white)](https://github.com/flaviopifiator/uxdroid/releases)
-[![License](https://img.shields.io/badge/license-Apache--2.0-0A66C2)](LICENSE)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fflaviopifiator%2Fuxdroid%2Fbadges%2Fcoverage.json)](https://github.com/flaviopifiator/uxdroid/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/flaviopifiator/uxdroid?color=2EA043&logo=github&logoColor=white)](https://github.com/flaviopifiator/uxdroid/releases)
+[![License](https://img.shields.io/github/license/flaviopifiator/uxdroid?color=0A66C2)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2024-B7410E?logo=rust&logoColor=white)](Cargo.toml)
 
 [![Debian](https://img.shields.io/badge/Debian-12%20%7C%2013-A81D33?logo=debian&logoColor=white)](#install)
