@@ -288,6 +288,20 @@ Dynarmic::A64::UserConfig base_config() {
         }
     }
     config.code_cache_size = mib * 1024 * 1024;
+    // Floating point on the host's fast path. By default it differs from Arm only in which NaN a
+    // result carries, the precision of reciprocal estimates, and assuming the default FPCR when
+    // choosing the fast path; UXDROID_FAST_FP=1 also splits fused multiply-adds, which rounds
+    // them twice, and UXDROID_FAST_FP=0 keeps every operation exact.
+    using Dynarmic::OptimizationFlag;
+    const char* fast_fp = std::getenv("UXDROID_FAST_FP");
+    if (!fast_fp || std::strcmp(fast_fp, "0") != 0) {
+        config.unsafe_optimizations = true;
+        config.optimizations |= OptimizationFlag::Unsafe_ReducedErrorFP | OptimizationFlag::Unsafe_InaccurateNaN
+                                | OptimizationFlag::Unsafe_IgnoreStandardFPCRValue;
+    }
+    if (fast_fp && std::strcmp(fast_fp, "1") == 0) {
+        config.optimizations |= OptimizationFlag::Unsafe_UnfuseFMA;
+    }
     return config;
 }
 
