@@ -969,9 +969,23 @@ pub(super) fn guest_context() -> (u64, usize) {
     (thread as u64, unsafe { (*thread).depth })
 }
 
-/// What arm64 code learns about its CPU: ARMv8.0 with floating point (bit 0) and Advanced SIMD
-/// (bit 1), the features every engine implements, never the host's x86 feature bits.
-pub(super) const GUEST_HWCAP: u64 = (1 << 0) | (1 << 1);
+/// What arm64 code learns about its CPU: the `HWCAP_*` bits of the extensions Dynarmic's decoder
+/// implements, never the host's x86 feature bits, so libraries that choose code by HWCAP, as zlib
+/// and BoringSSL do, take their accelerated paths. FP, ASIMD, AES, PMULL, SHA1, SHA2, CRC32,
+/// SHA3, SM3, SM4, ASIMDDP (dot product) and SHA512; not ATOMICS (LSE), FP16, RDM, JSCVT or
+/// LRCPC, which it does not implement.
+pub(super) const GUEST_HWCAP: u64 = 1 << 0 // FP
+    | 1 << 1 // ASIMD
+    | 1 << 3 // AES
+    | 1 << 4 // PMULL
+    | 1 << 5 // SHA1
+    | 1 << 6 // SHA2
+    | 1 << 7 // CRC32
+    | 1 << 17 // SHA3
+    | 1 << 18 // SM3
+    | 1 << 19 // SM4
+    | 1 << 20 // ASIMDDP
+    | 1 << 21; // SHA512
 
 /// Runs a guest ifunc resolver as bionic calls one on arm64: `HWCAP | _IFUNC_ARG_HWCAP` and an
 /// `__ifunc_arg_t` of its size, HWCAP and HWCAP2.
