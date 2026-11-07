@@ -1,2 +1,2 @@
-# The compute kernel's zlib, as published on https://zlib.net with its SHA-256.
-zlib https://zlib.net/zlib-1.3.2.tar.gz bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+# The compute kernel's zlib, from zlib.net's archive of every release, with its SHA-256.
+zlib https://zlib.net/fossils/zlib-1.3.2.tar.gz bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
