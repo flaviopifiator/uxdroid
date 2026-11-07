@@ -85,7 +85,12 @@ jobs:
         run: |
           image=ghcr.io/${{ github.repository_owner }}/uxdroid-runtime:$(packaging/runtime_key.sh)-${{ matrix.arch }}
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          if ! docker pull -q --platform linux/${{ matrix.arch }} "$image"; then
+          if ! pulled=$(docker pull -q --platform linux/${{ matrix.arch }} "$image" 2>&1); then
+            # Only a missing image may pass; a refused one means the package lacks this repository.
+            if ! grep -qE "not found|manifest unknown" <<< "$pulled"; then
+              echo "::error::cannot pull $image: $pulled (docs/guide.md, Packages)"
+              exit 1
+            fi
             if [ "$RELEASE" = true ]; then
               echo "::error::$image is not published; run packaging/publish_runtime.sh ${{ matrix.arch }} on this commit"
               exit 1

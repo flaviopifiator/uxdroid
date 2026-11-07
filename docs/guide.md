@@ -553,6 +553,9 @@ The runtime package needs AOSP's trees, which CI's hosted runners do not have. S
 # Once: let Docker push to GHCR with the GitHub CLI's token.
 gh auth refresh -h github.com -s write:packages
 gh auth token | docker login ghcr.io -u <github user> --password-stdin
+# Also once, after the first push: the package is private, so give the repository's Actions read
+# access in its settings (github.com/users/<github user>/packages/container/uxdroid-runtime/settings,
+# Manage Actions access). Without it, CI's pull is refused and the package job fails.
 
 # Before tagging a release, on the commit to be tagged.
 packaging/publish_runtime.sh amd64
