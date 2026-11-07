@@ -41,7 +41,9 @@ def write_tsv(path, columns, rows):
 
 
 def abis_of(text):
-    return [part.split(" (")[0].strip() for part in text.split(",") if part.strip()]
+    """The ABIs of `uxdroid inspect`'s `abis:` line; it says `none` for an APK without native code."""
+    abis = [part.split(" (")[0].strip() for part in text.split(",") if part.strip()]
+    return [] if abis == ["none"] else abis
 
 
 def plan(manifest_path, fetched_path, inspect_path, out, only=""):

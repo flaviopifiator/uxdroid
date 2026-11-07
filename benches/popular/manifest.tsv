@@ -60,3 +60,32 @@ unciv	game	direct	auto	https://github.com/yairm210/Unciv/releases/download/4.22.
 lichess	game	direct	auto	https://github.com/lichess-org/mobile/releases/download/v0.30.3/3003.apk	77dd8ee1465f6bc5c7949d35db77a1a55b0ff2fada88ff863ecb94ab3c063e07	github-digest
 pixelorama	app	direct	auto	https://github.com/Orama-Interactive/Pixelorama/releases/download/v1.2.4/Pixelorama.apk	1249dda14ca15a65af57436c69e2ef13b6591f8e78c02a62230e57b3d94e46e0	github-digest
 libresudoku	game	izzy	auto	com.kaajjo.libresudoku	-	uxdroid store
+# Games found in GitHub releases (2026-11-07): each the developer's own release asset, checked against GitHub's digest.
+rota	game	direct	auto	https://github.com/HarmonyHoney/ROTA/releases/download/2026.03.12/ROTA.apk	21589b89cb594b1ca66b3b6b62cf4a0f8faa786b00d4acd43fe8dad776ad1345	github-digest
+tiny-crate	game	direct	auto	https://github.com/HarmonyHoney/tiny_crate/releases/download/2026.03.12/Tiny-Crate.apk	0990ac49597d9a056c01da74c36ae08f439891f763b54f92bd3845811fcfe468	github-digest
+turbo-fat	game	direct	auto	https://github.com/Poobslag/turbofat/releases/download/v1.1215/turbofat-android-v1.1215.apk	64628f2a0c972496be760ace69e9bafde266a6d6895e6b4dbf61d50733067c8a	github-digest
+astro-loop	game	direct	auto	https://github.com/PubDeer/astro-loop/releases/download/1.5/astro-loop-1.5.apk	79aa83482f64f7ae0bc245aa3550bc0e231fecdc046cb783b818917e418f6cf7	github-digest
+osbm	game	direct	arm64	https://github.com/RohanBhattacharyya/oSBM/releases/download/v1.1/oSBM-1.1-android-arm64-v8a.apk	5a82facc6efaffe7bcedb9a4ffea2744dc01d7c6fb9a2c437ce863344f3639f2	github-digest
+osbm	game	direct	x86_64	https://github.com/RohanBhattacharyya/oSBM/releases/download/v1.1/oSBM-1.1-android-x86_64.apk	368b183ef10720c7f4cd9dfb794a4623bcae13ee3579e902dd07e201c9fa2193	github-digest
+feudal-tactics	game	direct	auto	https://github.com/Sesu8642/FeudalTactics/releases/download/v1.5.5/FeudalTactics-android.apk	ac848ab1dea4384a524dad092683ff8c1d57de13a02525debb59a8d04a2b6485	github-digest
+pixel-wheels	game	direct	auto	https://github.com/agateau/pixelwheels/releases/download/1.0.1/pixelwheels-itchio-1.0.1.apk	78fe17b60412358cb3b0b9e0052df3c9a8e2b42359bdca6d56a05982eb5a9a12	github-digest
+bird-hunt	game	direct	auto	https://github.com/jojczak/BirdHunt/releases/download/v1.4.4/BirdHunt_v1.4.4.apk	91880feb032f329c05c5793b64ebdfda64d7e9021f9a05529c249864fd25cbe1	github-digest
+gauguin	game	direct	auto	https://github.com/meikpiep/gauguin/releases/download/v0.53.3/gauguin-app-release.apk	93ca194009d9f899c576ace38cca3d5b41c69b009f818a6e01ee782842b14041	github-digest
+vcmi	game	direct	arm64	https://github.com/vcmi/vcmi/releases/download/1.7.5/VCMI-Android-arm64-v8a.apk	81738076e58c18b050d9b5f46b3dc1455e40afc112292ee439681572f633cbec	github-digest
+vcmi	game	direct	x86_64	https://github.com/vcmi/vcmi/releases/download/1.7.5/VCMI-Android-x86_64.apk	f789e99dd9c1ada463583302753c18935dfab0a070e357985c14eef3920537cb	github-digest
+principia	game	direct	auto	https://github.com/Bithack/principia/releases/download/2026.10.22/principia_2026.10.22.apk	5056a1f4ed2f5354468b69117fcf5af64f49f33e48e99a80c517e733704f9ca3	github-digest
+cube-run	game	direct	auto	https://github.com/Eve-146T/cube-run/releases/download/v2.8/cube-run-v2.8.apk	ca8d35a492fb5ff20a8a9cb9ffe3c64ac4ce88710e7816f90a1925c8ede132e7	github-digest
+alex-vs-bus	game	direct	auto	https://github.com/M374LX/alexvsbus/releases/download/2025.06.16.0/alexvsbus-android-2025.06.16.0.apk	ecec13afdae16e9f7c362673c74c2915839a95b48adc8c74e77fb8fb2d709e89	github-digest
+sudokul	game	direct	auto	https://github.com/Mode8fx/SuDokuL/releases/download/v1.5/SuDokuL-v1.5-android.apk	3070231b591a6902c228cd250d34f0ef56dfded935ca01ace8d2aeb935e285cc	github-digest
+glassline	game	direct	auto	https://github.com/MoonCellar-Team/Glassline/releases/download/v1.4.2/glassline-android-1.4.2.apk	3ed14a05fe45b49ea861f7ba5f0a684f67e7c22fa656f699956e48f84929400c	github-digest
+remixed-dungeon	game	direct	auto	https://github.com/NYRDS/remixed-dungeon/releases/download/32.4.beta.17/RemixedDungeon-android-fdroid-release.apk	a439c6a5ad850e04bb9c7c55a83285f572aa1274279123d34870fface535c8c7	github-digest
+braincup	game	direct	auto	https://github.com/SimonSchubert/Braincup/releases/download/v3.8.1/Braincup-3.8.1-android.apk	5c0c41776ea52f2db3c73afecc65c982fccde8481c2c88df32a80c78ec8ce9d2	github-digest
+cube-merge-3d	game	direct	auto	https://github.com/SinlessDevil/TestTaskRaccoonsGames/releases/download/v1.0.0/CubeMerge3D.apk	379ec3bbace42bd97abad1c87221b8a10f38bc2e3040d4721b4d1e2fc65ca245	github-digest
+burger-party	game	direct	auto	https://github.com/agateau/burgerparty/releases/download/1.4.6/burgerparty-1.4.6-agc.apk	e934cc28018e5ce52d5d0ed3304fed8d28585dafe1cc377e84ba8ee856a08df4	github-digest
+open-surge	game	direct	auto	https://github.com/alemart/opensurge/releases/download/v0.6.1.3/opensurge-0.6.1.3-android.apk	12fc7e11fc515412a0bd33e445708c7f620488a0b918a363b50f2dc9ad50efb0	github-digest
+block-drop	game	direct	arm64	https://github.com/brandonp2412/BlockDrop/releases/download/v1.0.74/app-arm64-v8a-release.apk	7adc8a811c9d8fc015e84f00a805f7eee70936530cc2a7362ffc4f18c9c6c7ba	github-digest
+block-drop	game	direct	x86_64	https://github.com/brandonp2412/BlockDrop/releases/download/v1.0.74/app-x86_64-release.apk	9894d8b82ac74682712eaf8710dbe58c61b30e159b1446fec9217334312d307e	github-digest
+darkest-pd	game	direct	auto	https://github.com/egoal/darkest-pixel-dungeon/releases/download/v0.8.0/Darkest.Pixel.Dungeon.v0.8.0c.apk	be22289559def58d3626bffadb1356c00a404c491be14a138d9b8ef1d0f39111	github-digest
+card-game-simulator	game	direct	auto	https://github.com/finol-digital/Card-Game-Simulator/releases/download/v1.170/Android.apk	4b90a64f81d20444f9bd76f38c5e8715f885707d762b54213ffc8f6ba7e96e8b	github-digest
+water-sort	game	direct	arm64	https://github.com/sidhant947/water-sort/releases/download/V1.0.24/app-arm64-v8a-release.apk	70e5a3543623fd01d2096a25bd471757a4563eefe3630adcb360c47c1f060c30	github-digest
+water-sort	game	direct	x86_64	https://github.com/sidhant947/water-sort/releases/download/V1.0.24/app-x86_64-release.apk	5c321aea77ed9db3351ddae8ee335c2050911ded47ed99f3037d8892ef45eff0	github-digest

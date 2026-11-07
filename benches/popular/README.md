@@ -114,10 +114,44 @@ Blockers of translated runs only, from their logs: Firefox arm64, `JNIEnv::CallO
 
 In all: 45 of 46 runs installed, 25 posted a first frame, 29 were alive after 60 s, 14 showed a screen that was not flat and 8 changed their UI on a tap. Passed every check, the tap included: Aurora Store, Aves, KeePassDX, Metrolist, Proton VPN, Thunder, VLC (both ways); Jellyfin, K-9 Mail, Luanti (both ways), Mullvad, Obtainium, Organic Maps and SuperTuxKart posted a frame and stayed alive with no blocker.
 
+### Games from GitHub releases
+
+24 games whose developers attach APKs to their own GitHub releases, found with `gh api search/repositories` (topics such as `android-game`, `godot-game`, `libgdx`, `unity3d`, `love2d`, `sdl2`, `raylib`, `defold`) and then by which repos' latest releases ship an `.apk` with a GitHub digest. Run the same day with the same build and engine (`--only <the game ids>`, `--wait 60`); the four games built per ABI ran three times. Cube Merge 3D (Unity) ships `armeabi-v7a` code only and is skipped, as `uxdroid install` refuses it. Frame = first frame in ms, CPU = CPU seconds in the first 30 s.
+
+| Game (repo, tag) | Engine | ABI run | Frame | Alive | CPU | Blocker |
+|---|---|---|---|---|---|---|
+| Card Game Simulator (finol-digital/Card-Game-Simulator v1.170) | unity | arm64 translated | 364 | yes | 0.4 | - (tap changed nothing) |
+| Glassline (MoonCellar-Team/Glassline v1.4.2) | sdl | arm64 translated | 275 | yes | 0.3 | flat screen |
+| Open Surge (alemart/opensurge v0.6.1.3) | native (Allegro) | arm64 translated | 203 | no | - | `Aborting because: Field not found: fd:I` |
+| ROTA (HarmonyHoney/ROTA 2026.03.12) | godot | arm64 translated | - | no | - | NPE `ConfigurationInfo.reqGlEsVersion` |
+| Tiny Crate (HarmonyHoney/tiny_crate 2026.03.12) | godot | arm64 translated | - | no | - | same |
+| Turbo Fat (Poobslag/turbofat v1.1215) | godot | arm64 translated | - | no | - | same |
+| Block Drop (brandonp2412/BlockDrop v1.0.74) | flutter | both | 639 / 2066 | yes / yes | 1.4 / 3.6 | - |
+| Water Sort (sidhant947/water-sort V1.0.24) | flutter | both | 639 / 1948 | yes / yes | 0.8 / 2.2 | - |
+| oSBM (RohanBhattacharyya/oSBM v1.1) | native | both | 157 / 450 | no / no | - | `ASensorManager_getInstance is not implemented yet`, then SIGABRT |
+| VCMI (vcmi/vcmi 1.7.5) | qt | both | 192 / 135 | no / yes | - / 0.2 | native: `__res_init is not audited`; translated: - (tap not tried) |
+| Principia (Bithack/principia 2026.10.22) | native | x86_64 | 124 | yes | 77.0 | - (tap changed nothing) |
+| Braincup (SimonSchubert/Braincup v3.8.1) | native | x86_64 | 294 | yes | 6.4 | - |
+| Cube Run (Eve-146T/cube-run v2.8) | libgdx | x86_64 | 202 | yes | 82.6 | - (tap changed nothing) |
+| SuDokuL (Mode8fx/SuDokuL v1.5) | sdl | x86_64 | 175 | yes | 0.2 | flat screen |
+| Alex vs Bus (M374LX/alexvsbus 2025.06.16.0) | native | x86_64 | - | no | - | NativeActivity `loadNativeCode` unimplemented |
+| Pixel Wheels (agateau/pixelwheels 1.0.1) | libgdx | x86_64 | - | yes | 0.1 | no `libsoundpool.so` |
+| Burger Party (agateau/burgerparty 1.4.6) | libgdx | x86_64 | - | yes | 0.1 | no `libsoundpool.so` |
+| Feudal Tactics (Sesu8642/FeudalTactics v1.5.5) | libgdx | x86_64 | - | yes | 0.1 | no `libsoundpool.so` |
+| Bird Hunt (jojczak/BirdHunt v1.4.4) | libgdx | x86_64 | - | yes | 0.1 | no `libsoundpool.so` |
+| Darkest Pixel Dungeon (egoal/darkest-pixel-dungeon v0.8.0) | libgdx | x86_64 | - | yes | 0.1 | no `libsoundpool.so` |
+| Astro Loop (PubDeer/astro-loop 1.5) | java | - | - | yes | 0.2 | no `libsoundpool.so` |
+| Gauguin (meikpiep/gauguin v0.53.3) | java | - | 296 | yes | 1.0 | - |
+| Remixed Dungeon (NYRDS/remixed-dungeon 32.4.beta.17) | java | - | - | no | - | NPE `Attempt to get length of null array` |
+
+Paired runs (median of 3, first frame ms native / translated): Block Drop 639 / 2066 (3.2x; runs 589, 639, 642 / 2062, 2066, 2077), Water Sort 639 / 1948 (3.0x; 655, 639, 639 / 1943, 1952, 1948), oSBM 157 / 450 (2.9x; 154, 157, 166 / 454, 450, 444). Translated Flutter also uses 2.6-2.8 times the CPU in its first 30 s and about 150 MiB more (587 against 432 MiB, 544 against 398). These two are the first same-app measurements of Flutter's translated startup: about three times native. VCMI runs further translated than native, because the arm64 path does not reach the unaudited `__res_init`. Principia and Cube Run use 2.6-2.8 CPUs while alive, rendering continuously on the software renderer.
+
+Blockers of the games, by games stopped: `libsoundpool.so` missing 6 (every libGDX game but Cube Run, plus Astro Loop; with Shattered Pixel Dungeon and Unciv, 8 in the corpus), `ConfigurationInfo.reqGlEsVersion` null 3 (every Godot game; with PPSSPP, 4), NativeActivity `loadNativeCode` 1 (with RetroArch, 3 runs), flat screen 2, then one each.
+
 ## Not measured
 
 - No competitor. The performance rule asks for the competitors that can run here; none was run on these apps. Waydroid and Android Translation Layer need a host setup (kernel binder, LXC, or ATL's own build and install) the sandbox does not have; Google's Android emulator with its arm64 translation needs KVM and a Google system image, and QEMU user cannot run an Android app. The translator alone is compared with QEMU user in `benches/translation`.
 - No frame rate or frame time: uxdroid logs only the first frame, and the runner takes screenshots only. Games were not played; one tap per app.
-- Unavailable sources: itch.io answers automated requests with HTTP 403, so no itch.io game (and no Unity game) is in the corpus; the only Godot app found with an official APK is Pixelorama, an editor. Mindustry's recent GitHub releases ship no APK, PPSSPP's and RetroArch's sites and Mozilla's archive publish no checksum (pinned at first download), Termux's GitHub APKs are debug builds without a digest and were left out, as were Cataclysm DDA's (prereleases only). Apps that need Google Play services, Play Integrity or Widevine were not chosen.
+- Unavailable sources: itch.io answers automated requests with HTTP 403, so no itch.io game is in the corpus. GitHub gave one Unity game that runs here (Card Game Simulator; Cube Merge 3D is `armeabi-v7a` only), no Unreal game of the developer's own (the Unreal APKs found are ports needing a commercial game's data), and no Defold, LÖVE or raylib game with a digest. GitHub release assets uploaded before GitHub started stating digests (Destination Sol, Brogue CE, Ball2Box, Tetris and others) were left out, as were ports of commercial games (Dead Space, Zuma, Sonic R, System Shock, Heroes III clients) and online clients. Mindustry's recent GitHub releases ship no APK, PPSSPP's and RetroArch's sites and Mozilla's archive publish no checksum (pinned at first download), Termux's GitHub APKs are debug builds without a digest and were left out, as were Cataclysm DDA's (prereleases only). Apps that need Google Play services, Play Integrity or Widevine were not chosen.
 - The ABI cannot be forced, so apps that ship both ABIs in one APK (Signal, Telegram, Bitwarden, NewPipe and most others) ran natively only.
-- One run per app except the apps of the two tables above (three runs); install time is not reported.
+- One run per app except the paired apps and games and the Flutter apps (three runs); install time is not reported.
