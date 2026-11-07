@@ -1,8 +1,27 @@
-<img src="docs/logo/icon.svg" alt="" width="96">
+<div align="center">
+
+<img src="docs/logo/icon.svg" alt="" width="112">
 
 # uxdroid
 
-**Run Android apps on Linux as native processes.** No emulator, no virtual machine, no container and no Android system image: each app is an ordinary Linux process with its own Wayland window, its sound on your audio server and its input from your seat.
+**Run Android apps on Linux as native processes.**
+
+[![CI](https://github.com/flaviopifiator/uxdroid/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/flaviopifiator/uxdroid/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/badge/release-v0.1.0-2EA043?logo=github&logoColor=white)](https://github.com/flaviopifiator/uxdroid/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-0A66C2)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2024-B7410E?logo=rust&logoColor=white)](Cargo.toml)
+
+[![Debian](https://img.shields.io/badge/Debian-12%20%7C%2013-A81D33?logo=debian&logoColor=white)](#install)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20%7C%2024.04%20%7C%2026.04-E95420?logo=ubuntu&logoColor=white)](#install)
+[![CPUs](https://img.shields.io/badge/CPU-amd64%20%7C%20arm64-555555?logo=linux&logoColor=white)](#install)
+[![Display](https://img.shields.io/badge/display-Wayland-FFBC00?logo=wayland&logoColor=black)](docs/architecture.md)
+[![Framework](https://img.shields.io/badge/framework-Android%2016-3DDC84?logo=android&logoColor=white)](docs/architecture.md)
+
+[![F-Droid catalog](https://img.shields.io/badge/F--Droid%20catalog-107%2F150%20first%20frame-1976D2?logo=fdroid&logoColor=white)](docs/corpus.md)
+
+</div>
+
+No emulator, no virtual machine, no container and no Android system image: each app is an ordinary Linux process with its own Wayland window, its sound on your audio server and its input from your seat.
 
 uxdroid joins three things in one process: Android's own runtime (ART) and framework, built from AOSP for a glibc host; a loader that runs the app's bionic-linked native libraries under glibc; and a platform layer that answers the framework's system services with the desktop's real ones.
 
