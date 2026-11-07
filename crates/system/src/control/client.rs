@@ -58,13 +58,25 @@ pub fn call_on(
     stream
         .set_write_timeout(Some(timeout))
         .map_err(CallError::Io)?;
-    send_all(
+    // An app that refuses the peer answers and closes without reading, so the write can fail with
+    // EPIPE or ECONNRESET while its refusal waits to be read: read it before giving up.
+    let sent = send_all(
         stream,
         protocol::request_line(Some(&json!(1)), command).as_bytes(),
-    )
-    .map_err(CallError::Io)?;
+    );
+    if let Err(error) = &sent
+        && !matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        )
+    {
+        return Err(CallError::Io(sent.unwrap_err()));
+    }
     let line = match protocol::read_line_within(&mut BufReader::new(stream), protocol::MAX_ANSWER) {
         Ok(Some(line)) => line,
+        Ok(None) | Err(LineError::Io(_)) if sent.is_err() => {
+            return Err(CallError::Io(sent.unwrap_err()));
+        }
         Ok(None) => {
             return Err(CallError::Protocol(
                 "the app closed the connection without answering".into(),
