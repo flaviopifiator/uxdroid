@@ -24,7 +24,8 @@ $ uxdroid app net.gsantner.markor start
 | Graphics | EGL and GLES 2 to 3.2; frames handed to the compositor as dmabufs on the GPU, with no copy, on any Mesa or vendor driver |
 | Native code | bionic `.so` files loaded under glibc; `arm64-v8a`-only apps translated on x86_64 |
 | CPUs | One package per host CPU: x86_64, and arm64 where ARM libraries run natively |
-| Store | `uxdroid search`, `install`, `update`, `remove` and a terminal UI over F-Droid repositories, every index and APK verified |
+| Store | `uxdroid search`, `install`, `update`, `remove` and a terminal UI over F-Droid repositories, and Google Play with your own account when you enable it; every index and APK verified |
+| Compatibility | Of 150 apps sampled from the F-Droid catalog, 107 draw their first frame and 119 are still running when the run ends; [docs/corpus.md](docs/corpus.md) runs the catalog unattended and ranks what stops the rest |
 | Installs | Split APKs and `.apks`/`.xapk` bundles, APK signature schemes v1 to v3.1, updates refused when the signer changes |
 | Desktop | Wayland windows, pointer, touch and keyboard, PulseAudio/PipeWire/ALSA audio, one process per app, systemd user services |
 | Automation | Every running app has a control socket; `uxdroid mcp` exposes it to agents over the Model Context Protocol |
@@ -46,13 +47,15 @@ Not measured yet: arm64 hardware (arm64 numbers so far come from QEMU), Waydroid
 
 ## Install
 
-Each release has a `.deb` and a `.tar.gz` for amd64 and arm64. CI installs and uses them on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04.
+Each [release](https://github.com/flaviopifiator/uxdroid/releases) has, for amd64 and arm64, a `.deb` and a `.tar.gz` of uxdroid and a `.deb` of its runtime, with their SHA-256 sums in `SHA256SUMS`. CI installs and uses the uxdroid packages on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04.
 
 ```bash
-sudo apt install ./uxdroid_<version>_amd64.deb ./uxdroid-runtime_<version>_amd64.deb
+gh release download v0.1.0 --repo flaviopifiator/uxdroid --pattern '*_amd64.deb' --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+sudo apt install ./uxdroid_0.1.0_amd64.deb ./uxdroid-runtime_0.1.0_amd64.deb
 ```
 
-`uxdroid` is the program and its libraries, about 3 MB. `uxdroid-runtime` is ART and the Android framework, about 190 MB, installed in `/usr/lib/uxdroid/runtime`. The tarball runs from wherever it is unpacked, for distributions without apt; a runtime works only at the path it was built for, so with the tarball, unpack the runtime package's files into `/usr/lib/uxdroid/runtime` and set `UXDROID_RUNTIME` to that directory. [Packages](docs/guide.md#packages) explains how they are built.
+`uxdroid` is the program and its libraries, about 3 MB. `uxdroid-runtime` is ART and the Android framework, a download of 154 MB for amd64 and 170 MB for arm64, installed in `/usr/lib/uxdroid/runtime`. The tarball runs from wherever it is unpacked, for distributions without apt; a runtime works only at the path it was built for, so with the tarball, unpack the runtime package's files into `/usr/lib/uxdroid/runtime` and set `UXDROID_RUNTIME` to that directory. [Packages](docs/guide.md#packages) explains how they are built.
 
 ## Quick start
 
@@ -129,7 +132,7 @@ uxdroid is under active development. It ships as packages for Debian and Ubuntu,
 
 | Done | In progress | Not planned |
 |------|-------------|-------------|
-| Framework, graphics, audio, input, services, store, split installs, arm64 hosts, arm64 translation | Google Play source (opt-in), apps starting other apps' activities, x86-to-arm64 translation, the arm64 translator in the amd64 package | Google Mobile Services (licensed by Google only), Play Integrity |
+| Framework, graphics, audio, input, services, store, Google Play source (opt-in), split installs, arm64 hosts, arm64 translation | Apps starting other apps' activities, x86-to-arm64 translation, the arm64 translator in the amd64 package | Google Mobile Services (licensed by Google only), Play Integrity |
 
 Apps that require Play Integrity attestation, such as many banking apps, cannot work on uxdroid. WebView is not implemented yet.
 
@@ -160,4 +163,6 @@ Apps that require Play Integrity attestation, such as many banking apps, cannot 
 
 ## Legal
 
-uxdroid is not affiliated with Google or the Android Open Source Project. Android is a trademark of Google LLC. AOSP components are built from source under their own licenses; [NOTICE](NOTICE) lists the third-party code in uxdroid's artifacts. uxdroid's own license has not been chosen yet.
+uxdroid is not affiliated with Google or the Android Open Source Project. Android is a trademark of Google LLC. AOSP components are built from source under their own licenses; [NOTICE](NOTICE) lists the third-party code in uxdroid's artifacts.
+
+uxdroid is licensed under the [Apache License, Version 2.0](LICENSE).

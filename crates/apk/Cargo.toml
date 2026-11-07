@@ -4,6 +4,7 @@ description = "Reads APK files and plans how to execute them"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }

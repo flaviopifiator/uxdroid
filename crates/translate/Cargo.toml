@@ -4,6 +4,7 @@ description = "The arm64-v8a engine of the native bridge: Dynarmic's A64 JIT, lo
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 libc = "0.2"
