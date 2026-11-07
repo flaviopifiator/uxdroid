@@ -66,11 +66,39 @@ What the engine's settings changed, medians of 3 rounds each:
 
 The emitter and per-CPU rows were taken before the constant pool stopped being cleared, which saves 2 MiB per emitter. An instrumented build of the shared cache with one emitter counted, up to the first frame, about 150,000 blocks translated, 0.7 s of CPU decoding guest code into IR and 1.8 s emitting it under the cache's lock, so translation is most of the CPU time; a cache per guest CPU translated 193,000 blocks, so most of the old memory was per-cache overhead rather than code translated twice. Installing took 403 ms for arm64-v8a, translation plan included, and 355 ms for x86_64.
 
+## Game kernel
+
+`games.sh` runs `games.c`, the work a game's native code does every frame, natively, translated and under QEMU user:
+
+```sh
+docker compose run --rm translation benches/translation/games.sh 5   # runs
+```
+
+| Phase | What it does |
+|-------|--------------|
+| particles | Float physics over 4,096 particles for 20,000 steps, vectorized by the compiler (NEON on arm64) |
+| matrices | 20,000 rounds of a chain of 256 4x4 float matrix products, as a skeleton's bones |
+| host_calls | 2,000,000 rounds of `strlen` and `sinf`, both host libc functions: 4,000,000 guest-to-host calls |
+| tick | 2,000,000 host calls of one tiny exported guest function, as Java calls a game's JNI methods |
+
+Floating point is built with `-ffp-contract=off`, so no CPU fuses a multiply and an add, and `games_report.py` checks that every configuration computes the same checksum for every phase. QEMU user runs only particles and matrices: its guest libc is guest code too, so it has no host crossing to compare.
+
+2026-11-07, AMD Ryzen 5 5600X, same shared machine, medians of 5 runs. *Before* is `main` at f6d6cce with exact floating point (`UXDROID_FAST_FP=0`), *after* is this branch's defaults:
+
+| Configuration | particles ms | matrices ms | host_calls ms | tick ms |
+|---|---|---|---|---|
+| native x86_64 | 33-43 | 49-50 | 11 | 4 |
+| translated, before | 146 | 102 | 322 | 215 |
+| translated, after | 138 | 69 | 148 | 119 |
+| QEMU user | 3694-4014 | 2173-2340 | - | - |
+
+Matrices run 1.48 times as fast, from floating point on the host's fast path; guest-to-host calls 2.2 times and host-to-guest calls 1.8 times, from argument layouts worked out once and no heap work per call. Particles did not change beyond noise. A crossing still costs about 35 ns guest to host and 60 ns host to guest, against about 1 ns for a native call. QEMU user's floating point is emulated in software, about 30 times slower than the translator here.
+
 ## Not measured
 
 - Berberis and its Digitalis fork, which build only inside an AOSP tree for the emulator.
 - Houdini and other closed translators, which cannot run here.
-- Workloads other than this integer kernel: floating point and SIMD heavy code, code that calls the host often (each host call moves registers by signature), many threads, and an app's start under QEMU user, which cannot run the bridge's libraries.
+- Workloads other than the two kernels: many threads, real games' frame times, and an app's start under QEMU user, which cannot run the bridge's libraries.
 - A GPU or another CPU; one machine, shared, so differences of a few percent are noise.
 - How the CPU time of RustDesk's start splits between translating and running translated code, in the shipped engine: only the instrumented build above counted it, once.
 - RustDesk's start with a profile saved later than 3 s, or kept over many starts, and apps other than RustDesk.

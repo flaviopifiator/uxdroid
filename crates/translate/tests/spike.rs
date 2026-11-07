@@ -678,6 +678,19 @@ fn guest_ifuncs_resolve_with_the_guest_hwcap() {
 }
 
 #[test]
+fn guest_code_learns_the_cpu_features_the_engine_implements() {
+    if !engine_available() {
+        return;
+    }
+    // FP, ASIMD, AES, PMULL, SHA1, SHA2, CRC32, SHA3, SM3, SM4, ASIMDDP and SHA512; never
+    // ATOMICS (bit 8), which Dynarmic does not implement.
+    let hwcap: extern "C" fn() -> u64 = function("spike_hwcap", "u64()");
+    assert_eq!(hwcap(), 0x3e_00fb);
+    let crc32: extern "C" fn() -> i64 = function("spike_crc32", "i64()");
+    assert_eq!(crc32(), 0xcbf4_3926);
+}
+
+#[test]
 fn raw_system_calls_run_by_their_arm64_number() {
     if !engine_available() {
         return;

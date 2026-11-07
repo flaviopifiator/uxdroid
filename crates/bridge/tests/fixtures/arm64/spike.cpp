@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <sys/auxv.h>
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
@@ -457,6 +458,24 @@ static int hidden_answer(void) __attribute__((ifunc("resolve_answer")));
 __attribute__((visibility("default"))) int spike_ifunc(void) __attribute__((ifunc("resolve_answer")));
 
 __attribute__((visibility("default"))) int spike_call_ifunc(void) { return hidden_answer() * 2; }
+
+// --- CPU features: what getauxval reports, and an instruction it allows ---
+
+__attribute__((visibility("default"))) uint64_t spike_hwcap(void) { return getauxval(AT_HWCAP); }
+
+// CRC-32 of "123456789" with the CRC32 instructions, as zlib and BoringSSL use them when HWCAP
+// says so: 0xcbf43926. -1 when HWCAP_CRC32 (bit 7) is not reported.
+__attribute__((visibility("default"), target("crc"))) int64_t spike_crc32(void) {
+    if (!(getauxval(AT_HWCAP) & (1ULL << 7))) {
+        return -1;
+    }
+    static const char text[] = "123456789";
+    uint32_t crc = 0xffffffff;
+    for (int i = 0; i < 9; ++i) {
+        crc = __builtin_arm_crc32b(crc, static_cast<uint8_t>(text[i]));
+    }
+    return ~crc;
+}
 
 // A system call made directly, as Go, Rust's std and hand-written assembly do: `svc #0` with the
 // arm64 number in x8.

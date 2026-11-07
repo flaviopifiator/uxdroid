@@ -36,7 +36,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::elf::ElfError;
 use crate::table::{Signature, Table, Type};
 use crate::unimplemented::Unimplemented;
-use abi::{Class, GuestVaList, Slot, guest_layout, host_layout, normalize};
+use abi::{Class, GuestVaList, Layout, Slot, guest_layout, host_layout, normalize};
 
 pub use jni::{method_trampoline as jni_method_trampoline, trampoline as jni_trampoline};
 
@@ -195,7 +195,31 @@ struct HostFunction {
     callbacks: &'static [(usize, &'static str)],
     /// The first parameter is a `JNIEnv*`: guest code passes its guest env, the host needs its own.
     takes_env: bool,
+    /// Where the arguments are on each side, worked out once for a function that is not variadic.
+    layouts: Option<Layouts>,
 }
+
+/// The guest and host layouts of a fixed parameter list, so a call does not work them out again.
+struct Layouts {
+    guest: Layout,
+    host: Layout,
+}
+
+impl Layouts {
+    fn of(parameters: &[Type]) -> Layouts {
+        let classes: Vec<Class> = parameters
+            .iter()
+            .filter_map(|&kind| Class::of(kind))
+            .collect();
+        Layouts {
+            guest: guest_layout(&classes),
+            host: host_layout(&classes),
+        }
+    }
+}
+
+/// Arguments and stack slots a call carries in arrays on the stack; longer lists use the heap.
+const INLINE_SLOTS: usize = 16;
 
 /// NDK functions whose first parameter is a `JNIEnv*`, from the NDK's headers. The tables declare
 /// it as a plain pointer; the guest's env there becomes the host env it stands for.
@@ -489,6 +513,7 @@ fn va_list_service(
         },
         callbacks: &[],
         takes_env: false,
+        layouts: None,
     }))
     .map(Some)
 }
@@ -517,12 +542,14 @@ fn host_service(name: &str, target: Target, signature: &str) -> Result<u64, ElfE
         true if libc::is_scan_function(name) => Variadic::Scan,
         true => Variadic::Integers,
     };
+    let layouts = (variadic == Variadic::No).then(|| Layouts::of(&parameters));
     add_service(Service::Host(HostFunction {
         name: name.to_string(),
         target,
         returns,
         parameters,
         variadic,
+        layouts,
         callbacks: callback_parameters(name),
         takes_env: ENV_FUNCTIONS.contains(&name),
     }))
@@ -655,6 +682,16 @@ fn va_arguments(cpu: &dyn Cpu, name: &str, address: u64, classes: &[Class]) -> V
 }
 
 fn call_host(cpu: &dyn Cpu, function: &HostFunction) {
+    if let Some(layouts) = &function.layouts
+        && layouts.guest.slots.len() <= INLINE_SLOTS
+    {
+        let mut values = [0u64; INLINE_SLOTS];
+        let values = &mut values[..layouts.guest.slots.len()];
+        for (value, &slot) in values.iter_mut().zip(&layouts.guest.slots) {
+            *value = read_slot(cpu, slot);
+        }
+        return call_host_with(cpu, function, &function.parameters, values, &layouts.host);
+    }
     let mut kinds = function.parameters.clone();
     let mut classes: Vec<Class> = kinds.iter().filter_map(|&kind| Class::of(kind)).collect();
     let fixed = classes.len();
@@ -704,9 +741,27 @@ fn call_host(cpu: &dyn Cpu, function: &HostFunction) {
         }
     }
 
-    let host = host_layout(&classes);
+    call_host_with(cpu, function, &kinds, &values, &host_layout(&classes));
+}
+
+/// Calls `function` with `values`, of `kinds`, placed by the host layout `host`.
+fn call_host_with(
+    cpu: &dyn Cpu,
+    function: &HostFunction,
+    kinds: &[Type],
+    values: &[u64],
+    host: &Layout,
+) {
     let mut frame = native::HostFrame::default();
-    let mut stack = vec![0u64; host.stack_slots];
+    let mut inline = [0u64; INLINE_SLOTS];
+    let mut heap = Vec::new();
+    let stack: &mut [u64] = match host.stack_slots <= INLINE_SLOTS {
+        true => &mut inline[..host.stack_slots],
+        false => {
+            heap.resize(host.stack_slots, 0);
+            &mut heap
+        }
+    };
     for (index, (&raw, &to)) in values.iter().zip(&host.slots).enumerate() {
         let mut value = normalize(kinds[index], raw);
         if let Some(&(_, signature)) = function.callbacks.iter().find(|(at, _)| *at == index)
@@ -745,7 +800,7 @@ fn call_host(cpu: &dyn Cpu, function: &HostFunction) {
     }
     // SAFETY: the address is a host function with this signature, from its table; the frame holds
     // exactly the arguments the signature declares, placed by the System V rules.
-    unsafe { native::host_call(&mut frame, &stack) };
+    unsafe { native::host_call(&mut frame, stack) };
     set_result(cpu, function.returns, frame.rax, frame.xmm0);
 }
 
@@ -840,6 +895,17 @@ unsafe fn cpu_at(thread: *mut Thread, depth: usize) -> Result<*const dyn Cpu, St
 /// Runs the guest function at `target` with `values`, one per parameter, and returns x0 and the
 /// low half of v0.
 pub(crate) fn call(target: u64, parameters: &[Type], values: &[u64]) -> Result<(u64, u64), String> {
+    let classes: Vec<Class> = parameters.iter().filter_map(|&k| Class::of(k)).collect();
+    call_laid_out(target, parameters, values, &guest_layout(&classes))
+}
+
+/// `call` with the guest layout of `parameters` already worked out.
+fn call_laid_out(
+    target: u64,
+    parameters: &[Type],
+    values: &[u64],
+    layout: &Layout,
+) -> Result<(u64, u64), String> {
     let return_to = return_address()?;
     let thread = current_thread()?;
     // SAFETY: `thread` is this thread's state; each access below is a short borrow, and the
@@ -858,8 +924,6 @@ pub(crate) fn call(target: u64, parameters: &[Type], values: &[u64]) -> Result<(
             cpus[depth - 1].sp().saturating_sub(gap)
         };
 
-        let classes: Vec<Class> = parameters.iter().filter_map(|&k| Class::of(k)).collect();
-        let layout = guest_layout(&classes);
         let stack_bytes = (layout.stack_slots as u64 * 8).next_multiple_of(16);
         let sp = (top & !15).saturating_sub(stack_bytes);
         if sp < (*thread).stack.bottom() {
@@ -905,9 +969,23 @@ pub(super) fn guest_context() -> (u64, usize) {
     (thread as u64, unsafe { (*thread).depth })
 }
 
-/// What arm64 code learns about its CPU: ARMv8.0 with floating point (bit 0) and Advanced SIMD
-/// (bit 1), the features every engine implements, never the host's x86 feature bits.
-pub(super) const GUEST_HWCAP: u64 = (1 << 0) | (1 << 1);
+/// What arm64 code learns about its CPU: the `HWCAP_*` bits of the extensions Dynarmic's decoder
+/// implements, never the host's x86 feature bits, so libraries that choose code by HWCAP, as zlib
+/// and BoringSSL do, take their accelerated paths. FP, ASIMD, AES, PMULL, SHA1, SHA2, CRC32,
+/// SHA3, SM3, SM4, ASIMDDP (dot product) and SHA512; not ATOMICS (LSE), FP16, RDM, JSCVT or
+/// LRCPC, which it does not implement.
+pub(super) const GUEST_HWCAP: u64 = 1 << 0 // FP
+    | 1 << 1 // ASIMD
+    | 1 << 3 // AES
+    | 1 << 4 // PMULL
+    | 1 << 5 // SHA1
+    | 1 << 6 // SHA2
+    | 1 << 7 // CRC32
+    | 1 << 17 // SHA3
+    | 1 << 18 // SM3
+    | 1 << 19 // SM4
+    | 1 << 20 // ASIMDDP
+    | 1 << 21; // SHA512
 
 /// Runs a guest ifunc resolver as bionic calls one on arm64: `HWCAP | _IFUNC_ARG_HWCAP` and an
 /// `__ifunc_arg_t` of its size, HWCAP and HWCAP2.
@@ -956,6 +1034,7 @@ pub(crate) struct Callback {
     returns: Type,
     parameters: Vec<Type>,
     kind: Kind,
+    layouts: Layouts,
 }
 
 /// A host function pointer that runs the guest function at `target`, which has `signature`.
@@ -983,11 +1062,13 @@ pub(crate) fn callback(target: u64, signature: &str, kind: Kind) -> Result<usize
     if parameters.contains(&Type::VaList) {
         return Err(format!("callback signature {signature:?} has a va_list"));
     }
+    let layouts = Layouts::of(&parameters);
     let context = Box::leak(Box::new(Callback {
         target,
         returns,
         parameters,
         kind,
+        layouts,
     }));
     let thunk = native::thunk(std::ptr::from_ref(context)).ok_or("cannot map host thunks")?;
     callbacks.insert(key, thunk);
@@ -1003,13 +1084,16 @@ pub fn host_function(address: u64, signature: &str) -> Result<usize, String> {
 /// Runs a callback for its host thunk: the frame holds the System V argument registers, and
 /// gets the result.
 fn enter(callback: &Callback, frame: &mut native::EntryFrame) {
-    let classes: Vec<Class> = callback
-        .parameters
-        .iter()
-        .filter_map(|&k| Class::of(k))
-        .collect();
-    let host = host_layout(&classes);
-    let mut values = Vec::with_capacity(classes.len());
+    let host = &callback.layouts.host;
+    let mut inline = [0u64; INLINE_SLOTS];
+    let mut heap = Vec::new();
+    let values: &mut [u64] = match host.slots.len() <= INLINE_SLOTS {
+        true => &mut inline[..host.slots.len()],
+        false => {
+            heap.resize(host.slots.len(), 0);
+            &mut heap
+        }
+    };
     for (index, &slot) in host.slots.iter().enumerate() {
         let raw = match slot {
             Slot::Integer(register) => frame.gpr[register],
@@ -1024,9 +1108,10 @@ fn enter(callback: &Callback, frame: &mut native::EntryFrame) {
             (Kind::Signal, 2) => 0,
             _ => value,
         };
-        values.push(value);
+        values[index] = value;
     }
-    match call(callback.target, &callback.parameters, &values) {
+    let layout = &callback.layouts.guest;
+    match call_laid_out(callback.target, &callback.parameters, values, layout) {
         Ok((integer, vector)) => {
             frame.rax = normalize(callback.returns, integer);
             frame.xmm0 = normalize(callback.returns, vector);

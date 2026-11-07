@@ -434,3 +434,18 @@ fn passed_descriptors_close_on_exec() {
         }
     }
 }
+
+#[test]
+fn a_refusal_sent_before_the_request_is_read_still_reaches_the_client() {
+    // The app answers and closes before the client writes, as when it refuses the peer: the
+    // client's write then fails with EPIPE, yet the refusal is waiting to be read.
+    let (client_end, app_end) = UnixStream::pair().unwrap();
+    let refusal = Failure::new("not_allowed", "another user");
+    let mut app_end = app_end;
+    app_end
+        .write_all(super::protocol::response_error(None, &refusal).as_bytes())
+        .unwrap();
+    drop(app_end);
+    let answer = client::call_on(&client_end, &Command::Status, Duration::from_secs(5)).unwrap();
+    assert_eq!(answer.unwrap_err().code, "not_allowed");
+}
