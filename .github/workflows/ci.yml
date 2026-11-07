@@ -41,8 +41,57 @@ jobs:
         run: >
           docker compose run --rm -T dev sh -c
           'cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings'
+      # The tests run once, instrumented; the line coverage they reach becomes the README badge.
       - name: Test
-        run: docker compose run --rm -T dev cargo test --workspace
+        run: |
+          mkdir -m 777 coverage
+          docker compose run --rm -T dev \
+            cargo llvm-cov --workspace --json --summary-only --output-path coverage/summary.json
+      - name: Summarize the coverage
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          lines = json.load(open("coverage/summary.json"))["data"][0]["totals"]["lines"]
+          percent = lines["percent"]
+          color = next(c for floor, c in [(80, "brightgreen"), (70, "green"), (60, "yellowgreen"),
+                                          (50, "yellow"), (40, "orange"), (0, "red")] if percent >= floor)
+          badge = {"schemaVersion": 1, "label": "coverage", "message": f"{percent:.0f}%", "color": color}
+          json.dump(badge, open("coverage/badge.json", "w"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"Line coverage: {percent:.1f}% ({lines['covered']} of {lines['count']} lines)\n")
+          EOF
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage/badge.json
+
+  # Only this job can write to the repository: it runs no project code and only commits the badge
+  # of a push to main to the badges branch, which the README's coverage badge reads.
+  coverage-badge:
+    name: Publish the coverage badge
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage
+      - name: Commit the badge to the badges branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          git init -q -b badges site
+          mv badge.json site/coverage.json
+          cd site
+          git add coverage.json
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "chore: update the coverage badge"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" badges
 
   package:
     name: Package ${{ matrix.arch }}

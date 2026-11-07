@@ -571,7 +571,7 @@ packaging/publish_runtime.sh arm64
 
 CI (`.github/workflows/ci.yml`) runs on every push and pull request:
 
-1. **Lint and test**: `cargo fmt`, `clippy` and the workspace's tests, in the dev image.
+1. **Lint and test**: `cargo fmt`, `clippy` and the workspace's tests, in the dev image. The tests run under `cargo llvm-cov`, and on a push to `main` the line coverage they reach is committed to the `badges` branch, which the README's coverage badge reads.
 2. **Package**: `packaging/build.sh` for amd64 and arm64, and `uxdroid-runtime` when its image is published for the commit's key. A tag fails if the image is missing, so a release always carries both packages.
 3. **Install**: on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04, for each CPU (arm64 under QEMU user), `packaging/smoke.sh` installs the `.deb` with apt and checks the following:
    - every recommended library has a package on that distribution;

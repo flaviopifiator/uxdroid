@@ -23,7 +23,9 @@ COPY --from=ndk /opt/android-ndk /opt/android-ndk
 RUN apt-get update \
     && apt-get install -y --no-install-recommends weston python3-minimal \
         libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri pulseaudio pulseaudio-utils \
-    && rustup component add clippy rustfmt \
+    && rustup component add clippy rustfmt llvm-tools \
+    && cargo install --locked --root /usr/local cargo-llvm-cov@0.6.16 \
+    && rm -rf "$CARGO_HOME/registry" \
     && mkdir -p /cache \
     && chown 1000:1000 /cache
 
