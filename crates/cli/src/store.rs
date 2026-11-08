@@ -10,6 +10,7 @@ use uxdroid_store::config::{Config, DEFAULT_REFRESH_AFTER_HOURS, PLAY};
 use uxdroid_store::play::{Profile, Settings};
 use uxdroid_store::{App, Device, Installed, Refresh, Release, Store, Want, valid_package};
 
+use crate::desktop::Menu;
 use crate::install::{FromStore, HOST_DENSITY, Origin, host_languages, install, lock_package};
 use crate::runtime::home_dir;
 use crate::{EXIT_FAILURE, EXIT_USAGE, INSTALL_USAGE, fail, print};
@@ -844,9 +845,14 @@ pub(crate) fn remove_package(data: &Path, package: &str) -> Result<String, Strin
         return Err(format!("{package} is not installed in {}", data.display()));
     }
     remove(data, package)?;
-    Ok(format!(
-        "removed {package}: its code, data, signer record and component settings\n"
-    ))
+    let mut report =
+        format!("removed {package}: its code, data, signer record and component settings\n");
+    if let Some(Err(error)) = Menu::of(data).map(|menu| menu.remove(package)) {
+        report.push_str(&format!(
+            "note: its application menu entry stays: {error}\n"
+        ));
+    }
+    Ok(report)
 }
 
 /// Removes what installs and starts of `package` wrote, under the package's install lock and its

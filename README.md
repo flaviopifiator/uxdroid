@@ -47,7 +47,7 @@ $ uxdroid app net.gsantner.markor start
 | Store | `uxdroid search`, `install`, `update`, `remove` and a terminal UI over F-Droid repositories, and Google Play with your own account when you enable it; every index and APK verified |
 | Compatibility | Of 150 apps sampled from the F-Droid catalog, 107 draw their first frame and 119 are still running when the run ends; [docs/corpus.md](docs/corpus.md) runs the catalog unattended and ranks what stops the rest |
 | Installs | Split APKs and `.apks`/`.xapk` bundles, APK signature schemes v1 to v3.1, updates refused when the signer changes |
-| Desktop | Wayland windows, pointer, touch and keyboard, PulseAudio/PipeWire/ALSA audio, one process per app, systemd user services |
+| Desktop | Wayland windows, pointer, touch and keyboard, PulseAudio/PipeWire/ALSA audio, one process per app, systemd user services, installed apps in the application menu with their name and icon |
 | Automation | Every running app has a control socket; `uxdroid mcp` exposes it to agents over the Model Context Protocol |
 
 ## Performance

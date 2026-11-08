@@ -424,6 +424,204 @@ pub fn apks_table(package: &str, variants: &[(u32, Vec<String>)]) -> Vec<u8> {
 
 mod signing;
 
+pub const ATTR_LABEL: u32 = 0x0101_0001;
+pub const ATTR_ICON: u32 = 0x0101_0002;
+
+/// One configuration of a resource value: its locale, `b"\0\0"` for none, and its density, `0` for
+/// any.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Config {
+    pub language: [u8; 2],
+    pub country: [u8; 2],
+    pub density: u16,
+}
+
+impl Config {
+    pub const DEFAULT: Config = Config {
+        language: [0, 0],
+        country: [0, 0],
+        density: 0,
+    };
+
+    pub fn locale(language: &str, country: &str) -> Config {
+        let pair = |text: &str| match text.as_bytes() {
+            [a, b] => [*a, *b],
+            _ => [0, 0],
+        };
+        Config {
+            language: pair(language),
+            country: pair(country),
+            density: 0,
+        }
+    }
+
+    pub fn density(density: u16) -> Config {
+        Config {
+            density,
+            ..Config::DEFAULT
+        }
+    }
+}
+
+/// An entry index, value type and value data.
+type Encoded = (u16, u8, u32);
+
+#[derive(Clone)]
+enum ArscValue {
+    Text(String),
+    Ref(u32),
+}
+
+/// Encodes a `resources.arsc` the way aapt2 does: one package, a global string pool of values and one
+/// type chunk per type and configuration. Ids are `0xPPTTEEEE`.
+#[derive(Default)]
+pub struct Arsc {
+    values: Vec<(u32, Config, ArscValue)>,
+    sparse: bool,
+}
+
+impl Arsc {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A string value, such as a label or a file path inside the APK.
+    pub fn string(mut self, id: u32, config: Config, text: &str) -> Self {
+        self.values
+            .push((id, config, ArscValue::Text(text.to_string())));
+        self
+    }
+
+    /// A reference to another resource.
+    pub fn reference(mut self, id: u32, config: Config, target: u32) -> Self {
+        self.values.push((id, config, ArscValue::Ref(target)));
+        self
+    }
+
+    /// Writes type chunks sparse, as aapt2 does for types with few entries in a configuration.
+    pub fn sparse(mut self) -> Self {
+        self.sparse = true;
+        self
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut strings: Vec<String> = Vec::new();
+        let mut index_of = |text: &str| -> u32 {
+            if let Some(index) = strings.iter().position(|known| known == text) {
+                return index as u32;
+            }
+            strings.push(text.to_string());
+            strings.len() as u32 - 1
+        };
+        let package_id = self.values.first().map_or(0x7f, |(id, _, _)| id >> 24);
+        let mut groups: std::collections::BTreeMap<(u8, Config), Vec<Encoded>> = Default::default();
+        for (id, config, value) in &self.values {
+            let (kind, data) = match value {
+                ArscValue::Text(text) => (0x03, index_of(text)),
+                ArscValue::Ref(target) => (0x01, *target),
+            };
+            groups
+                .entry(((id >> 16) as u8, *config))
+                .or_default()
+                .push((*id as u16, kind, data));
+        }
+        let type_count = groups.keys().map(|(kind, _)| *kind).max().unwrap_or(0);
+
+        let mut body = Vec::new();
+        let type_names: Vec<String> = (1..=type_count).map(|n| format!("type{n}")).collect();
+        push_string_pool(&mut body, &type_names, false);
+        push_string_pool(&mut body, &["key".to_string()], false);
+        for ((kind, config), entries) in &groups {
+            let count = entries.iter().map(|(entry, _, _)| *entry).max().unwrap() as u32 + 1;
+            let mut data = Vec::new();
+            let mut offsets = Vec::new();
+            for index in 0..count {
+                match entries
+                    .iter()
+                    .find(|(entry, _, _)| u32::from(*entry) == index)
+                {
+                    Some((_, value_type, value)) => {
+                        offsets.push((index, data.len() as u32));
+                        push_u16(&mut data, 8);
+                        push_u16(&mut data, 0);
+                        push_u32(&mut data, 0);
+                        push_u16(&mut data, 8);
+                        data.push(0);
+                        data.push(*value_type);
+                        push_u32(&mut data, *value);
+                    }
+                    None if !self.sparse => offsets.push((index, NONE)),
+                    None => {}
+                }
+            }
+            let mut config_bytes = vec![0u8; 64];
+            config_bytes[..4].copy_from_slice(&64u32.to_le_bytes());
+            config_bytes[8..10].copy_from_slice(&config.language);
+            config_bytes[10..12].copy_from_slice(&config.country);
+            config_bytes[14..16].copy_from_slice(&config.density.to_le_bytes());
+            let header_size = 20 + config_bytes.len();
+            let mut table = Vec::new();
+            for (index, offset) in &offsets {
+                if self.sparse {
+                    push_u16(&mut table, *index as u16);
+                    push_u16(&mut table, (*offset / 4) as u16);
+                } else {
+                    push_u32(&mut table, *offset);
+                }
+            }
+            let mut chunk = Vec::new();
+            chunk.push(*kind);
+            chunk.push(if self.sparse { 0x01 } else { 0 });
+            push_u16(&mut chunk, 0);
+            let listed = if self.sparse {
+                offsets.len() as u32
+            } else {
+                count
+            };
+            push_u32(&mut chunk, listed);
+            push_u32(&mut chunk, (header_size + table.len()) as u32);
+            chunk.extend_from_slice(&config_bytes);
+            chunk.extend_from_slice(&table);
+            chunk.extend_from_slice(&data);
+            push_chunk(&mut body, 0x0201, header_size as u16, &chunk);
+        }
+
+        let mut package = Vec::new();
+        push_u32(&mut package, package_id);
+        let mut name = vec![0u8; 256];
+        for (index, unit) in "com.example.app".encode_utf16().enumerate() {
+            name[index * 2..index * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        package.extend_from_slice(&name);
+        let type_pool = 288u32;
+        let key_pool = type_pool + u32::from_le_bytes(body[4..8].try_into().unwrap());
+        push_u32(&mut package, type_pool);
+        push_u32(&mut package, type_count.into());
+        push_u32(&mut package, key_pool);
+        push_u32(&mut package, 1);
+        push_u32(&mut package, 0);
+        package.extend_from_slice(&body);
+
+        let mut content = Vec::new();
+        push_u32(&mut content, 1);
+        push_string_pool(&mut content, &strings, false);
+        push_chunk(&mut content, 0x0200, 288, &package);
+        let mut table = Vec::new();
+        push_u16(&mut table, 0x0002);
+        push_u16(&mut table, 12);
+        push_u32(&mut table, 8 + content.len() as u32);
+        table.extend_from_slice(&content);
+        table
+    }
+}
+
+/// The start of a PNG file, enough for a reader that checks the signature.
+pub fn png(marker: &str) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(marker.as_bytes());
+    bytes
+}
+
 fn push_u16(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(&value.to_le_bytes());
 }
