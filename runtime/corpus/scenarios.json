@@ -1,0 +1,55 @@
+[
+  {
+    "package": "com.arslandaim.playtube",
+    "steps": [
+      ["wait", "For You", 30000],
+      ["tap", "Subscriptions"],
+      ["idle"],
+      ["tap", "Library"],
+      ["idle"],
+      ["tap", "Search"],
+      ["idle"],
+      ["tap", "Search PlayTube"],
+      ["type", "slash"],
+      ["wait", "slash guitar solo", 30000],
+      ["shot", "suggestions"],
+      ["tap", "slash guitar solo"],
+      ["idle"],
+      ["shot", "results"]
+    ]
+  },
+  {
+    "package": "org.videolan.vlc",
+    "steps": [
+      ["wait", "Video", 30000],
+      ["tap", "Audio"],
+      ["idle"],
+      ["shot", "audio"],
+      ["tap", "Playlists"],
+      ["idle"],
+      ["tap", "Browse"],
+      ["idle"],
+      ["shot", "browse"],
+      ["tap", "More"],
+      ["idle"]
+    ]
+  },
+  {
+    "package": "chromahub.rhythm.app",
+    "steps": [
+      ["wait", "Rhythm", 30000],
+      ["tap", "Library"],
+      ["wait", "Songs"],
+      ["wait", "Playlists"],
+      ["tap", "Search"],
+      ["tap", "Search everywhere"],
+      ["type", "test"],
+      ["key", "ENTER"],
+      ["wait", "No results found"],
+      ["shot", "search"],
+      ["back"],
+      ["tap", "Back"],
+      ["wait", "Recently Played"]
+    ]
+  }
+]

@@ -70,10 +70,29 @@ Measured on a 12-CPU, 30 GB machine, a 150-app sample with 3 jobs and 60 s each 
 
 ```sh
 docker compose run --rm dev python3 runtime/corpus/test_corpus.py
+docker compose run --rm dev python3 runtime/corpus/test_interact.py
 ```
 
 They cover the index selection, the PNG decoder and flat check, the choice of tap target, the UI comparison, and blocker extraction, normalization and ranking, framework detection, with fixtures in `runtime/corpus/fixtures`. The containers' Python is python3-minimal, so `corpus.py` and its tests use no `unittest` or `urllib`; the download runs in the host's Python.
 
+## Interaction scenarios
+
+The catalog run taps once. `runtime/corpus/interact.py` takes installed apps through user flows written in `runtime/corpus/scenarios.json`: wait for a text, tap the node that holds it, type, press keys, check that a text is gone, take screenshots. Each app is stopped and started first, the first step that fails ends it with the app's own reason, and an app that is no longer running at the end fails.
+
+```sh
+python3 -I runtime/corpus/interact.py runtime/corpus/scenarios.json out/interact [--only <package>]
+```
+
+It drives whatever `uxdroid` is on `PATH` (`--uxdroid` names another) over the default data directory (`--data-dir` another), so it runs where the apps are installed: on a desktop, or in the sandbox with `uxdroid` from the cache. `out/interact/report.tsv` has `package`, `result`, `step`, `action`, `reason` and `ms` per app; it exits 0 only when every app passed.
+
+First run, 2026-11-07, uxdroid 0.1.0 on Ubuntu 26.04 (GNOME, Wayland):
+
+| App | Result | Where it stops |
+|-----|--------|----------------|
+| Rhythm 5.5 | passes its 13 steps: library tabs, a search answered with "No results found", back to Home | Its library is empty: uxdroid has no MediaStore, so no music app finds songs |
+| PlayTube 1.4.3 | navigation, the search box and typing work | Search finds nothing: the runtime had no CA certificates, so every HTTPS request failed |
+| VLC 3.7.2 | Video, Audio and Playlists tabs | Browse blocks the main thread; `stop` could not end it then |
+
 ## Not yet
 
-Only apps whose newest release fits are run, not an older one that would. One screen and one tap per app: no logins, permissions dialogs or onboarding flows.
+Only apps whose newest release fits are run, not an older one that would. One screen and one tap per app: no logins, permissions dialogs or onboarding flows. Interaction scenarios cover three apps, written by hand.
