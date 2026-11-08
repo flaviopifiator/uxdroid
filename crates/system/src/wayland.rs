@@ -813,6 +813,19 @@ fn allocate(
     })
 }
 
+/// The Wayland app id of a toplevel titled `title`. The framework titles an Activity's window with
+/// its component name, `<package>/<class>`, which changes with the Activity; the id keeps only the
+/// package, as `uxdroid-<package>`, the basename of the menu entry `uxdroid install` writes, so the
+/// shell matches the window to that entry. Any other title is the id itself, as before.
+fn app_id(title: &str) -> String {
+    match title.split_once('/') {
+        Some((package, _)) if crate::control::valid_package(package) => {
+            format!("uxdroid-{package}")
+        }
+        _ => title.to_string(),
+    }
+}
+
 impl Window {
     /// Opens the display's toplevel, or when it is open, a subsurface of it at `(x, y)` on the
     /// display. Either has exactly this size; a size the compositor asks for comes as a request.
@@ -854,7 +867,7 @@ impl Window {
             let xdg_surface = display.shell.get_xdg_surface(&surface, &handle, ());
             let toplevel = xdg_surface.get_toplevel(&handle, ());
             toplevel.set_title(title.to_string());
-            toplevel.set_app_id(title.to_string());
+            toplevel.set_app_id(app_id(title));
             surface.commit();
             let state = &mut display.state;
             state.configure_serial = None;
@@ -1568,6 +1581,21 @@ delegate_noop!(State: ignore wl_subsurface::WlSubsurface);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_app_id_names_the_package_whatever_activity_titles_the_window() {
+        assert_eq!(
+            app_id("org.videolan.vlc/org.videolan.vlc.gui.MainActivity"),
+            "uxdroid-org.videolan.vlc"
+        );
+        assert_eq!(
+            app_id("org.videolan.vlc/org.videolan.vlc.StartActivity"),
+            "uxdroid-org.videolan.vlc"
+        );
+        // A title that is no component name keeps naming the window, as before.
+        assert_eq!(app_id("uxdroid"), "uxdroid");
+        assert_eq!(app_id("../x/y"), "../x/y");
+    }
 
     #[test]
     fn each_commit_asks_for_a_frame_and_the_newest_ends_the_wait() {

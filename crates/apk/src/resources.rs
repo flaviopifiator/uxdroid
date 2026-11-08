@@ -10,7 +10,7 @@ use std::path::Path;
 
 use zip::ZipArchive;
 
-use crate::manifest::{Label, Manifest, StringPool, slice, u16_at, u32_at};
+use crate::manifest::{Label, Manifest, StringPool, adaptive_foreground, slice, u16_at, u32_at};
 
 const CHUNK_STRING_POOL: u16 = 0x0001;
 const CHUNK_TABLE: u16 = 0x0002;
@@ -48,6 +48,8 @@ const MAX_LABELS: usize = 256;
 const MAX_TABLE_BYTES: u64 = 64 * 1024 * 1024;
 /// Launcher icons are a few KiB to a few hundred; a larger file is not used.
 const MAX_ICON_BYTES: u64 = 2 * 1024 * 1024;
+/// Adaptive icon files read for their foreground before giving up.
+const MAX_LAYER_FILES: usize = 4;
 const TABLE_ENTRY: &str = "resources.arsc";
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -186,7 +188,7 @@ impl<'a> ResourceTable<'a> {
     /// then higher densities first.
     pub fn icon_files(&self, id: u32) -> Vec<IconFile> {
         let mut files = Vec::new();
-        self.collect_files(id, None, 0, &mut files);
+        self.collect_files(id, None, 0, &mut files, &mut Vec::new());
         files.sort_by_key(|file| {
             (
                 file.format != ImageFormat::Png,
@@ -197,7 +199,21 @@ impl<'a> ResourceTable<'a> {
         files
     }
 
-    fn collect_files(&self, id: u32, density: Option<u16>, depth: usize, out: &mut Vec<IconFile>) {
+    /// The compiled XML files the icon `id` names, such as an adaptive icon's.
+    fn xml_files(&self, id: u32) -> Vec<String> {
+        let mut xml = Vec::new();
+        self.collect_files(id, None, 0, &mut Vec::new(), &mut xml);
+        xml
+    }
+
+    fn collect_files(
+        &self,
+        id: u32,
+        density: Option<u16>,
+        depth: usize,
+        out: &mut Vec<IconFile>,
+        xml: &mut Vec<String>,
+    ) {
         if depth > MAX_REFERENCE_DEPTH || out.len() >= MAX_LABELS {
             return;
         }
@@ -209,7 +225,11 @@ impl<'a> ResourceTable<'a> {
                     let Ok(path) = self.pool.get(found.data) else {
                         continue;
                     };
-                    if let Some(format) = ImageFormat::of_path(&path) {
+                    if path.to_ascii_lowercase().ends_with(".xml") {
+                        if xml.len() < MAX_LABELS {
+                            xml.push(path);
+                        }
+                    } else if let Some(format) = ImageFormat::of_path(&path) {
                         out.push(IconFile {
                             path,
                             density,
@@ -219,7 +239,7 @@ impl<'a> ResourceTable<'a> {
                 }
                 VALUE_REFERENCE => {
                     let density = (density != DENSITY_DEFAULT).then_some(density);
-                    self.collect_files(found.data, density, depth + 1, out);
+                    self.collect_files(found.data, density, depth + 1, out, xml);
                 }
                 _ => {}
             }
@@ -417,32 +437,64 @@ pub fn appearance(manifest: &Manifest, apks: &[&Path]) -> Appearance {
     }
 
     if let Some(id) = manifest.icon {
-        let mut files: Vec<(usize, IconFile)> = parsed
-            .iter()
-            .enumerate()
-            .filter_map(|(index, table)| table.as_ref().map(|table| (index, table)))
-            .flat_map(|(index, table)| {
-                table
-                    .icon_files(id)
-                    .into_iter()
-                    .map(move |file| (index, file))
-            })
-            .collect();
-        files.sort_by_key(|(_, file)| {
-            (
-                file.format != ImageFormat::Png,
-                std::cmp::Reverse(density_rank(file.density)),
-            )
-        });
-        look.icon = files.into_iter().find_map(|(index, file)| {
-            let bytes = read_capped(&mut archives[index], &file.path, MAX_ICON_BYTES)?;
-            file.format.matches(&bytes).then_some(Icon {
-                bytes,
-                format: file.format,
-            })
+        look.icon = pick_icon(&parsed, &mut archives, id).or_else(|| {
+            // An adaptive icon is drawn from layers; its foreground holds the picture, and is
+            // often a raster file.
+            let layers: Vec<(usize, String)> = parsed
+                .iter()
+                .enumerate()
+                .filter_map(|(index, table)| table.as_ref().map(|table| (index, table)))
+                .flat_map(|(index, table)| {
+                    table
+                        .xml_files(id)
+                        .into_iter()
+                        .map(move |path| (index, path))
+                })
+                .collect();
+            // A few files are tried, so a crafted table cannot make the install read many.
+            layers
+                .into_iter()
+                .take(MAX_LAYER_FILES)
+                .find_map(|(index, path)| {
+                    let bytes = read_capped(&mut archives[index], &path, MAX_ICON_BYTES)?;
+                    let foreground = adaptive_foreground(&bytes)?;
+                    pick_icon(&parsed, &mut archives, foreground)
+                })
         });
     }
     look
+}
+
+/// The best raster file of icon `id` in any of the tables whose bytes are the image they say.
+fn pick_icon(
+    parsed: &[Option<ResourceTable>],
+    archives: &mut [ZipArchive<BufReader<File>>],
+    id: u32,
+) -> Option<Icon> {
+    let mut files: Vec<(usize, IconFile)> = parsed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, table)| table.as_ref().map(|table| (index, table)))
+        .flat_map(|(index, table)| {
+            table
+                .icon_files(id)
+                .into_iter()
+                .map(move |file| (index, file))
+        })
+        .collect();
+    files.sort_by_key(|(_, file)| {
+        (
+            file.format != ImageFormat::Png,
+            std::cmp::Reverse(density_rank(file.density)),
+        )
+    });
+    files.into_iter().find_map(|(index, file)| {
+        let bytes = read_capped(&mut archives[index], &file.path, MAX_ICON_BYTES)?;
+        file.format.matches(&bytes).then_some(Icon {
+            bytes,
+            format: file.format,
+        })
+    })
 }
 
 /// The whole of entry `name`, or `None` when it is missing, unreadable or larger than `limit`.

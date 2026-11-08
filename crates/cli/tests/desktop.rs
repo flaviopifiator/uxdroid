@@ -206,7 +206,7 @@ fn an_install_into_the_default_data_directory_adds_the_app_to_the_menu() {
              Name[es]=Ejemplo\n\
              Exec={} app {PACKAGE} start\n\
              Icon={}\n\
-             StartupWMClass={PACKAGE}/{PACKAGE}.MainActivity\n\
+             StartupWMClass=uxdroid-{PACKAGE}\n\
              Terminal=false\n\
              X-Uxdroid-Package={PACKAGE}\n",
             exe(),

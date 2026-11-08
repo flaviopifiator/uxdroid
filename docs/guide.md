@@ -299,14 +299,14 @@ Type=Application
 Name=Markor
 Exec=/usr/bin/uxdroid app net.gsantner.markor start
 Icon=/home/me/.local/share/uxdroid/icons/net.gsantner.markor.png
-StartupWMClass=net.gsantner.markor/net.gsantner.markor.activity.MainActivity
+StartupWMClass=uxdroid-net.gsantner.markor
 Terminal=false
 X-Uxdroid-Package=net.gsantner.markor
 ```
 
 - `Name` is the `android:label` of the launcher Activity, else of the application, resolved through `resources.arsc` in the default locale; each other two-letter locale the app translates it into gets `Name[<ll>]` or `Name[<ll>_<CC>]` when it differs. Without a label, the package name. Control characters become spaces, and labels are cut at 128 characters.
-- `Icon` is the sharpest PNG the launcher icon has, from the base APK or a density split; WebP only when there is no PNG (GNOME shows WebP with `webp-pixbuf-loader`). An adaptive icon's XML is not drawn, so an app whose icon exists only as XML, or none whose bytes are an image, gets no `Icon` line. Icons over 2 MiB, and `resources.arsc` tables over 64 MiB, are not read.
-- `StartupWMClass` is the launcher Activity's component name, which the framework gives its window as title and Wayland app id, so the shell groups the window with the entry.
+- `Icon` is the sharpest PNG the launcher icon has, from the base APK or a density split; WebP only when there is no PNG (GNOME shows WebP with `webp-pixbuf-loader`). An adaptive icon's XML is not drawn: its foreground layer is used when that is a raster file (it is drawn smaller than the whole icon, with no background), and an app whose icon has no raster file at all, or none whose bytes are an image, gets no `Icon` line. Icons over 2 MiB, and `resources.arsc` tables over 64 MiB, are not read.
+- `StartupWMClass` is `uxdroid-<package>`, the Wayland app id every window of the app has, which is also the entry's basename: GNOME and KDE match a window to the entry whose name is its app id, and older shells read the key.
 - `Exec` names this `uxdroid` program by its absolute path, quoted and escaped as the Desktop Entry specification requires when it holds a space or another reserved character.
 
 An update whose app has no launcher Activity removes the entry, and `uxdroid remove` removes the entry and icon with the app. uxdroid touches only an entry it wrote, one with `X-Uxdroid-Package=<package>`: a file of the user's at that path, or a symlink, is left as it is, and a note on stderr says so (`<path> was not written by uxdroid; it is left as it is`). A menu entry that cannot be written never fails the install; it gets a note, `note: <package> is not in the application menu: <reason>`, and a removal's gets a last line `note: its application menu entry stays: <reason>`. Entries are written beside their final path and renamed into place.

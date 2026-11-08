@@ -290,6 +290,47 @@ impl Walker {
     }
 }
 
+/// The `android:drawable` reference of the `<foreground>` of a compiled adaptive icon, the layer
+/// that holds its picture.
+pub(crate) fn adaptive_foreground(bytes: &[u8]) -> Option<u32> {
+    const ATTR_DRAWABLE: u32 = 0x0101_0199;
+    if u16_at(bytes, 0).ok()? != CHUNK_DOCUMENT {
+        return None;
+    }
+    let document = bytes.get(..u32_at(bytes, 4).ok()? as usize)?;
+    let mut position = usize::from(u16_at(bytes, 2).ok()?);
+    let mut pool = None;
+    let mut resource_ids: &[u8] = &[];
+    while document.len().saturating_sub(position) >= CHUNK_HEADER_SIZE {
+        let kind = u16_at(document, position).ok()?;
+        let header = usize::from(u16_at(document, position + 2).ok()?);
+        let size = u32_at(document, position + 4).ok()? as usize;
+        if size < CHUNK_HEADER_SIZE {
+            return None;
+        }
+        let chunk = slice(document, position, size).ok()?;
+        match kind {
+            CHUNK_STRING_POOL => pool = StringPool::new(chunk, header).ok(),
+            CHUNK_RESOURCE_MAP => resource_ids = chunk.get(header..)?,
+            CHUNK_START_ELEMENT => {
+                let pool = pool.as_ref()?;
+                let element = chunk.get(header..)?;
+                if pool.is(u32_at(element, 4).ok()?, "foreground").ok()? {
+                    let names = Names { pool, resource_ids };
+                    let attrs = Attributes::new(element, &names).ok()?;
+                    return match attrs.android(ATTR_DRAWABLE, "drawable").ok()? {
+                        Some(AttrValue::Reference(id)) => Some(id),
+                        _ => None,
+                    };
+                }
+            }
+            _ => {}
+        }
+        position = position.checked_add(size)?;
+    }
+    None
+}
+
 /// Expands the manifest's shorthand class names (`.Main`, `Main`) to full names.
 fn qualify_class(package: &str, name: &str) -> String {
     if name.starts_with('.') {

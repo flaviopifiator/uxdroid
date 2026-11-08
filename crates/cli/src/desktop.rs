@@ -59,9 +59,9 @@ impl Menu {
         launcher: Option<&str>,
         look: &Appearance,
     ) -> Result<(), String> {
-        let Some(launcher) = launcher else {
+        if launcher.is_none() {
             return self.remove(package);
-        };
+        }
         let entry = self.entry(package);
         owned(package, &entry)?;
         let exe = std::env::current_exe()
@@ -111,9 +111,9 @@ impl Menu {
         if let Some(icon) = icon {
             text.push_str(&format!("Icon={}\n", escape(&icon)));
         }
-        // The framework titles an Activity's window, and so sets its Wayland app id, with the
-        // Activity's component name.
-        text.push_str(&format!("StartupWMClass={package}/{launcher}\n"));
+        // Windows of the app have the Wayland app id `uxdroid-<package>`, this entry's basename, which
+        // shells match by itself; KDE and older shells also read this key.
+        text.push_str(&format!("StartupWMClass=uxdroid-{package}\n"));
         text.push_str(&format!("Terminal=false\nX-Uxdroid-Package={package}\n"));
         write_atomically(&entry, text.as_bytes()).map_err(|error| error.0)
     }

@@ -278,3 +278,80 @@ fn fanning_references_resolve_in_bounded_time() {
         start.elapsed()
     );
 }
+
+const ATTR_DRAWABLE: u32 = 0x0101_0199;
+const FOREGROUND: u32 = 0x7f02_0001;
+const BACKGROUND: u32 = 0x7f02_0002;
+
+fn adaptive_icon() -> Vec<u8> {
+    Axml::new()
+        .start("adaptive-icon", &[])
+        .start(
+            "background",
+            &[android("drawable", ATTR_DRAWABLE, Value::Ref(BACKGROUND))],
+        )
+        .end("background")
+        .start(
+            "foreground",
+            &[android("drawable", ATTR_DRAWABLE, Value::Ref(FOREGROUND))],
+        )
+        .end("foreground")
+        .end("adaptive-icon")
+        .encode()
+}
+
+fn adaptive_app(path: &std::path::Path, icon_xml: &[u8]) {
+    Apk::new()
+        .manifest(&manifest(Value::Str("Adaptive"), Some(ICON)))
+        .file(
+            "resources.arsc",
+            &Arsc::new()
+                .string(
+                    ICON,
+                    Config::density(0xFFFE),
+                    "res/mipmap-anydpi-v26/ic_launcher.xml",
+                )
+                .string(
+                    FOREGROUND,
+                    Config::density(480),
+                    "res/mipmap-xxhdpi/ic_launcher_foreground.png",
+                )
+                .string(
+                    BACKGROUND,
+                    Config::density(480),
+                    "res/mipmap-xxhdpi/background.png",
+                )
+                .encode(),
+        )
+        .file("res/mipmap-anydpi-v26/ic_launcher.xml", icon_xml)
+        .file(
+            "res/mipmap-xxhdpi/ic_launcher_foreground.png",
+            &png("foreground"),
+        )
+        .file("res/mipmap-xxhdpi/background.png", &png("background"))
+        .write(path);
+}
+
+#[test]
+fn an_adaptive_only_icon_falls_back_to_its_foreground_layer() {
+    let dir = scratch("adaptive");
+    let apk = dir.join("app.apk");
+    adaptive_app(&apk, &adaptive_icon());
+    let parsed = uxdroid_apk::inspect(&apk).unwrap().manifest;
+
+    let look = appearance(&parsed, &[&apk]);
+
+    assert_eq!(look.icon.unwrap().bytes, png("foreground"));
+}
+
+#[test]
+fn a_damaged_adaptive_icon_never_panics() {
+    let dir = scratch("adaptive-damaged");
+    let apk = dir.join("app.apk");
+    let bytes = adaptive_icon();
+    for length in 0..bytes.len() {
+        adaptive_app(&apk, &bytes[..length]);
+        let parsed = uxdroid_apk::inspect(&apk).unwrap().manifest;
+        let _ = appearance(&parsed, &[&apk]);
+    }
+}

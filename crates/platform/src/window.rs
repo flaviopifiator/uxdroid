@@ -127,7 +127,8 @@ impl Window {
         let xdg_surface = shell.get_xdg_surface(&surface, &handle, ());
         let toplevel = xdg_surface.get_toplevel(&handle, ());
         toplevel.set_title(title.to_string());
-        toplevel.set_app_id(title.to_string());
+        // The title is the app's package; the id is `uxdroid-<package>`, as `crates/system` gives it.
+        toplevel.set_app_id(format!("uxdroid-{title}"));
         surface.commit();
 
         let mut state = State::default();
