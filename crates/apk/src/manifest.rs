@@ -19,6 +19,8 @@ const NO_INDEX: u32 = 0xFFFF_FFFF;
 const VALUE_REFERENCE: u8 = 0x01;
 const VALUE_STRING: u8 = 0x03;
 
+const ATTR_LABEL: u32 = 0x0101_0001;
+const ATTR_ICON: u32 = 0x0101_0002;
 const ATTR_NAME: u32 = 0x0101_0003;
 const ATTR_TARGET_ACTIVITY: u32 = 0x0101_0202;
 const ATTR_VERSION_CODE: u32 = 0x0101_021b;
@@ -41,6 +43,11 @@ pub struct Manifest {
     pub min_sdk: Option<String>,
     pub target_sdk: Option<String>,
     pub launcher: Option<String>,
+    /// What a launcher shows the app as: the launcher Activity's `android:label`, else the
+    /// application's.
+    pub label: Option<Label>,
+    /// The resource id of the launcher Activity's `android:icon`, else of the application's.
+    pub icon: Option<u32>,
     /// The split's name, for a split APK; a base APK has none.
     pub split: Option<String>,
     /// The feature split a configuration split belongs to; none for the base's own.
@@ -51,6 +58,13 @@ pub struct Manifest {
     /// `android:requiredSplitTypes` of a base, `android:splitTypes` of a split: comma separated.
     pub required_split_types: Option<String>,
     pub split_types: Option<String>,
+}
+
+/// A label as the manifest gives it: the text itself, or a string resource in `resources.arsc`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Label {
+    Text(String),
+    Resource(u32),
 }
 
 /// Extracts what uxdroid needs from a compiled `AndroidManifest.xml`.
@@ -148,6 +162,12 @@ struct Walker {
     required_split_types: Option<AttrValue>,
     split_types: Option<AttrValue>,
     component: Option<AttrValue>,
+    app_label: Option<AttrValue>,
+    app_icon: Option<AttrValue>,
+    component_label: Option<AttrValue>,
+    component_icon: Option<AttrValue>,
+    label: Option<AttrValue>,
+    icon: Option<AttrValue>,
     has_main_action: bool,
     has_launcher_category: bool,
 }
@@ -174,12 +194,19 @@ impl Walker {
             if let Some(required) = attrs.android(ATTR_IS_SPLIT_REQUIRED, "isSplitRequired")? {
                 self.split_required = Some(required);
             }
+            self.app_label = attrs.android(ATTR_LABEL, "label")?;
+            self.app_icon = attrs.android(ATTR_ICON, "icon")?;
         } else if pool.is(name, "uses-sdk")? {
             self.min_sdk = attrs.android(ATTR_MIN_SDK, "minSdkVersion")?;
             self.target_sdk = attrs.android(ATTR_TARGET_SDK, "targetSdkVersion")?;
         } else if pool.is(name, "activity")? {
             self.component = attrs.android(ATTR_NAME, "name")?;
+            self.component_label = attrs.android(ATTR_LABEL, "label")?;
+            self.component_icon = attrs.android(ATTR_ICON, "icon")?;
         } else if pool.is(name, "activity-alias")? {
+            // The alias, not its target, is what the launcher shows.
+            self.component_label = attrs.android(ATTR_LABEL, "label")?;
+            self.component_icon = attrs.android(ATTR_ICON, "icon")?;
             // Launching an alias starts its target, so the target is what must run.
             self.component = match attrs.android(ATTR_TARGET_ACTIVITY, "targetActivity")? {
                 Some(target) => Some(target),
@@ -206,9 +233,13 @@ impl Walker {
         if pool.is(name, "intent-filter")? {
             if self.has_main_action && self.has_launcher_category && self.launcher.is_none() {
                 self.launcher = self.component;
+                self.label = self.component_label;
+                self.icon = self.component_icon;
             }
         } else if pool.is(name, "activity")? || pool.is(name, "activity-alias")? {
             self.component = None;
+            self.component_label = None;
+            self.component_icon = None;
         }
         Ok(())
     }
@@ -231,6 +262,15 @@ impl Walker {
         };
         let split = decode(self.split)?.filter(|name| !name.is_empty());
         let config_for_split = decode(self.config_for_split)?.filter(|name| !name.is_empty());
+        let label = match self.label.or(self.app_label) {
+            Some(AttrValue::Text(index)) => Some(Label::Text(pool.get(index)?)),
+            Some(AttrValue::Reference(id)) => Some(Label::Resource(id)),
+            _ => None,
+        };
+        let icon = match self.icon.or(self.app_icon) {
+            Some(AttrValue::Reference(id)) => Some(id),
+            _ => None,
+        };
         Ok(Manifest {
             package,
             version_code: decode(self.version_code)?,
@@ -238,6 +278,8 @@ impl Walker {
             min_sdk: decode(self.min_sdk)?,
             target_sdk: decode(self.target_sdk)?,
             launcher,
+            label,
+            icon,
             split,
             config_for_split,
             feature_split: truth(self.feature_split)?,
@@ -344,7 +386,7 @@ impl<'a> Attributes<'a> {
     }
 }
 
-struct StringPool<'a> {
+pub(crate) struct StringPool<'a> {
     chunk: &'a [u8],
     offsets: usize,
     strings: usize,
@@ -353,7 +395,7 @@ struct StringPool<'a> {
 }
 
 impl<'a> StringPool<'a> {
-    fn new(chunk: &'a [u8], header_size: usize) -> Result<Self, Error> {
+    pub(crate) fn new(chunk: &'a [u8], header_size: usize) -> Result<Self, Error> {
         Ok(Self {
             chunk,
             offsets: header_size,
@@ -363,7 +405,7 @@ impl<'a> StringPool<'a> {
         })
     }
 
-    fn get(&self, index: u32) -> Result<String, Error> {
+    pub(crate) fn get(&self, index: u32) -> Result<String, Error> {
         let bytes = self.raw(index)?;
         if self.utf8 {
             Ok(String::from_utf8_lossy(bytes).into_owned())
@@ -443,19 +485,19 @@ fn malformed(reason: &'static str) -> Error {
     Error::MalformedManifest(reason)
 }
 
-fn slice(bytes: &[u8], start: usize, length: usize) -> Result<&[u8], Error> {
+pub(crate) fn slice(bytes: &[u8], start: usize, length: usize) -> Result<&[u8], Error> {
     start
         .checked_add(length)
         .and_then(|end| bytes.get(start..end))
         .ok_or(malformed("unexpected end of data"))
 }
 
-fn u16_at(bytes: &[u8], offset: usize) -> Result<u16, Error> {
+pub(crate) fn u16_at(bytes: &[u8], offset: usize) -> Result<u16, Error> {
     let raw = slice(bytes, offset, 2)?;
     Ok(u16::from_le_bytes([raw[0], raw[1]]))
 }
 
-fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, Error> {
+pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, Error> {
     let raw = slice(bytes, offset, 4)?;
     Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
 }

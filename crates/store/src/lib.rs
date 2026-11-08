@@ -155,7 +155,7 @@ pub fn valid_package(package: &str) -> bool {
 }
 
 /// Replaces `path` with `bytes` at once: written beside it, then renamed over it.
-pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let cannot =
         |error: std::io::Error| Error::new(format!("cannot write {}: {error}", path.display()));
     if let Some(parent) = path.parent() {

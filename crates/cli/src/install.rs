@@ -20,13 +20,14 @@ use std::process::{Command, ExitCode, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use uxdroid_apk::{
-    ExecutionPath, Host, INSTALLED_DATA, Kind, Part, Plan, Scheme, bundle_entries, extract_bundled,
-    extract_native_libs, host_abi, inspect, plan_splits, verify_signature,
+    ExecutionPath, Host, INSTALLED_DATA, Kind, Part, Plan, Scheme, appearance, bundle_entries,
+    extract_bundled, extract_native_libs, host_abi, inspect, plan_splits, verify_signature,
 };
 
 use sha2::{Digest, Sha256};
 use uxdroid_store::Installed;
 
+use crate::desktop::Menu;
 use crate::runtime::{
     INSTRUCTION_SET, boot_class_path, default_runtime, failure, runtime_environment,
 };
@@ -771,6 +772,22 @@ pub(crate) fn install(apks: &[&Path], data: &Path, origin: &Origin) -> Result<Re
         },
     };
 
+    // Read before the APKs move into place; only an app the menu will show needs it.
+    let menu = Menu::of(data);
+    let launcher = base.apk.manifest.launcher.clone();
+    let look = match (&menu, &launcher) {
+        (Some(_), Some(_)) => {
+            let mut apks = vec![base.path.as_path()];
+            apks.extend(
+                plan.chosen
+                    .iter()
+                    .map(|(index, _)| parts[*index].path.as_path()),
+            );
+            appearance(&base.apk.manifest, &apks)
+        }
+        _ => Default::default(),
+    };
+
     let _lock = lock_package(data, package)?;
     let pid = std::process::id();
     let app_dir = data.join("data").join(package);
@@ -962,6 +979,16 @@ pub(crate) fn install(apks: &[&Path], data: &Path, origin: &Origin) -> Result<Re
             package.escape_debug()
         )),
         (None, Framework::Found(_)) => None,
+    };
+    // The app is installed whatever happens to its menu entry, which only gets a note.
+    let menu_note = menu.and_then(|menu| {
+        menu.update(package, launcher.as_deref(), &look)
+            .err()
+            .map(|error| format!("{package} is not in the application menu: {error}"))
+    });
+    let note = match (note, menu_note) {
+        (Some(note), Some(menu)) => Some(format!("{note}\nnote: {menu}")),
+        (note, menu) => note.or(menu),
     };
     Ok((report, note))
 }

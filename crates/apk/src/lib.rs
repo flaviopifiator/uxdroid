@@ -2,6 +2,7 @@
 
 mod der;
 mod manifest;
+mod resources;
 mod signing;
 mod splits;
 
@@ -14,7 +15,8 @@ use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 use zip::result::ZipError;
 
-pub use manifest::{Manifest, parse_manifest};
+pub use manifest::{Label, Manifest, parse_manifest};
+pub use resources::{Appearance, Icon, IconFile, ImageFormat, ResourceTable, appearance};
 pub use signing::{
     INSTALLED_DATA, PLATFORM_SDK, Scheme, Signature, verify_jar_signature, verify_signature,
 };

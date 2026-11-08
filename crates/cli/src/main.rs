@@ -59,6 +59,7 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 mod app;
+mod desktop;
 mod install;
 mod logo;
 #[cfg(target_os = "linux")]

@@ -294,10 +294,14 @@ struct Fixture {
 }
 
 fn repository(dir: &Path, apps: &[App]) -> Fixture {
+    repository_at(dir, apps, dir.join("data"))
+}
+
+/// As [`repository`], for the data directory `data`.
+fn repository_at(dir: &Path, apps: &[App], data: PathBuf) -> Fixture {
     let repo = dir.join("repo");
     let index = fdroid::write_repo(&repo, FIRST, apps, &[], &Key::test());
     let server = Server::start(&repo);
-    let data = dir.join("data");
     ok(&uxdroid(&data, &["sources", "disable", "fdroid"]));
     ok(&uxdroid(
         &data,
@@ -1047,6 +1051,58 @@ fn update_installs_a_newer_version_from_the_apps_source_and_does_nothing_when_cu
         text(&not_installed.stderr),
         "error: com.example.none is not installed\n"
     );
+}
+
+/// Installs and updates from a source into the default data directory, where `uxdroid app` starts
+/// apps from, add the app to the desktop's application menu, and remove takes it out.
+#[test]
+fn installs_and_updates_from_a_source_keep_the_application_menu_entry() {
+    let dir = scratch("menu");
+    let key = Key::test();
+    let share = dir.join("share");
+    let fixture = repository_at(&dir, &catalog(), share.join("uxdroid/data"));
+    let entry = share.join("applications/uxdroid-com.example.notes.desktop");
+    let run = |args: &[&str]| {
+        let mut command = uxdroid_command();
+        command
+            .args(args)
+            .env("XDG_DATA_HOME", &share)
+            .env("UXDROID_RUNTIME", "")
+            .env_remove("http_proxy")
+            .env_remove("HTTP_PROXY")
+            .env_remove("all_proxy")
+            .env_remove("ALL_PROXY");
+        command.output().unwrap()
+    };
+
+    ok(&run(&["install", "com.example.notes"]));
+    let installed = std::fs::read_to_string(&entry).unwrap();
+    std::fs::remove_file(&entry).unwrap();
+    let mut newer = catalog();
+    let notes = "com.example.notes";
+    newer[1].versions.push(Version::new(
+        notes,
+        6,
+        "6.0",
+        apk(notes, 6, "6.0", &key),
+        &key,
+    ));
+    fdroid::write_repo(&fixture.repo, SECOND, &newer, &[], &key);
+    ok(&run(&["update", "--refresh"]));
+    let updated = std::fs::read_to_string(&entry).unwrap();
+    let removed = ok(&run(&["remove", notes]));
+
+    assert!(
+        installed.contains("\nName=com.example.notes\nExec=")
+            && installed.contains(" app com.example.notes start\n"),
+        "{installed}"
+    );
+    assert_eq!(updated, installed);
+    assert_eq!(
+        removed,
+        "removed com.example.notes: its code, data, signer record and component settings\n"
+    );
+    assert!(!entry.exists());
 }
 
 #[test]
