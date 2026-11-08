@@ -17,6 +17,7 @@ mod compose;
 pub mod control;
 pub mod default_library;
 pub mod defaults;
+mod file_descriptor;
 mod gl;
 mod handles;
 pub mod identity;
@@ -374,6 +375,13 @@ unsafe extern "system" fn attach_defaults(
 /// `static native void bindSystem(String buildProp)`: loads properties, then replaces default bodies
 /// with this library's natives.
 unsafe extern "system" fn bind_system(env: *mut JNIEnv, _class: jclass, build_prop: jstring) {
+    // First, before any native of the host library reads a descriptor's int.
+    // SAFETY: ART passes a valid environment, and the host library has registered its natives.
+    if let Err(error) = unsafe { file_descriptor::prime(env) } {
+        // SAFETY: as above; prime leaves no exception pending.
+        unsafe { throw(env, c"java/lang/IllegalStateException", &error) };
+        return;
+    }
     // SAFETY: ART passes a valid environment and string.
     if let Some(path) = unsafe { java_string(env, build_prop) } {
         match std::fs::read_to_string(&path) {

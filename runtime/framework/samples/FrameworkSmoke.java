@@ -18,6 +18,7 @@ public class FrameworkSmoke {
         paint.setColor(0xff00c000);
         canvas.drawRect(4, 4, 20, 20, paint);
         System.out.printf("rect %08x %08x%n", bitmap.getPixel(10, 10), bitmap.getPixel(30, 10));
+        decodeFromFile(bitmap);
 
         Bitmap text = Bitmap.createBitmap(64, 32, Bitmap.Config.ARGB_8888);
         paint.setColor(0xff000000);
@@ -52,6 +53,32 @@ public class FrameworkSmoke {
         view.draw(new Canvas(drawn));
         System.out.println("view " + view.getMeasuredWidth() + "x" + view.getMeasuredHeight() + " " + inked(drawn));
         System.out.println("unhandled " + dev.uxdroid.system.Services.unhandled());
+    }
+
+    /**
+     * Decodes a PNG file through the host library's natives that take a FileDescriptor, as image
+     * loaders such as Coil do: they read the descriptor's int, which aborted the process once.
+     */
+    static void decodeFromFile(Bitmap bitmap) {
+        java.io.File png = new java.io.File(System.getenv("ANDROID_DATA"), "decode.png");
+        try {
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(png)) {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+            }
+            Bitmap decoded = android.graphics.ImageDecoder.decodeBitmap(
+                    android.graphics.ImageDecoder.createSource(png),
+                    (decoder, info, source) -> decoder.setAllocator(android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE));
+            System.out.printf("imagedecoder %dx%d %08x%n", decoded.getWidth(), decoded.getHeight(), decoded.getPixel(10, 10));
+            try (java.io.FileInputStream in = new java.io.FileInputStream(png)) {
+                Bitmap fromFd = android.graphics.BitmapFactory.decodeFileDescriptor(in.getFD());
+                System.out.printf("bitmapfactory %dx%d %08x%n", fromFd.getWidth(), fromFd.getHeight(), fromFd.getPixel(10, 10));
+            }
+            java.nio.ByteBuffer pixels = java.nio.ByteBuffer.allocateDirect(bitmap.getByteCount());
+            bitmap.copyPixelsToBuffer(pixels);
+            System.out.printf("niobuffer %d %08x%n", pixels.position(), pixels.order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt((10 * 64 + 10) * 4));
+        } catch (java.io.IOException e) {
+            System.out.println("decode failed: " + e);
+        }
     }
 
     static int inked(Bitmap bitmap) {

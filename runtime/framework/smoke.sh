@@ -19,6 +19,11 @@ CP="$RUNTIME/framework/framework.jar:$RUNTIME/framework/uxdroid-system.jar:$RUNT
 expect() { grep -q -E "$1" "$WORK/out" || fail "$2"; }
 expect "^defaults [0-9]{4}" "default bodies were not bound"
 expect "^rect ff00c000 00000000$" "the rectangle is not where it was drawn"
+# A PNG file decoded through the natives that take a FileDescriptor, and a direct NIO buffer, both of
+# which the host library's JniConstants serves (crates/system/src/file_descriptor.rs).
+expect "^imagedecoder 64x32 ff00c000$" "ImageDecoder did not decode a file"
+expect "^bitmapfactory 64x32 ff00c000$" "BitmapFactory.decodeFileDescriptor did not decode a file"
+expect "^niobuffer 8192 ff00c000$" "Bitmap.copyPixelsToBuffer did not fill a direct buffer"
 expect "^text [0-9]{3}" "no text was drawn"
 expect "^string OK$" "framework-res.apk was not read"
 ABI=x86_64
