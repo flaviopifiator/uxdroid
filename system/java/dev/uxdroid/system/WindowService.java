@@ -3,6 +3,8 @@ package dev.uxdroid.system;
 import android.graphics.Rect;
 import android.os.IBinder;
 import android.view.IWindow;
+import android.view.IWindowFocusObserver;
+import android.view.IWindowId;
 import android.view.IWindowSession;
 import android.view.IWindowSessionCallback;
 import android.view.InputChannel;
@@ -75,6 +77,8 @@ public final class WindowService {
         private final Map<IBinder, InputChannel> inputs = new HashMap<>();
         /** Each window and its last layout parameters and requested size, to lay it out again. */
         private final Map<IBinder, Placed> windows = new HashMap<>();
+        /** Each window's id, which View.getWindowId wraps and AndroidX transitions compare. */
+        private final Map<IBinder, IWindowId> ids = new HashMap<>();
 
         private static final class Placed {
             final IWindow window;
@@ -209,8 +213,28 @@ public final class WindowService {
         /** The frame is already on screen: posting the Surface presented it. */
         public void finishDrawing(IWindow window, SurfaceControl.Transaction postDrawTransaction, int seqId) {}
 
+        /**
+         * The window's id: one token per window for as long as it is added. The display's one
+         * toplevel has the focus, so every window reports it, and focus never moves to notify.
+         */
+        public synchronized IWindowId getWindowId(IBinder window) {
+            return ids.computeIfAbsent(window, key -> new IWindowId.Stub() {
+                @Override
+                public void registerFocusObserver(IWindowFocusObserver observer) {}
+
+                @Override
+                public void unregisterFocusObserver(IWindowFocusObserver observer) {}
+
+                @Override
+                public boolean isFocused() {
+                    return true;
+                }
+            });
+        }
+
         public synchronized void remove(IBinder window) {
             windows.remove(window);
+            ids.remove(window);
             SurfaceControl layer = layers.remove(window);
             if (layer != null) {
                 WindowInput.attach(layer, null);

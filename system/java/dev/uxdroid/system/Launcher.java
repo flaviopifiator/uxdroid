@@ -113,8 +113,73 @@ public final class Launcher {
         // The framework's own switch for devices without GPU rendering: ViewRootImpl then draws in
         // software, through Surface.lockCanvas, which libuxdroid_system.so shows on Wayland.
         android.view.ThreadedRenderer.sRendererEnabled = false;
+        Crashes.install();
         // Prepares the main Looper, attaches through the "activity" service above, then loops forever.
-        ActivityThread.main(new String[0]);
+        try {
+            ActivityThread.main(new String[0]);
+        } catch (Throwable e) {
+            // dalvikvm would hold the exception until every other thread ends, which an app's threads
+            // never do: the handlers run now, as for any other thread, and the process ends even if the
+            // app's handler does not pass the exception on, since nothing runs without the main thread.
+            Thread main = Thread.currentThread();
+            Crashes.log(main, e);
+            try {
+                main.getUncaughtExceptionHandler().uncaughtException(main, e);
+            } finally {
+                Crashes.exit();
+            }
+        }
+    }
+
+    /**
+     * What Android's RuntimeInit does for an exception nothing catches: before any handler, it is
+     * logged as "FATAL EXCEPTION" under AndroidRuntime, then the app's own handlers run, and the last
+     * one in their chain, ours, ends the process. Without it a dead main thread leaves the process
+     * running, unable to draw or answer, with nothing in the log.
+     */
+    static final class Crashes {
+        private static final String TAG = "AndroidRuntime";
+        private static volatile boolean crashing;
+
+        static void install() {
+            Thread.UncaughtExceptionHandler log = (thread, error) -> log(thread, error);
+            // libcore's hook that runs before the thread's handler, which apps cannot replace.
+            try {
+                Thread.class.getMethod("setUncaughtExceptionPreHandler", Thread.UncaughtExceptionHandler.class)
+                        .invoke(null, log);
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("libcore has no Thread.setUncaughtExceptionPreHandler", e);
+            }
+            Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+                try {
+                    log(thread, error); // logs once: here only when the pre-handler did not run
+                } finally {
+                    exit();
+                }
+            });
+        }
+
+        static void exit() {
+            android.os.Process.killProcess(android.os.Process.myPid());
+            System.exit(10);
+        }
+
+        static void log(Thread thread, Throwable error) {
+            if (crashing) return; // a second exception while the first ends the process
+            crashing = true;
+            java.io.StringWriter trace = new java.io.StringWriter();
+            error.printStackTrace(new java.io.PrintWriter(trace));
+            StringBuilder text = new StringBuilder("FATAL EXCEPTION: ").append(thread.getName())
+                    .append("\nProcess: ").append(currentPackage()).append(", PID: ")
+                    .append(android.os.Process.myPid()).append('\n').append(trace);
+            // Line by line, as logcat shows a multi-line message.
+            for (String line : text.toString().split("\n")) android.util.Log.e(TAG, line);
+        }
+
+        private static String currentPackage() {
+            String name = ActivityThread.currentPackageName();
+            return name != null ? name : "?";
+        }
     }
 
     /**

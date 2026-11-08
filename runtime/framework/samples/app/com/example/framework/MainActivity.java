@@ -22,6 +22,12 @@ public class MainActivity extends Activity {
         setContentView(text);
         System.out.println("activity created " + getClass().getName() + " in " + getApplication().getClass().getName()
                 + " text \"" + text.getText() + "\"");
+        // Once attached, the window has an id, as AndroidX transitions expect, and every view in it the same.
+        text.post(() -> {
+            android.view.WindowId id = text.getWindowId();
+            System.out.println(id == null ? "window id null" : "window id present, "
+                    + (id.equals(getWindow().getDecorView().getWindowId()) ? "the same" : "different") + " for the window's views");
+        });
     }
 
     @Override
@@ -34,6 +40,19 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         System.out.println("activity new intent " + getClass().getName() + " " + describe(intent));
+        // An extra crash=<message> throws on the main thread, under a handler of the app's own that
+        // passes the exception on, as apps' crash reporters do.
+        String crash = intent.getStringExtra("crash");
+        if (crash != null) {
+            Thread.UncaughtExceptionHandler next = Thread.getDefaultUncaughtExceptionHandler();
+            Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+                System.out.println("app handler saw " + error.getMessage());
+                if (next != null) next.uncaughtException(thread, error);
+            });
+            getWindow().getDecorView().post(() -> {
+                throw new IllegalStateException(crash);
+            });
+        }
     }
 
     @Override
