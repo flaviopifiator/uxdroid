@@ -391,7 +391,7 @@ stopped com.example.app (process 4242, 2 activities finished)
 | `start` | Hands the intent to the running app, printing `<package> is already running as process <pid>; the intent went to it: <outcome> <activity>`. If the app is not running, starts the installed `<data-dir>/app/<package>/base.apk` in the background, its own session, with its output in the log beside the socket, and returns once it answers. Without options the intent is the launcher's, as a click on the app's icon |
 | `intent` | Sends an intent to the running app, which must name an activity, an action or data |
 | `status` | The process, its data directory, and its activities from bottom to top, `resumed` or `paused` |
-| `stop` | Finishes every activity, and returns once the process has exited |
+| `stop` | Finishes every activity, and returns once the process has exited; when the main thread does not take it within 10 s, the process is killed instead, as Android kills an app that stops answering, with `0 activities finished` |
 | `list` | Each running app: package, followed by `@<profile>` for a profile other than `default`, process and data directory |
 
 `status`, `intent`, `stop` and `list` open a socket only while an instance holds its ownership lock, `<instance>.lock` beside it, so they never start an app whose socket a systemd socket unit holds (see `uxdroid service` below); `start` connects anyway, and that connection is what starts such an app.
