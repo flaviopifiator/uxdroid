@@ -11,9 +11,11 @@
       ["idle"],
       ["tap", "Search PlayTube"],
       ["type", "slash"],
-      ["key", "ENTER"],
-      ["wait", "Slash", 30000],
-      ["shot", "search"]
+      ["wait", "slash guitar solo", 30000],
+      ["shot", "suggestions"],
+      ["tap", "slash guitar solo"],
+      ["idle"],
+      ["shot", "results"]
     ]
   },
   {
