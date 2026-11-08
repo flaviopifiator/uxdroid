@@ -48,6 +48,8 @@ kill -0 "$app" 2>/dev/null || fail "the app exited after its first frame"
 
 # The compositor fades the desktop in, which shifts colors until it finishes.
 pause 2
+# The attached window has one id for all its views, which AndroidX transitions compare.
+expect "^window id present, the same for the window's views$" "the attached window has no window id"
 (cd "$WORK" && weston-screenshooter >"$WORK/shot" 2>&1) || { cat "$WORK/shot"; fail "screenshot"; }
 SHOT=$(ls "$WORK"/wayland-screenshot-*.png | head -1)
 PYTHONDONTWRITEBYTECODE=1 python3 - "$SHOT" <<'EOF' || fail "pixels"

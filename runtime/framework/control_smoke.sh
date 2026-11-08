@@ -17,10 +17,11 @@ export ANDROID_DATA="$WORK/data"
 mkdir -p "$ANDROID_DATA/dalvik-cache/x86_64"
 source /work/runtime/art/test_lib.sh
 start_compositor
-# The app processes, found by their command line: the image has no procps.
+# The app processes, found by their command line: the image has no procps. A process that runs the
+# app takes the package's name as its command line, as Android names app processes.
 launcher_pids() {
     for cmdline in /proc/[0-9]*/cmdline; do
-        tr '\0' ' ' <"$cmdline" 2>/dev/null | grep -q "dalvikvm64 .*dev\.uxdroid\.system\.Launcher" \
+        tr '\0' ' ' <"$cmdline" 2>/dev/null | grep -q -E "dalvikvm64 .*dev\.uxdroid\.system\.Launcher|^$PACKAGE +$" \
             && basename "$(dirname "$cmdline")"
     done
 }
@@ -110,4 +111,18 @@ expect "^started $PACKAGE as process [0-9]+: $PACKAGE/\.DetailActivity, " "start
 logged "^activity created com\.example\.framework\.DetailActivity action android\.intent\.action\.MAIN data null k=v$" \
     "the named activity did not get the intent"
 app stop || fail "stop: exit $?"
-echo "ok: one process per app and data directory; a second launch, start, intents, status, list and stop reach it through its control socket"
+
+# 7. An exception nothing catches on the main thread goes through the app's own handler, is logged as
+# Android logs it, and ends the process, which would otherwise hang with its main thread gone.
+app start --data-dir "$ANDROID_DATA" || fail "start: exit $?"
+CRASHED=$(grep -o -E "process [0-9]+" "$WORK/out" | grep -o -E "[0-9]+")
+logged "first frame posted" "the started app drew no frame"
+app intent --activity .MainActivity --extra crash=deliberate || fail "intent to crash: exit $?"
+for _ in $(seq 200); do kill -0 "$CRASHED" 2>/dev/null || break; pause 0.05; done
+kill -0 "$CRASHED" 2>/dev/null && fail "the process outlived an uncaught exception on its main thread"
+logged "^app handler saw deliberate$" "the app's own handler did not run"
+logged "^E AndroidRuntime: FATAL EXCEPTION: main$" "the crash was not logged"
+logged "^E AndroidRuntime: java\.lang\.IllegalStateException: deliberate$" "the crash's exception was not logged"
+logged "^E AndroidRuntime: Process: com\.example\.framework, PID: $CRASHED$" "the crash does not name its process"
+app status; [ $? -eq 3 ] || fail "status after a crash must exit 3"
+echo "ok: one process per app and data directory; a second launch, start, intents, status, list and stop reach it through its control socket; an uncaught exception ends it"
