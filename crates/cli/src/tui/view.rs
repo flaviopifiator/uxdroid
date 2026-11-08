@@ -130,7 +130,7 @@ fn hint(state: &State) -> String {
                 .to_string()
         }
         (None, View::Installed, _) => {
-            "↑↓ jk move  u update  U update all  d remove  r refresh  Tab next  ? help  q quit"
+            "↑↓ jk move  Enter s start  u update  U update all  d remove  r refresh  Tab next  ? help  q quit"
                 .to_string()
         }
         (None, View::Sources, _) => {
@@ -522,6 +522,7 @@ const HELP: &[(&str, &str)] = &[
     ("1 2 3", "Search, Installed, Sources"),
     ("Enter", "details of the selected app"),
     ("i", "install the selected app"),
+    ("s Enter", "start the selected installed app"),
     ("u / U", "update the selected app / all"),
     ("d", "remove the selected app, after asking"),
     ("r Ctrl-R F5", "refresh the indexes"),

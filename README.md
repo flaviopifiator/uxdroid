@@ -109,7 +109,7 @@ uxdroid list
 uxdroid update                              # every app, from the source it came from
 uxdroid remove net.gsantner.markor
 uxdroid sources add izzy https://apt.izzysoft.de/fdroid/repo --fingerprint <sha256>
-uxdroid tui                                 # the same, as a terminal UI
+uxdroid tui                                 # the same, as a terminal UI that also starts apps
 uxdroid --help                              # every command, under the logo
 ```
 
