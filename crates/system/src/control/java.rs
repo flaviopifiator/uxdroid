@@ -22,6 +22,9 @@ use crate::{Method, java_string, new_string, register, throw};
 
 /// How long a command waits for the main thread, which may be busy drawing or stuck.
 const MAIN_THREAD_WAIT: Duration = Duration::from_secs(10);
+/// How long a stop the main thread never took leaves the answer to reach the caller before the
+/// process ends.
+const ANSWER_GRACE: Duration = Duration::from_millis(300);
 
 /// The instance lock, held until the process ends.
 static INSTANCE: Mutex<Option<File>> = Mutex::new(None);
@@ -36,6 +39,20 @@ struct Queue {
     event: OwnedFd,
     next: AtomicU64,
     closed: AtomicBool,
+    wait: Duration,
+    /// Ends the process when its main thread is stuck and a stop was asked for.
+    end: fn(),
+}
+
+/// What Android does to an app that stops answering: the process is killed, and its activities
+/// get no callbacks.
+fn end_process() {
+    eprintln!(
+        "uxdroid: the main thread did not take stop within {} s, so the process is killed",
+        MAIN_THREAD_WAIT.as_secs()
+    );
+    // SAFETY: signals this process only.
+    unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -68,21 +85,31 @@ impl Handler for Queue {
         if self.closed.load(Ordering::Acquire) {
             return Err(stopping());
         }
+        let stop = matches!(command, Command::Stop);
         let sequence = self.next.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         lock(&self.waiting).insert(sequence, sender);
         lock(&self.pending).push_back((sequence, command));
         self.signal();
-        match receiver.recv_timeout(MAIN_THREAD_WAIT) {
+        match receiver.recv_timeout(self.wait) {
             Ok(answer) => answer,
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
                 lock(&self.waiting).remove(&sequence);
                 lock(&self.pending).retain(|(queued, _)| *queued != sequence);
+                if stop {
+                    // A stuck app could otherwise only be killed by hand.
+                    let end = self.end;
+                    std::thread::spawn(move || {
+                        std::thread::sleep(ANSWER_GRACE);
+                        end();
+                    });
+                    return Ok(serde_json::json!({ "pid": std::process::id(), "finished": 0 }));
+                }
                 Err(Failure::new(
                     protocol::BUSY,
                     &format!(
                         "the app's main thread did not answer within {} s",
-                        MAIN_THREAD_WAIT.as_secs()
+                        self.wait.as_secs()
                     ),
                 ))
             }
@@ -197,6 +224,8 @@ fn start(package: &str) -> Result<jint, String> {
         event,
         next: AtomicU64::new(1),
         closed: AtomicBool::new(false),
+        wait: MAIN_THREAD_WAIT,
+        end: end_process,
     });
     let info = Info {
         package: package.to_string(),
@@ -435,4 +464,59 @@ pub unsafe fn register_natives(env: *mut JNIEnv) -> Result<(), String> {
     ];
     // SAFETY: the table matches the Java declarations.
     unsafe { register(env, c"dev/uxdroid/system/Control", &methods) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static ENDED: AtomicBool = AtomicBool::new(false);
+
+    fn ended() {
+        ENDED.store(true, Ordering::SeqCst);
+    }
+
+    /// A queue whose main Looper never takes a command, as when the main thread is stuck.
+    fn stuck() -> Queue {
+        // SAFETY: makes a new descriptor.
+        let event = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        assert!(event >= 0);
+        Queue {
+            pending: Mutex::default(),
+            waiting: Mutex::default(),
+            // SAFETY: `event` is a descriptor nothing else owns.
+            event: unsafe { OwnedFd::from_raw_fd(event) },
+            next: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
+            wait: Duration::from_millis(50),
+            end: ended,
+        }
+    }
+
+    #[test]
+    fn a_stop_the_stuck_main_thread_never_takes_ends_the_process_after_answering() {
+        let answer = stuck().handle(Command::Stop).expect("stop answers");
+        assert_eq!(answer["pid"], std::process::id());
+        assert_eq!(answer["finished"], 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ENDED.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the process was not ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn other_commands_to_a_stuck_main_thread_are_still_refused_as_busy() {
+        let queue = stuck();
+        let failure = queue
+            .handle(Command::Status)
+            .expect_err("status is refused");
+        assert_eq!(failure.code, protocol::BUSY);
+        assert!(
+            failure.message.contains("did not answer"),
+            "{}",
+            failure.message
+        );
+        assert!(lock(&queue.pending).is_empty());
+    }
 }
