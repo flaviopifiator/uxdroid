@@ -1,6 +1,7 @@
 //! `uxdroid tui`: a terminal UI over the store commands. It searches the cached indexes as the user
-//! types, and installs, updates, removes and changes sources through the same functions as
-//! `uxdroid search`, `install`, `update`, `remove`, `list` and `sources`, run on a worker thread.
+//! types, and installs, updates, removes, changes sources and starts apps through the same
+//! functions as `uxdroid search`, `install`, `update`, `remove`, `list`, `sources` and
+//! `app <package> start`, run on a worker thread.
 
 mod state;
 #[cfg(test)]
@@ -77,7 +78,12 @@ fn run(data: PathBuf) -> std::io::Result<Option<i32>> {
         signal_hook::flag::register_usize(signal, caught.clone(), signal as usize)?;
     }
     let cancel = Arc::new(AtomicBool::new(false));
-    let (jobs, replies) = worker::spawn(data.clone(), worker::http(), cancel.clone());
+    let (jobs, replies) = worker::spawn(
+        data.clone(),
+        worker::http(),
+        worker::control(),
+        cancel.clone(),
+    );
     let mut state = State::new(data, cancel);
     // A panic message printed on the alternate screen would vanish with it, so the terminal is
     // restored before the message is printed. The worker's panic reaches the UI as its last reply

@@ -302,6 +302,9 @@ impl State {
             KeyCode::Home | KeyCode::Char('g') => self.select(0),
             KeyCode::End | KeyCode::Char('G') => self.select(usize::MAX),
             KeyCode::Enter if self.view == View::Search => self.details = !self.details,
+            KeyCode::Enter | KeyCode::Char('s') if self.view == View::Installed => {
+                self.start_selected()
+            }
             KeyCode::Esc => self.details = false,
             KeyCode::Char('i') => self.install(),
             KeyCode::Char('u') => self.update_selected(),
@@ -457,6 +460,14 @@ impl State {
             return self.complain(format!("{package} is not installed: i installs it"));
         }
         self.start(Job::Update(Some(package)));
+    }
+
+    /// Starts the selected installed app, as `uxdroid app <package> start` does.
+    fn start_selected(&mut self) {
+        let Some(package) = self.package() else {
+            return self.complain("select an installed app to start it");
+        };
+        self.start(Job::Start(package));
     }
 
     fn ask_remove(&mut self) {

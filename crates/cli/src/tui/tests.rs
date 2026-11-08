@@ -122,6 +122,8 @@ struct Ui {
     jobs: Sender<Job>,
     replies: Receiver<Reply>,
     transfers: usize,
+    /// The control directory apps started from the UI are reached in, beside `data`.
+    control: PathBuf,
 }
 
 impl Ui {
@@ -134,13 +136,23 @@ impl Ui {
 
     fn with(connect: worker::Connect, data: &Path, width: u16, height: u16) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
-        let (jobs, replies) = worker::spawn(data.to_path_buf(), connect, cancel.clone());
+        let run = data.parent().unwrap().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let control = uxdroid_system::control::control_dir_in(&run).unwrap();
+        let dir = control.clone();
+        let (jobs, replies) = worker::spawn(
+            data.to_path_buf(),
+            connect,
+            Arc::new(move || Ok(dir.clone())),
+            cancel.clone(),
+        );
         let mut ui = Self {
             state: State::new(data.to_path_buf(), cancel),
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
             jobs,
             replies,
             transfers: 0,
+            control,
         };
         ui.settle();
         ui
@@ -443,6 +455,137 @@ fn remove_asks_first_and_keeps_the_app_unless_confirmed() {
     assert!(screen.contains("no app is installed in"), "{screen}");
     assert!(!data.join("data/com.example.notes").exists());
     assert_eq!(Installed::read(&data, "com.example.notes").unwrap(), None);
+}
+
+/// `package` running over `data` on its control socket in `control`, as `uxdroid app` reaches it:
+/// it answers status, takes the intents it is handed, and records each request line.
+fn running(control: &Path, package: &str, data: &Path) -> Arc<Mutex<Vec<String>>> {
+    use std::io::{BufRead, BufReader};
+    let listener =
+        std::os::unix::net::UnixListener::bind(control.join(format!("{package}.sock"))).unwrap();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let log = received.clone();
+    let package = package.to_string();
+    let data = data.to_str().unwrap().to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let mut line = String::new();
+            if BufReader::new(&stream).read_line(&mut line).is_err() {
+                continue;
+            }
+            let result = if line.contains("\"cmd\":\"status\"") {
+                serde_json::json!({"package": package, "pid": 9, "data": data, "activities": []})
+            } else {
+                serde_json::json!({
+                    "outcome": "brought_forward",
+                    "pid": 9,
+                    "activity": format!("{package}/.MainActivity"),
+                })
+            };
+            log.lock().unwrap().push(line);
+            let answer = serde_json::json!({"v": 1, "id": 1, "ok": true, "result": result});
+            let _ = writeln!(&stream, "{answer}");
+        }
+    });
+    received
+}
+
+/// Installs Notes from the repository and shows the Installed view.
+fn installed_notes(name: &str) -> (PathBuf, Ui) {
+    let dir = scratch(name);
+    let data = repository(&dir);
+    let mut ui = Ui::new(&dir, &data, 80, 24);
+    ui.typed("notes");
+    ui.press(KeyCode::Enter);
+    ui.press(KeyCode::Char('i'));
+    ui.settle();
+    ui.press(KeyCode::Char('2'));
+    (data, ui)
+}
+
+#[test]
+fn s_or_enter_starts_the_selected_installed_app_as_app_start_does() {
+    let (data, mut ui) = installed_notes("start");
+    let received = running(&ui.control, "com.example.notes", &data);
+    assert!(ui.screen().contains("Enter s start"));
+
+    for key in [KeyCode::Char('s'), KeyCode::Enter] {
+        ui.press(key);
+        assert!(ui.screen().contains("starting com.example.notes"));
+        ui.settle();
+        let screen = ui.screen();
+        assert!(!ui.state.status.error, "{screen}");
+        assert_eq!(
+            ui.state.status.text,
+            "com.example.notes is already running as process 9; the intent went to it: brought_forward com.example.notes/.MainActivity"
+        );
+        assert!(
+            screen.contains("com.example.notes is already running as process 9"),
+            "{screen}"
+        );
+        // As `uxdroid app <package> start --data-dir <data>`: the running one's data directory is
+        // checked, then the start is handed to it.
+        let lines = std::mem::take(&mut *received.lock().unwrap());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("\"cmd\":\"status\""), "{lines:?}");
+        assert!(lines[1].contains("\"cmd\":\"start\""), "{lines:?}");
+    }
+
+    // The help lists it.
+    ui.press(KeyCode::Char('?'));
+    assert!(ui.screen().contains("start the selected installed app"));
+}
+
+#[test]
+fn starting_reports_the_starts_error_and_needs_an_installed_app() {
+    let (data, mut ui) = installed_notes("start-error");
+    // Another data directory's instance answers the socket: refused as `app start` refuses it.
+    let received = running(&ui.control, "com.example.notes", Path::new("/other/data"));
+    ui.press(KeyCode::Char('s'));
+    ui.settle();
+    let screen = ui.screen();
+    assert!(ui.state.status.error, "{screen}");
+    assert!(
+        screen.contains("error: com.example.notes is already running over /other/data"),
+        "{screen}"
+    );
+    assert_eq!(received.lock().unwrap().len(), 1);
+
+    // With no app installed there is nothing to start.
+    ui.press(KeyCode::Char('d'));
+    ui.press(KeyCode::Char('y'));
+    ui.settle();
+    ui.press(KeyCode::Char('s'));
+    assert!(ui.state.busy.is_none());
+    assert!(
+        ui.screen().contains("select an installed app to start it"),
+        "{}",
+        ui.screen()
+    );
+    assert!(data.is_dir());
+}
+
+#[test]
+fn installed_keys_u_shift_u_and_d_still_update_and_remove() {
+    let (_, mut ui) = installed_notes("installed-keys");
+    ui.press(KeyCode::Char('u'));
+    assert_eq!(ui.state.busy.as_deref(), Some("updating com.example.notes"));
+    ui.settle();
+    ui.press(KeyCode::Char('U'));
+    assert_eq!(
+        ui.state.busy.as_deref(),
+        Some("updating every app installed from a source")
+    );
+    ui.settle();
+    ui.press(KeyCode::Char('d'));
+    assert!(
+        ui.screen()
+            .contains("Remove com.example.notes with its data")
+    );
+    ui.press(KeyCode::Char('n'));
+    assert!(ui.screen().contains("kept com.example.notes"));
+    assert!(ui.state.busy.is_none());
 }
 
 #[test]
@@ -771,7 +914,8 @@ fn a_worker_panic_ends_the_ui_with_its_message_and_the_terminal_restored() {
     let dir = scratch("worker-panic");
     let connect: worker::Connect = Arc::new(|| panic!("a bug in the worker"));
     let cancel = Arc::new(AtomicBool::new(false));
-    let (jobs, replies) = worker::spawn(dir.join("data"), connect, cancel.clone());
+    let (jobs, replies) =
+        worker::spawn(dir.join("data"), connect, worker::control(), cancel.clone());
     let out = Shared::default();
     let result = {
         let _session = Session::start(out.clone(), false).unwrap();

@@ -1,5 +1,5 @@
 //! The thread that does what the terminal UI asks: reading indexes, downloading, installing,
-//! removing and changing sources, through the same functions the commands use. The UI thread only
+//! removing, changing sources and starting apps, through the same functions the commands use. The UI thread only
 //! sends jobs and reads replies, so it never waits on the network or an install.
 
 use std::cell::{Cell, RefCell};
@@ -12,7 +12,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use uxdroid_store::config::Config;
 use uxdroid_store::fetch::{Fetch, Http};
 use uxdroid_store::{App, Permissions, Refresh, Store, Want};
+use uxdroid_system::control::protocol::Intent;
+use uxdroid_system::control::{DEFAULT_PROFILE, control_dir};
 
+use crate::app::{self, Done, Instance};
 use crate::store::{Listed, install_package, list, remove_package, update};
 
 /// Makes the transport each job's store fetches with: HTTP, or files in tests.
@@ -23,6 +26,13 @@ pub(crate) const NAME: &str = "uxdroid-tui-worker";
 
 pub(crate) fn http() -> Connect {
     Arc::new(|| Box::new(Http::new()))
+}
+
+/// Finds the control directory apps started from the UI are reached in: the user's, or one in tests.
+pub(crate) type Control = Arc<dyn Fn() -> Result<PathBuf, String> + Send + Sync>;
+
+pub(crate) fn control() -> Control {
+    Arc::new(control_dir)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +58,8 @@ pub(crate) enum Job {
     RefreshAfter(u64),
     /// Asks Google Play, which has no index to search as the user types, for what was typed.
     Search(String),
+    /// Starts an installed app, or hands the start to it when it runs.
+    Start(String),
 }
 
 impl Job {
@@ -66,6 +78,7 @@ impl Job {
             }
             Job::RefreshAfter(_) => "changing the refresh interval".to_string(),
             Job::Search(text) => format!("asking Google Play for {text}"),
+            Job::Start(package) => format!("starting {package}"),
         }
     }
 }
@@ -97,6 +110,7 @@ pub(crate) enum Reply {
 pub(crate) fn spawn(
     data: PathBuf,
     connect: Connect,
+    control: Control,
     cancel: Arc<AtomicBool>,
 ) -> (Sender<Job>, Receiver<Reply>) {
     let (jobs, inbox) = channel::<Job>();
@@ -107,7 +121,7 @@ pub(crate) fn spawn(
             for job in inbox {
                 cancel.store(false, Ordering::SeqCst);
                 let done = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    perform(&data, &connect, &cancel, &outbox, job)
+                    perform(&data, &connect, &control, &cancel, &outbox, job)
                 }));
                 let reply = match done {
                     Ok(done) => Reply::Done(done),
@@ -174,13 +188,36 @@ fn apps(store: &Store, refresh: Refresh, outbox: &Sender<Reply>) {
     let _ = outbox.send(Reply::Permissions(store.permissions()));
 }
 
+/// Starts `package` as `uxdroid app <package> start --data-dir <data>` does.
+fn start(data: &Path, control: &Control, package: &str) -> Result<String, String> {
+    let app = Instance {
+        package: package.to_string(),
+        profile: DEFAULT_PROFILE.to_string(),
+    };
+    match app::start(
+        &control()?,
+        &app,
+        Intent::default(),
+        Some(data.to_path_buf()),
+        None,
+    )? {
+        Done::Printed(report) => Ok(report),
+        Done::NotRunning(package, _) => Err(format!("{package} is not running")),
+    }
+}
+
 fn perform(
     data: &Path,
     connect: &Connect,
+    control: &Control,
     cancel: &Arc<AtomicBool>,
     outbox: &Sender<Reply>,
     job: Job,
 ) -> Result<String, String> {
+    // A start needs no store.
+    if let Job::Start(package) = &job {
+        return start(data, control, package);
+    }
     let note = |message: &str| {
         let _ = outbox.send(Reply::Note(message.to_string()));
     };
@@ -276,6 +313,7 @@ fn perform(
                 None => Ok(String::new()),
             }
         }
+        Job::Start(_) => unreachable!("a start is done before the store opens"),
         Job::RefreshAfter(hours) => {
             store
                 .change(|config| {
