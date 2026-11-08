@@ -82,6 +82,22 @@ python3 "$TOOLS/assets.py" fonts "$RUNTIME/fonts" "$W/fonts.xml" "$RUNTIME/etc/f
 # Android 16 reads the same families again as its fallback list.
 cp "$RUNTIME/etc/fonts.xml" "$RUNTIME/etc/font_fallback.xml"
 
+# Trusted CAs. Conscrypt reads $ANDROID_ROOT/etc/security/cacerts, one PEM per CA named by its
+# subject's old OpenSSL hash; without it every HTTPS connection an app makes fails with "Trust anchor
+# for certification path not found". The CAs are the build image's Mozilla set from ca-certificates.
+CACERTS="$RUNTIME/etc/security/cacerts"
+rm -rf "$CACERTS"
+mkdir -p "$CACERTS" "$W/ca"
+awk -v dir="$W/ca" '/BEGIN CERTIFICATE/ { n++ } n { print > (dir "/" n ".pem") }' /etc/ssl/certs/ca-certificates.crt
+for pem in "$W"/ca/*.pem; do
+    hash=$(openssl x509 -in "$pem" -noout -subject_hash_old)
+    i=0
+    while [ -e "$CACERTS/$hash.$i" ]; do i=$((i + 1)); done
+    openssl x509 -in "$pem" -out "$CACERTS/$hash.$i"
+done
+[ "$(ls "$CACERTS" | wc -l)" -ge 100 ] || { echo "FAIL: only $(ls "$CACERTS" | wc -l) CAs in $CACERTS"; exit 1; }
+cp /usr/share/doc/ca-certificates/copyright "$RUNTIME/notices/framework/ca-certificates.copyright"
+
 cp "$DL"/notices/* "$RUNTIME/notices/framework/"
 
 # Compile at install time. Verified ahead of time, the framework starts at 38 MiB instead of 119 MiB.
